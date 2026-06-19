@@ -1,0 +1,427 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: oxidenodeclasses.karpenter.oxide.computer
+spec:
+  group: karpenter.oxide.computer
+  names:
+    categories:
+    - karpenter
+    kind: OxideNodeClass
+    listKind: OxideNodeClassList
+    plural: oxidenodeclasses
+    shortNames:
+    - oxidenc
+    - oxidencs
+    - oxnc
+    - oxncs
+    - oxnodeclass
+    - oxnodeclasses
+    singular: oxidenodeclass
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.role
+      name: Role
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OxideNodeClass is the Schema for the OxideNodeClass API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              OxideNodeClassSpec is the top level specification for the Oxide Karpenter Provider.
+              This will contain configuration necessary to launch instances on Oxide.
+            properties:
+              bootDiskSize:
+                anyOf:
+                - type: integer
+                - type: string
+                description: BootDiskSize is the stoage capcity of the boot disk
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              bootstrap:
+                description: |-
+                  Bootstrap selects and configures the mechanism nodes use to join the cluster.
+                  Exactly one provider may be set.
+                properties:
+                  kubeadm:
+                    description: |-
+                      KubeadmBootstrap configures joining nodes with kubeadm. Discovery information is read from the
+                      kube-public/cluster-info ConfigMap and a short-lived bootstrap token is minted per NodeClaim,
+                      so no long-lived join credential needs to be configured here.
+                    properties:
+                      configVersion:
+                        default: kubeadm.k8s.io/v1beta4
+                        description: |-
+                          ConfigVersion is the kubeadm configuration API version used to render the JoinConfiguration.
+                          v1beta4 requires Kubernetes 1.31 or newer.
+                        enum:
+                        - kubeadm.k8s.io/v1beta3
+                        - kubeadm.k8s.io/v1beta4
+                        type: string
+                      tokenTTL:
+                        default: 15m
+                        description: |-
+                          TokenTTL is how long the per-node bootstrap token remains valid. The token only needs to
+                          survive until the node completes TLS bootstrap, so this should stay short.
+                        type: string
+                    type: object
+                  rke2:
+                    properties:
+                      tokenRef:
+                        description: TokenRefSecret references the Secret holding
+                          the long-lived RKE2 agent join token.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        type: object
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one bootstrap provider must be set
+                  rule: '[has(self.rke2), has(self.kubeadm)].exists_one(x, x)'
+              env:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    value:
+                      type: string
+                    valueFrom:
+                      properties:
+                        secretKeyRef:
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          type: object
+                      type: object
+                  type: object
+                type: array
+              imageSelector:
+                description: |-
+                  ImageSelector is used to select an image to launch nodes with.
+                  If multiple images match then the most recently uploaded image is selected.
+                  Selectors are OR'd together, but terms within a selector are AND'd together
+                items:
+                  properties:
+                    id:
+                      description: ID is the exact image UUID
+                      type: string
+                    name:
+                      description: Name is the exact name of an image
+                      type: string
+                    os:
+                      description: OS is the operating system of the image
+                      type: string
+                    project:
+                      description: |-
+                        Project where the image is located.
+                        If the project is not specified, then we query for Silo level images
+                        that are not linked to a project.
+                      type: string
+                    version:
+                      description: Version is the version of the image or OS
+                      type: string
+                  type: object
+                type: array
+              ipPoolSelector:
+                description: IPPoolSelector is used to select IP Pools to allocate
+                  ephemeral IPs from
+                items:
+                  properties:
+                    default:
+                      description: Default is the default IP Pool
+                      type: boolean
+                    id:
+                      description: ID is the exact IP Pool ID
+                      type: string
+                    ipVersion:
+                      description: IPVersion is either v4 or v6
+                      type: string
+                    name:
+                      description: Name is the exact name of an IP Pool
+                      type: string
+                  type: object
+                type: array
+              kubeletArgs:
+                description: |-
+                  KubeletArgs are extra kubelet arguments in "key=value" form applied to launched nodes,
+                  in addition to the args Karpenter requires.
+                items:
+                  type: string
+                type: array
+              server:
+                description: |-
+                  Server is the endpoint nodes use to join the cluster. When empty it is discovered from the
+                  default/kubernetes EndpointSlice. Each bootstrap provider renders the discovered address in
+                  the form it needs, so the port differs by provider: RKE2 joins on the supervisor port (9345)
+                  while kubeadm joins on the kube-apiserver port (6443).
+                type: string
+              sshKeySelector:
+                description: SSHKeySelector is used to select SSH keys that will be
+                  copied to the node
+                items:
+                  properties:
+                    id:
+                      description: ID is the exact SSH Key ID
+                      type: string
+                    name:
+                      description: Name is the exact name of an SSH Key
+                      type: string
+                  type: object
+                type: array
+              subnetSelector:
+                description: |-
+                  SubnetSelector is used to select subnets to launch nodes into.
+                  Multiple subnets can match. Node launches will use subnets with available IP space.
+                items:
+                  properties:
+                    id:
+                      description: ID is the exact subnet ID
+                      type: string
+                    name:
+                      description: Name is the exact name of a subnet
+                      type: string
+                    project:
+                      description: Project where the subnet is located.
+                      type: string
+                    vpcID:
+                      description: VPCID is the exact VPC ID
+                      type: string
+                    vpcName:
+                      description: VPCName is the exact name of the VPC
+                      type: string
+                  type: object
+                type: array
+              userData:
+                description: |-
+                  UserData to be applied to the provisioned nodes.
+                  It must be in the appropriate format based on the machine image in use. Karpenter will merge certain fields into
+                  this UserData to ensure nodes are being provisioned with the correct configuration.
+                type: string
+            type: object
+          status:
+            description: OxideNodeClassStatus contains the resolved state of the OxideNodeClass
+            properties:
+              bootstrap:
+                description: Bootstrap contains resolved state that only applies to
+                  a single bootstrap provider.
+                properties:
+                  kubeadm:
+                    description: KubeadmStatus is the kubeadm discovery information
+                      resolved from kube-public/cluster-info.
+                    properties:
+                      caCertHashes:
+                        description: |-
+                          CACertHashes pin the cluster CA during token-based discovery, in "sha256:<hex>" form over the
+                          CA certificate's SubjectPublicKeyInfo.
+                        items:
+                          type: string
+                        type: array
+                      clusterName:
+                        description: ClusterName is the cluster name advertised by
+                          the cluster-info kubeconfig.
+                        type: string
+                    type: object
+                type: object
+              conditions:
+                description: Conditions contains signals for health and readiness
+                items:
+                  description: Condition aliases the upstream type and adds additional
+                    helper methods
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              images:
+                description: Images contain selected images to use for the boot disk
+                  of launched nodes
+                items:
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    os:
+                      type: string
+                    project:
+                      type: string
+                    timeCreated:
+                      format: date-time
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - id
+                  - name
+                  - os
+                  - project
+                  - timeCreated
+                  - version
+                  type: object
+                type: array
+              ipPools:
+                description: IPPools contain selected IP Pools for ephemeral IP attachment
+                items:
+                  properties:
+                    default:
+                      type: boolean
+                    id:
+                      type: string
+                    ipVersion:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - default
+                  - id
+                  - ipVersion
+                  - name
+                  type: object
+                type: array
+              kubeletArgs:
+                description: KubeletArgs contain user-defined and system default kubelet
+                  args that are applied to launched nodes
+                items:
+                  type: string
+                type: array
+              nodeTaints:
+                description: NodeTaints contain user-defined and system default node
+                  taints that are applied to launched nodes
+                items:
+                  type: string
+                type: array
+              server:
+                description: |-
+                  Server is the user-defined or system discovered endpoint that nodes will use to join the cluster.
+                  It is rendered by the configured bootstrap provider, so its form and port are provider-specific.
+                type: string
+              sshKeys:
+                description: SSHKeys contain selected ssh keys to copy to launched
+                  nodes
+                items:
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - id
+                  - name
+                  type: object
+                type: array
+              subnets:
+                description: Subnets contain selected subnets for launching nodes
+                  into
+                items:
+                  properties:
+                    id:
+                      type: string
+                    ipv4Block:
+                      type: string
+                    ipv6Block:
+                      type: string
+                    name:
+                      type: string
+                    vpcID:
+                      type: string
+                    vpcName:
+                      type: string
+                  required:
+                  - id
+                  - name
+                  - vpcID
+                  - vpcName
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

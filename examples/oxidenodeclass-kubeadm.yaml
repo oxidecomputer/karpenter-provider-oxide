@@ -1,0 +1,22 @@
+apiVersion: karpenter.oxide.computer/v1alpha1
+kind: OxideNodeClass
+metadata:
+  name: kubeadm
+spec:
+  bootDiskSize: 20Gi
+  kubeletArgs:
+    - cloud-provider=external
+  bootstrap:
+    # No join credential is configured here. Discovery information is read from the
+    # kube-public/cluster-info ConfigMap, and a bootstrap token is minted per node with the TTL
+    # below, so a token only exists while a node is actually joining.
+    kubeadm:
+      tokenTTL: 15m
+      # Use kubeadm.k8s.io/v1beta3 on clusters older than Kubernetes 1.31.
+      configVersion: kubeadm.k8s.io/v1beta4
+  imageSelector:
+    - os: ubuntu
+      project: brandon
+  subnetSelector:
+    - project: brandon
+      vpcName: default

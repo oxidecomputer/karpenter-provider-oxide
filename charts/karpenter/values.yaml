@@ -1,0 +1,159 @@
+# -- Overrides the chart's name.
+nameOverride: ""
+# -- Overrides the chart's computed fullname.
+fullnameOverride: ""
+# -- Additional labels to add into metadata.
+additionalLabels: {}
+# -- Additional annotations to add into metadata.
+additionalAnnotations: {}
+# -- Image pull policy for Docker images.
+imagePullPolicy: IfNotPresent
+# -- Image pull secrets for Docker images.
+imagePullSecrets: []
+serviceAccount:
+  # -- Specifies if a ServiceAccount should be created.
+  create: true
+  # -- The name of the ServiceAccount to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+  # -- Additional annotations for the ServiceAccount.
+  annotations: {}
+# -- Specifies additional rules for the core ClusterRole.
+additionalClusterRoleRules: []
+# -- Bootstrap provider configuration. Only enable the providers actually in use: each one is granted
+# its own namespaced Role, so a disabled provider's permissions are never created at all.
+bootstrap:
+  rke2:
+    # -- Enable RBAC for the RKE2 bootstrap provider.
+    enabled: true
+    # -- The Secret holding the RKE2 agent join token. The controller is granted get on this one
+    # Secret by name, so this must match spec.bootstrap.rke2.tokenRef on the OxideNodeClass.
+    tokenSecret:
+      # -- Namespace of the token Secret. Defaults to the release namespace.
+      namespace: ""
+      # -- Name of the token Secret.
+      name: rancher-agent-token
+  kubeadm:
+    # -- Enable RBAC for the kubeadm bootstrap provider. This grants get on the
+    # kube-public/cluster-info ConfigMap and create (but not read) on kube-system Secrets, so that
+    # short-lived bootstrap tokens can be minted per node.
+    enabled: false
+serviceMonitor:
+  # -- Specifies whether a ServiceMonitor should be created.
+  enabled: false
+  # -- Additional labels for the ServiceMonitor.
+  additionalLabels: {}
+  # -- Endpoint configuration for the ServiceMonitor.
+  endpointConfig: {}
+# -- Number of replicas.
+replicas: 1
+# -- The number of old ReplicaSets to retain to allow rollback.
+revisionHistoryLimit: 10
+# -- Strategy for updating the pod.
+strategy:
+  rollingUpdate:
+    maxUnavailable: 1
+# -- Additional labels for the pod.
+podLabels: {}
+# -- Additional annotations for the pod.
+podAnnotations: {}
+podDisruptionBudget:
+  name: karpenter
+  maxUnavailable: 1
+# -- SecurityContext for the pod.
+podSecurityContext:
+  fsGroup: 65536
+# -- PriorityClass name for the pod.
+priorityClassName: system-cluster-critical
+# -- Override the default termination grace period for the pod.
+terminationGracePeriodSeconds:
+# -- Bind the pod to the host network. This is required when using a custom CNI.
+hostNetwork: false
+# -- Configure the DNS Policy for the pod.
+dnsPolicy: Default
+# -- Configure DNS Config for the pod.
+dnsConfig: {}
+# -- Node selectors to schedule the pod to nodes with labels.
+nodeSelector:
+  kubernetes.io/os: linux
+# -- Affinity rules for scheduling the pod. If an explicit label selector is not provided for pod
+# affinity or pod anti-affinity one will be created from the pod selector labels.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: karpenter.sh/nodepool
+              operator: DoesNotExist
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: "kubernetes.io/hostname"
+# -- Topology spread constraints to increase the controller resilience by distributing pods across
+# the cluster zones. If an explicit label selector is not provided one will be created from the pod
+# selector labels.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+# -- Tolerations to allow the pod to be scheduled to nodes with taints.
+tolerations:
+  - key: CriticalAddonsOnly
+    operator: Exists
+# -- Additional volumes for the pod.
+extraVolumes: []
+controller:
+  image:
+    # -- Repository path to the controller image.
+    repository: ""
+    # -- Tag of the controller image.
+    tag: ""
+    # -- SHA256 digest of the controller image.
+    digest: ""
+  # -- Additional environment variables for the controller pod.
+  env: []
+  envFrom: []
+  # -- Resources for the controller pod.
+  resources: {}
+  # -- Additional volumeMounts for the controller pod.
+  extraVolumeMounts: []
+  metrics:
+    # -- The container port to use for metrics.
+    port: 8080
+  healthProbe:
+    # -- The container port to use for http health probe.
+    port: 8081
+# -- Global log level, defaults to 'info'.
+logLevel: info
+# -- Global settings to configure Karpenter.
+settings:
+  # -- Oxide API configuration.
+  oxide:
+    # -- URL of the Oxide API, for example https://oxide.sys.example.com.
+    host: ""
+    # -- Oxide project that Karpenter provisions instances into.
+    project: ""
+    # -- Secret in the release namespace holding the Oxide API token. The token is referenced rather
+    # than templated so it is never written into the Helm release.
+    tokenSecret:
+      name: oxide-api-token
+      key: token
+  # -- The maximum length of a batch window. The longer this is, the more pods we can consider for
+  # provisioning at one time which usually results in fewer but larger nodes.
+  batchMaxDuration: 10s
+  # -- The maximum amount of time with no new pending pods that if exceeded ends the current batching
+  # window.
+  batchIdleDuration: 1s
+  # -- How the Karpenter scheduler should treat preferences. Can be one of 'Ignore' and 'Respect'.
+  preferencePolicy: Respect
+  # -- How the Karpenter scheduler treats min values. Options are 'Strict' and 'BestEffort'.
+  minValuesPolicy: Strict
+  # -- Feature gate configuration values.
+  featureGates:
+    # -- spotToSpotConsolidation is ALPHA and is disabled by default.
+    spotToSpotConsolidation: false
+    # -- nodeRepair is ALPHA and is disabled by default.
+    nodeRepair: false
+    # -- staticCapacity is ALPHA and is disabled by default.
+    staticCapacity: false
+    # -- nodeOverlay is ALPHA and is disabled by default.
+    nodeOverlay: false

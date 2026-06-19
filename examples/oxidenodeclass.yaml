@@ -1,0 +1,23 @@
+apiVersion: karpenter.oxide.computer/v1alpha1
+kind: OxideNodeClass
+metadata:
+  name: default
+spec:
+  bootDiskSize: 20Gi
+  # Shared by every bootstrap provider. Leave server unset to discover the kube-apiserver from the
+  # default/kubernetes EndpointSlice; each provider renders it with the port it joins on.
+  kubeletArgs:
+    - cloud-provider=external
+  bootstrap:
+    rke2:
+      tokenRef:
+        key: token
+        name: rancher-agent-token
+        namespace: karpenter
+  imageSelector:
+    - name: rke2-ubuntu-1780929039
+      os: ubuntu
+      project: brandon
+  subnetSelector:
+    - project: brandon
+      vpcName: default
