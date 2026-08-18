@@ -6,7 +6,7 @@ VERSION ?= $(shell git describe --tags --always | sed -e 's/^v//')
 
 # Image URL to use all building/pushing image targets
 IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter
-HELM_OCI_REPO ?= $(IMAGE_REPO)/helm-charts
+HELM_OCI_REPO ?= ghcr.io/oxidecomputer/helm-charts
 IMAGE_TAG ?= dev
 IMG ?= $(IMAGE_REPO):$(IMAGE_TAG)
 KO_DOCKER_REPO ?= $(IMAGE_REPO)

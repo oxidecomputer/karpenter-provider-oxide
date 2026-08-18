@@ -9,7 +9,7 @@ set.
 ### Install Karpenter CRDs (NodeClaim, NodePool, NodeOverlay, OxideNodeClass)
 
 ```
-helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter-crd
+helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/helm-charts/karpenter-crd
 ```
 
 ### Add the Oxide API Token Secret
@@ -24,7 +24,7 @@ kubectl create secret --namespace kube-system generic oxide-api-token --from-lit
 ### Install the Controller
 
 ```
-helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter \
+helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter \
   --namespace kube-system \
   --set settings.oxide.host=${OXIDE_HOST} \
   --set settings.oxide.project=${OXIDE_PROJECT}
@@ -268,7 +268,7 @@ local snapshot release. CI additionally fails if any of those steps leave the wo
 Tag the commit you are releasing with the semver release version (i.e. v1.0.9). A GitHub Actions
 workflow will kick off that performs the release using [goreleaser](https://goreleaser.com): multi-arch
 images are pushed to `ghcr.io/oxidecomputer/karpenter`, both charts are pushed to
-`oci://ghcr.io/oxidecomputer/karpenter/helm-charts` at the release version, and a GitHub release is
+`oci://ghcr.io/oxidecomputer/helm-charts` at the release version, and a GitHub release is
 created.
 
 ```
