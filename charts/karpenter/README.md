@@ -11,7 +11,7 @@ A Helm chart for the Karpenter Oxide provider controller.
 To install the chart with the release name `karpenter`:
 
 ```console
-helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter \
+helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter \
   --namespace kube-system \
   --set settings.oxide.host=${OXIDE_HOST} \
   --set settings.oxide.project=${OXIDE_PROJECT}

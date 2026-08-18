@@ -11,7 +11,7 @@ A Helm chart for the Karpenter Oxide provider Custom Resource Definitions (CRDs)
 To install the chart with the release name `karpenter-crds`:
 
 ```console
-helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter-crd
+helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/helm-charts/karpenter-crd
 ```
 
 ## Source Code
