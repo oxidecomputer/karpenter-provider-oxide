@@ -137,6 +137,17 @@ settings:
     tokenSecret:
       name: oxide-api-token
       key: token
+  # -- Silo quota configuration. Constrains the instance types Karpenter offers to those the silo has
+  # quota headroom for, so the scheduler does not pick a shape the API will refuse.
+  quota:
+    # -- Enable silo quota awareness. This reads /v1/utilization, which is silo-scoped and needs no
+    # permissions beyond launching instances, so it is on by default. If the read fails, instance
+    # types are left unconstrained and a launch that exceeds the quota fails at the API instead;
+    # provisioning is never blocked by an unreadable quota.
+    enabled: true
+    # -- How often the silo's quota is re-read. This is a single API call, and what it measures changes
+    # whenever anything in the silo starts or stops.
+    refreshPeriod: 1m
   # -- Sled inventory configuration. Records which physical sled each node landed on, as labels and
   # annotations on the Node and NodeClaim. This is observability only: nothing in the provider reads
   # it, and provisioning is unaffected whether it is enabled, disabled, or failing.

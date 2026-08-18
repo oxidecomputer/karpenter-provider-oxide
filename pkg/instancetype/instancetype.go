@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
@@ -43,12 +45,37 @@ var (
 type Provider struct {
 	mu            sync.Mutex
 	instanceTypes []*cloudprovider.InstanceType
-	// generation is the unavailable offering generation instanceTypes was built against, which is
-	// what makes the list stale.
-	generation uint64
+	// generation is the combined unavailable-offering and quota generation instanceTypes was built
+	// against, which is what makes the list stale.
+	generation generation
 	built      bool
 
 	unavailable *UnavailableOfferings
+	// quotas is the silo's quota, or nil when quota awareness is switched off. It is consulted when
+	// offerings are built so that a shape the silo is not entitled to is never offered in the first
+	// place, rather than offered, launched, and refused.
+	quotas QuotaProvider
+}
+
+// QuotaProvider is the silo quota this provider constrains its offerings by. It is an interface so
+// that the instance type provider does not depend on how the quota is fetched, and so that quota
+// awareness can be left out entirely by passing nil.
+type QuotaProvider interface {
+	// Quota returns the current quota, or an error if it has never been read. An error means "do not
+	// constrain": a quota that cannot be read must not stop nodes from launching.
+	Quota() (utilization.Quota, error)
+	// Generation changes whenever the quota does.
+	Generation() uint64
+	// Refresh re-reads the quota. force bypasses the provider's own rate limit floor; callers reacting
+	// to a refused launch pass false so that a burst of refusals collapses into one read.
+	Refresh(ctx context.Context, force bool) (bool, error)
+}
+
+// generation is the pair of counters the built instance type list depends on. Both move
+// independently, so staleness is only correctly detected by comparing them together.
+type generation struct {
+	unavailable uint64
+	quota       uint64
 }
 
 type Specs struct {
@@ -56,9 +83,12 @@ type Specs struct {
 	MemInGiB int
 }
 
-func NewProvider() *Provider {
+// NewProvider builds an instance type provider. quotas may be nil, in which case offerings are not
+// constrained by the silo's quota.
+func NewProvider(quotas QuotaProvider) *Provider {
 	return &Provider{
 		unavailable: NewUnavailableOfferings(),
+		quotas:      quotas,
 	}
 }
 
@@ -95,32 +125,104 @@ func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) 
 }
 
 // MarkUnavailable takes a shape, and every shape at least as large, out of consideration until the
-// entry expires. It is called when the rack refuses to place an instance of that shape.
-func (i *Provider) MarkUnavailable(ctx context.Context, specs Specs) {
-	i.unavailable.Mark(ctx, specs)
+// entry expires. It is called when a launch of that shape is refused, with the reason the refusal was
+// diagnosed as.
+func (i *Provider) MarkUnavailable(ctx context.Context, specs Specs, reason Reason) {
+	i.unavailable.Mark(ctx, specs, reason)
 }
 
-// IsUnavailable reports whether a shape is currently ruled out by an insufficient capacity error.
-func (i *Provider) IsUnavailable(specs Specs) bool {
-	return i.unavailable.IsUnavailable(specs)
+// IsUnavailable reports whether a shape is currently ruled out, and why.
+//
+// A shape is ruled out either because a launch of it was refused recently, or because the silo's
+// quota has no room for it. The quota is checked live rather than through the cache so that raising a
+// quota takes effect on the next refresh instead of waiting out a TTL.
+func (i *Provider) IsUnavailable(specs Specs) (bool, Reason) {
+	if unavailable, reason := i.unavailable.IsUnavailable(specs); unavailable {
+		return true, reason
+	}
+	quota, err := i.quota()
+	if err != nil {
+		return false, ""
+	}
+	if admits, _ := quota.Admits(requestFor(specs)); !admits {
+		return true, ReasonQuota
+	}
+	return false, ""
 }
 
-// InstanceTypes returns every instance type, with the offerings of the shapes the rack has recently
-// refused to place marked unavailable so scheduling passes over them.
+// Quota returns the silo's quota, for callers that need to explain a refusal in terms of it. The
+// error is utilization.ErrNoSnapshot when the quota is unknown or quota awareness is off.
+func (i *Provider) Quota() (utilization.Quota, error) {
+	return i.quota()
+}
+
+// RefreshQuota re-reads the silo's quota, for callers that have just learned the snapshot was wrong.
+//
+// A launch refused for quota is direct evidence that the headroom is smaller than the last read said,
+// usually because a concurrent launch consumed it. Re-reading turns that one failure into an accurate
+// picture for every subsequent decision, rather than letting the rest of the burst fail the same way.
+// Errors are swallowed: the caller is already returning a failure and a stale quota is what it
+// currently has either way.
+func (i *Provider) RefreshQuota(ctx context.Context) {
+	if i.quotas == nil {
+		return
+	}
+	if _, err := i.quotas.Refresh(ctx, false); err != nil {
+		log.FromContext(ctx).V(1).Info(
+			"unable to re-read the silo quota after a refused launch",
+			"reason", err.Error(),
+		)
+	}
+}
+
+func (i *Provider) quota() (utilization.Quota, error) {
+	if i.quotas == nil {
+		return utilization.Quota{}, utilization.ErrNoSnapshot
+	}
+	return i.quotas.Quota()
+}
+
+// requestFor is what launching one instance of this shape adds to the silo's provisioned CPU and
+// memory.
+//
+// Storage is deliberately left at zero. The boot disk size comes from the OxideNodeClass rather than
+// the shape, so it is not knowable here, and claiming zero storage is the honest answer for a
+// question about an instance type rather than about a particular launch. The storage quota is checked
+// at launch time, where the disk size is known.
+func requestFor(specs Specs) utilization.Request {
+	return utilization.Request{
+		CPUs:   int64(specs.Ncpus),
+		Memory: uint64(specs.MemInGiB) * GiB,
+	}
+}
+
+// InstanceTypes returns every instance type, with the offerings of shapes that cannot currently be
+// launched marked unavailable so scheduling passes over them.
+//
+// A shape is unavailable either because a launch of it was recently refused, or because the silo's
+// quota has no room for it. The second is the reason to read the quota at all: an unconstrained list
+// offers the scheduler shapes up to a whole sled, and a silo entitled to 32 vCPUs would otherwise
+// have Karpenter confidently pick a 256 vCPU node, create a NodeClaim, fail, and delete it.
 //
 // The list is rebuilt rather than updated in place, since the one already returned is read
-// concurrently by the scheduler. Rebuilding only happens when the set of unavailable shapes has
+// concurrently by the scheduler. Rebuilding only happens when the unavailable set or the quota has
 // actually changed, so the steady state is a cache hit.
 func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	generation := i.unavailable.Generation()
-	if i.built && i.generation == generation {
+	current := generation{unavailable: i.unavailable.Generation()}
+	if i.quotas != nil {
+		current.quota = i.quotas.Generation()
+	}
+	if i.built && i.generation == current {
 		return i.instanceTypes
 	}
 
 	unavailable := i.unavailable.Snapshot()
+	// Read once for the whole build rather than per shape. There are thousands of shapes and they all
+	// have to be judged against the same quota, or the list is internally inconsistent.
+	quota, quotaErr := i.quota()
 	var instanceTypes []*cloudprovider.InstanceType
 	for cpus := 1; cpus <= maxSledCPUs; cpus++ {
 		for _, memRatio := range memRatios {
@@ -131,6 +233,15 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 				corev1.ResourcePods:   *resource.NewQuantity(int64(110), resource.DecimalSI),
 			}
 			instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
+			specs := Specs{Ncpus: cpus, MemInGiB: mem}
+			refused, _ := covered(unavailable, specs)
+			// A quota that could not be read constrains nothing. Failing open here is deliberate: the
+			// alternative is that a permissions problem or an API blip stops the cluster from scaling.
+			overQuota := false
+			if quotaErr == nil {
+				admits, _ := quota.Admits(requestFor(specs))
+				overQuota = !admits
+			}
 			if mem <= maxSledMemGiB {
 				instanceTypes = append(instanceTypes, &cloudprovider.InstanceType{
 					Name:     fmt.Sprintf("%d-%d", cpus, mem),
@@ -171,7 +282,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 					},
 					Offerings: cloudprovider.Offerings{
 						&cloudprovider.Offering{
-							Available: !covered(unavailable, Specs{Ncpus: cpus, MemInGiB: mem}),
+							Available: !refused && !overQuota,
 							Requirements: scheduling.Requirements{
 								corev1.LabelTopologyZone: scheduling.NewRequirement(
 									corev1.LabelTopologyZone,
@@ -191,7 +302,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		}
 	}
 	i.instanceTypes = instanceTypes
-	i.generation = generation
+	i.generation = current
 	i.built = true
 	return instanceTypes
 }

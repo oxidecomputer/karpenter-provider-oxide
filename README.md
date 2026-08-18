@@ -218,6 +218,78 @@ spec:
 EOF
 ```
 
+## Silo Quota
+
+A silo has a quota — vCPUs, memory and storage it is entitled to — separate from whether the rack has
+room. Karpenter reads it from `/v1/utilization` and only offers the scheduler instance types the silo
+can actually launch.
+
+This is on by default and needs no extra permissions: a silo can read its own utilization, so any
+token that can create instances can read this. Turn it off with
+`--set settings.quota.enabled=false`.
+
+Without it, the scheduler is offered every shape up to a whole sled. A silo entitled to 16 vCPUs would
+have Karpenter confidently pick a 256 vCPU node, create a NodeClaim, fail at the API, delete the
+NodeClaim, and try again — burning a full launch attempt on a decision that was knowable up front.
+
+### Why the Quota Also Fixes the Error Message
+
+The Oxide API reports a silo quota with no room and a rack with no sled available **identically**,
+both as `InsufficientCapacity`. There is no error code that distinguishes them. So having the quota on
+hand is what makes a refusal explainable: given the shape that was refused and the quota headroom at
+the time, the provider decides which limit was actually binding and says so.
+
+A quota refusal reads like this, on the NodeClaim and in the events:
+
+```
+the silo's cpus quota has no room for this node: it needs 32 vCPUs, and 48 vCPUs of the
+64 vCPUs quota is already provisioned, leaving 16 vCPUs
+```
+
+versus a rack refusal, which stays as-is: the rack has no sled with room. The distinction matters
+because they need different responses — a quota needs an administrator, a full rack needs waiting or
+smaller pods.
+
+### Storage Is Checked Later Than CPU and Memory
+
+CPU and memory are properties of the instance type, so they are folded into offerings and the scheduler
+never picks an oversized shape. Storage is not: boot disk size comes from `spec.bootDiskSize` on the
+OxideNodeClass, so two nodes of identical shape can consume different storage quota. It is therefore
+checked at launch time, immediately before the instance is created, and produces the same style of
+error:
+
+```
+the silo's storage quota has no room for this node: it needs 200 GiB, and 900 GiB of the
+1024 GiB quota is already provisioned, leaving 124 GiB
+```
+
+Because a storage quota refuses every shape equally, this does **not** mark the shape unavailable —
+there is no smaller instance type that would help, and saying otherwise about the shape would be
+untrue.
+
+### Interaction With the Unavailable Cache
+
+The cache of recently-refused shapes now records *why* each shape is out, `InsufficientCapacity` or
+`QuotaExceeded`. Both cover every shape at least as large in both dimensions, since a limit that
+refuses 8 vCPUs and 16 GiB also refuses 16 vCPUs and 32 GiB. When both reasons cover a shape, quota is
+reported: rack capacity is transient and Karpenter retries into it, whereas a quota keeps refusing
+until somebody changes it.
+
+Quota-derived unavailability is not only reactive. It is recomputed from each utilization read, so
+raising a quota takes effect on the next refresh (`settings.quota.refreshPeriod`, default `1m`) rather
+than waiting out a cache TTL.
+
+### Failure Behavior
+
+An unreadable quota constrains nothing. If `/v1/utilization` fails, the controller logs it once, every
+instance type stays available, and a launch that exceeds the quota is refused by the API and reported
+as an ordinary capacity error. That is the same behavior as `settings.quota.enabled=false`, which is
+the point: a failed read must not stop a cluster from scaling.
+
+The quota is a filter, not a lock. Concurrent launches all read the same snapshot, so a burst can still
+overshoot and have the API refuse the tail of it. Those refusals are diagnosed against the quota,
+marked, and trigger a re-read, so the cluster converges rather than looping.
+
 ## Sled Inventory (Optional)
 
 Karpenter asks the Oxide API for an instance of a given size; the provision saga decides which

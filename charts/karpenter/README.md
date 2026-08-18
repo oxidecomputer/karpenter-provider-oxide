@@ -77,7 +77,7 @@ The CRDs live in the separate `karpenter-crd` chart and must be installed first.
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"inventory":{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"},"minValuesPolicy":"Strict","oxide":{"host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"inventory":{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"},"minValuesPolicy":"Strict","oxide":{"host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","quota":{"enabled":true,"refreshPeriod":"1m"}}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. The longer this is, the more pods we can consider for provisioning at one time which usually results in fewer but larger nodes. |
 | settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false}` | Feature gate configuration values. |
@@ -95,6 +95,9 @@ The CRDs live in the separate `karpenter-crd` chart and must be installed first.
 | settings.oxide.project | string | `""` | Oxide project that Karpenter provisions instances into. |
 | settings.oxide.tokenSecret | object | `{"key":"token","name":"oxide-api-token"}` | Secret in the release namespace holding the Oxide API token. The token is referenced rather than templated so it is never written into the Helm release. |
 | settings.preferencePolicy | string | `"Respect"` | How the Karpenter scheduler should treat preferences. Can be one of 'Ignore' and 'Respect'. |
+| settings.quota | object | `{"enabled":true,"refreshPeriod":"1m"}` | Silo quota configuration. Constrains the instance types Karpenter offers to those the silo has quota headroom for, so the scheduler does not pick a shape the API will refuse. |
+| settings.quota.enabled | bool | `true` | Enable silo quota awareness. This reads /v1/utilization, which is silo-scoped and needs no permissions beyond launching instances, so it is on by default. If the read fails, instance types are left unconstrained and a launch that exceeds the quota fails at the API instead; provisioning is never blocked by an unreadable quota. |
+| settings.quota.refreshPeriod | string | `"1m"` | How often the silo's quota is re-read. This is a single API call, and what it measures changes whenever anything in the silo starts or stops. |
 | strategy | object | `{"rollingUpdate":{"maxUnavailable":1}}` | Strategy for updating the pod. |
 | terminationGracePeriodSeconds | string | `nil` | Override the default termination grace period for the pod. |
 | tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"}]` | Tolerations to allow the pod to be scheduled to nodes with taints. |

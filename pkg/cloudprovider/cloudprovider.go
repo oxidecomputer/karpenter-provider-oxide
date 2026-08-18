@@ -15,6 +15,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
@@ -106,21 +107,29 @@ func (c *OxideCloudProvider) Create(
 		candidates = req.Values
 	}
 
-	// Shapes the rack has recently refused to place are dropped here as well as from the offerings
-	// the scheduler sees. The NodeClaim carries the requirements it was built with, so one that was
-	// already in flight when a shape was marked can still ask for it.
+	// Shapes that cannot be launched are dropped here as well as from the offerings the scheduler
+	// sees. The NodeClaim carries the requirements it was built with, so one that was already in
+	// flight when a shape became unavailable can still ask for it.
+	//
+	// The reason is kept so the error below can say which limit was hit. Quota wins when both apply,
+	// because it is the one an operator can do something about.
+	blockedBy := instancetype.Reason("")
 	available := lo.Filter(candidates, func(candidate string, _ int) bool {
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
 		if err != nil {
 			return false
 		}
-		return !c.instanceTypeProvider.IsUnavailable(specs)
+		unavailable, reason := c.instanceTypeProvider.IsUnavailable(specs)
+		if unavailable && (blockedBy == "" || reason == instancetype.ReasonQuota) {
+			blockedBy = reason
+		}
+		return !unavailable
 	})
 
 	if len(candidates) > 0 && len(available) == 0 {
-		return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf(
-			"every instance type the NodeClaim can use was recently refused for insufficient capacity",
-		))
+		return nil, cloudprovider.NewInsufficientCapacityError(
+			c.noCandidatesError(candidates, blockedBy),
+		)
 	}
 
 	minInstanceType := ""
@@ -150,6 +159,29 @@ func (c *OxideCloudProvider) Create(
 	if err != nil {
 		return nil, fmt.Errorf("invalid instance type: %w", err)
 	}
+	// Checked before anything is created, and before a bootstrapper mints a join credential the
+	// launch would waste. This is the only place the boot disk is known, so it is the only place the
+	// storage quota can be checked at all: disk size comes from the OxideNodeClass, not the shape, so
+	// it cannot be folded into an instance type's offerings the way CPU and memory are.
+	request := utilization.Request{
+		CPUs:    int64(instanceType.Ncpus),
+		Memory:  uint64(instanceType.MemInGiB) * GiB,
+		Storage: uint64(nodeClass.Spec.BootDiskSize.Value()),
+	}
+	if quota, err := c.instanceTypeProvider.Quota(); err == nil {
+		if admits, resource := quota.Admits(request); !admits {
+			// Only the shape's own dimensions are worth marking. A storage quota refuses every shape
+			// equally, so taking this one and everything larger out of consideration would say something
+			// untrue about the shape and would not help the next attempt find a smaller one that fits.
+			if resource != utilization.ResourceStorage {
+				c.instanceTypeProvider.MarkUnavailable(ctx, instanceType, instancetype.ReasonQuota)
+			}
+			return nil, cloudprovider.NewInsufficientCapacityError(
+				fmt.Errorf("%s", quota.Explain(request, resource)),
+			)
+		}
+	}
+
 	name := InstanceNamePrefix + nodeClaim.Name
 	subnet := nodeClass.Status.Subnets[rand.IntN(len(nodeClass.Status.Subnets))]
 
@@ -231,10 +263,20 @@ func (c *OxideCloudProvider) Create(
 		// reschedules its pods. Without this the NodeClaim sits around holding a launch that the
 		// rack cannot satisfy until the 15 minute registration timeout expires.
 		if errors.Is(err, instance.ErrInsufficientCapacity) {
+			// The API reports a quota that has no room and a rack that has no room identically, so the
+			// two are told apart here by asking whether the quota would have allowed this launch. The
+			// quota was checked above, but a concurrent launch or a lowered quota can have consumed the
+			// headroom since, which is exactly the case worth naming rather than blaming the rack for.
+			reason, diagnosis := c.diagnoseRefusal(request, err)
 			// Rescheduling only helps if it lands somewhere else, so this shape and everything
-			// larger comes out of consideration while the rack stays this full.
-			c.instanceTypeProvider.MarkUnavailable(ctx, instanceType)
-			return nil, cloudprovider.NewInsufficientCapacityError(err)
+			// larger comes out of consideration while the limit holds.
+			c.instanceTypeProvider.MarkUnavailable(ctx, instanceType, reason)
+			if reason == instancetype.ReasonQuota {
+				// Direct evidence that the snapshot overstated the headroom. Re-reading now means the rest
+				// of an in-flight burst is judged against the truth instead of failing the same way.
+				c.instanceTypeProvider.RefreshQuota(ctx)
+			}
+			return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
 		}
 		return nil, err
 	}
@@ -404,6 +446,96 @@ func (c *OxideCloudProvider) IsDrifted(
 	*karpcorev1.NodeClaim,
 ) (cloudprovider.DriftReason, error) {
 	return "", nil
+}
+
+// noCandidatesError explains that every instance type the NodeClaim could have used is currently
+// unavailable, in terms of whichever limit ruled them out.
+//
+// This is the message that surfaces on the NodeClaim and in the events an operator reads when nothing
+// is scaling up, so it is worth the effort of being specific: "the silo's cpus quota has no room"
+// points at an administrator, whereas "the rack has no room" points at waiting or at smaller pods.
+func (c *OxideCloudProvider) noCandidatesError(
+	candidates []string,
+	reason instancetype.Reason,
+) error {
+	if reason != instancetype.ReasonQuota {
+		return fmt.Errorf(
+			"all %d instance types the NodeClaim can use were recently refused for insufficient capacity",
+			len(candidates),
+		)
+	}
+
+	quota, err := c.instanceTypeProvider.Quota()
+	if err != nil {
+		return fmt.Errorf(
+			"all %d instance types the NodeClaim can use exceed the silo's quota",
+			len(candidates),
+		)
+	}
+	// Reported against the smallest candidate, since that is the one whose failure to fit actually
+	// establishes that none of them do.
+	smallest := smallestSpecs(candidates)
+	request := utilization.Request{
+		CPUs:   int64(smallest.Ncpus),
+		Memory: uint64(smallest.MemInGiB) * GiB,
+	}
+	_, resource := quota.Admits(request)
+	if resource == "" {
+		return fmt.Errorf(
+			"all %d instance types the NodeClaim can use exceed the silo's quota",
+			len(candidates),
+		)
+	}
+	return fmt.Errorf(
+		"none of the %d instance types the NodeClaim can use fit in the silo's quota: %s",
+		len(candidates),
+		quota.Explain(request, resource),
+	)
+}
+
+// diagnoseRefusal decides whether a refused launch was the silo's quota or the rack's capacity, and
+// returns the reason to record along with the error to report.
+//
+// The API does not distinguish them, so this asks the question the API answers implicitly: if the
+// quota had no room for this request, the quota is the binding constraint and the rack never got a
+// say. An unknown quota falls back to capacity, which is both the more common cause and the
+// conservative guess, since it expires from the unavailable cache on its own.
+func (c *OxideCloudProvider) diagnoseRefusal(
+	request utilization.Request,
+	cause error,
+) (instancetype.Reason, error) {
+	quota, err := c.instanceTypeProvider.Quota()
+	if err != nil {
+		return instancetype.ReasonCapacity, cause
+	}
+	admits, resource := quota.Admits(request)
+	if admits {
+		return instancetype.ReasonCapacity, cause
+	}
+	return instancetype.ReasonQuota, fmt.Errorf(
+		"%s, so the launch was refused: %w",
+		quota.Explain(request, resource),
+		cause,
+	)
+}
+
+// smallestSpecs returns the smallest shape among instance type names, by CPU and then memory.
+// Unparseable names are skipped rather than failing the caller, which is only assembling an error
+// message.
+func smallestSpecs(candidates []string) instancetype.Specs {
+	smallest := instancetype.Specs{}
+	for _, candidate := range candidates {
+		specs, err := instancetype.InstanceTypeToSpecs(candidate)
+		if err != nil {
+			continue
+		}
+		if smallest.Ncpus == 0 ||
+			specs.Ncpus < smallest.Ncpus ||
+			(specs.Ncpus == smallest.Ncpus && specs.MemInGiB < smallest.MemInGiB) {
+			smallest = specs
+		}
+	}
+	return smallest
 }
 
 // RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter

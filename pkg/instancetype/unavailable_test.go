@@ -7,7 +7,7 @@ import (
 
 func TestUnavailableOfferingsCoversLargerShapes(t *testing.T) {
 	u := NewUnavailableOfferings()
-	u.Mark(context.Background(), Specs{Ncpus: 8, MemInGiB: 16})
+	u.Mark(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	for _, tc := range []struct {
 		specs Specs
@@ -20,7 +20,7 @@ func TestUnavailableOfferingsCoversLargerShapes(t *testing.T) {
 		{Specs{Ncpus: 16, MemInGiB: 8}, false}, // more cpus but less memory
 		{Specs{Ncpus: 1, MemInGiB: 2}, false},  // smaller in both
 	} {
-		if got := u.IsUnavailable(tc.specs); got != tc.want {
+		if got, _ := u.IsUnavailable(tc.specs); got != tc.want {
 			t.Errorf("IsUnavailable(%d cpus, %d GiB) = %v, want %v",
 				tc.specs.Ncpus, tc.specs.MemInGiB, got, tc.want)
 		}
@@ -29,19 +29,19 @@ func TestUnavailableOfferingsCoversLargerShapes(t *testing.T) {
 
 func TestUnavailableOfferingsDropsSubsumedEntries(t *testing.T) {
 	u := NewUnavailableOfferings()
-	u.Mark(context.Background(), Specs{Ncpus: 16, MemInGiB: 32})
-	u.Mark(context.Background(), Specs{Ncpus: 8, MemInGiB: 16})
+	u.Mark(context.Background(), Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	u.Mark(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	if got := len(u.Snapshot()); got != 1 {
 		t.Fatalf("snapshot has %d entries, want 1", got)
 	}
-	if !u.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}) {
+	if unavailable, _ := u.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); !unavailable {
 		t.Error("the subsumed shape is no longer covered")
 	}
 }
 
 func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
-	p := NewProvider()
+	p := NewProvider(nil)
 
 	before, ok := p.Get("8-16")
 	if !ok {
@@ -51,7 +51,7 @@ func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
 		t.Fatal("instance type 8-16 is unavailable before anything is marked")
 	}
 
-	p.MarkUnavailable(context.Background(), Specs{Ncpus: 8, MemInGiB: 16})
+	p.MarkUnavailable(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	for _, tc := range []struct {
 		name string

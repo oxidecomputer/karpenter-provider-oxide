@@ -11,10 +11,12 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/nodeclass"
+	utilizationcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/utilization"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/kubeadm"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/sled"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -45,7 +47,20 @@ const (
 	envInventoryEnabled                  = "OXIDE_INVENTORY_ENABLED"
 	envInventoryRefreshPeriod            = "OXIDE_INVENTORY_REFRESH_PERIOD"
 	envInventoryRepairTolerationDuration = "OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION"
+
+	// Silo quota configuration. Unlike inventory this reads a silo-scoped endpoint that needs no
+	// permissions beyond launching instances, so it defaults to on.
+	envQuotaEnabled       = "OXIDE_QUOTA_ENABLED"
+	envQuotaRefreshPeriod = "OXIDE_QUOTA_REFRESH_PERIOD"
 )
+
+// defaultQuotaRefreshPeriod is how often the silo's quota is re-read.
+//
+// This is one API call, and what it measures moves whenever anything in the silo starts or stops, so
+// it is polled far more often than the sled inventory. It is not the only line of defense: a launch
+// that exceeds the quota is still refused by the API and diagnosed from the snapshot, so a stale
+// reading costs a wasted launch rather than a wrong decision.
+const defaultQuotaRefreshPeriod = time.Minute
 
 // defaultInventoryRefreshPeriod is how often the sled inventory is re-read. Building it costs a call
 // per sled, and what it observes (which sled an instance is on, and that sled's state and policy)
@@ -106,11 +121,28 @@ func run() error {
 		sledProvider = sled.NewProvider(ox, project, inventoryCfg.refreshPeriod/4)
 	}
 
+	// Quota awareness needs no permissions beyond launching instances, since a silo can read its own
+	// utilization, so it is on unless explicitly switched off. A quota that cannot be read constrains
+	// nothing rather than blocking launches, so the failure mode of leaving it on is the same as
+	// turning it off.
+	quotaCfg, err := quotaConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	var quotas *utilization.Provider
+	if quotaCfg.enabled {
+		// The on-demand floor is tighter than the poll interval so that a burst of refused launches
+		// re-reads the quota promptly, without every one of them issuing its own read.
+		quotas = utilization.NewProvider(ox, quotaCfg.refreshPeriod/4)
+	}
+
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
 		ox,
 		project,
-		instancetype.NewProvider(),
+		// Passed as an interface, so a nil *utilization.Provider has to be dropped rather than handed
+		// over: a typed nil inside a non-nil interface would satisfy the nil check and then panic.
+		instancetype.NewProvider(quotaProvider(quotas)),
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
 	)
@@ -143,10 +175,63 @@ func run() error {
 			inventory.NewController(karpcore.GetClient(), sledProvider, inventoryCfg.refreshPeriod),
 		)
 	}
+	if quotaCfg.enabled {
+		controllers = append(
+			controllers,
+			utilizationcontroller.NewController(quotas, quotaCfg.refreshPeriod),
+		)
+	}
 
 	karpcore.WithControllers(ctx, controllers...).Start(ctx)
 
 	return nil
+}
+
+// quotaConfig is the silo quota configuration, resolved once at startup.
+type quotaConfig struct {
+	enabled       bool
+	refreshPeriod time.Duration
+}
+
+// quotaConfigFromEnv reads the quota configuration. Unlike inventory this defaults to on: reading the
+// silo's own utilization needs no permissions beyond what launching an instance already requires.
+func quotaConfigFromEnv() (quotaConfig, error) {
+	cfg := quotaConfig{enabled: true, refreshPeriod: defaultQuotaRefreshPeriod}
+
+	if raw := os.Getenv(envQuotaEnabled); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return quotaConfig{}, fmt.Errorf("%s is not a valid boolean: %w", envQuotaEnabled, err)
+		}
+		cfg.enabled = enabled
+	}
+	if raw := os.Getenv(envQuotaRefreshPeriod); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return quotaConfig{}, fmt.Errorf(
+				"%s is not a valid duration: %w", envQuotaRefreshPeriod, err,
+			)
+		}
+		if parsed <= 0 {
+			return quotaConfig{}, fmt.Errorf(
+				"%s must be positive, got %s", envQuotaRefreshPeriod, parsed,
+			)
+		}
+		cfg.refreshPeriod = parsed
+	}
+	return cfg, nil
+}
+
+// quotaProvider adapts a possibly-nil provider to the interface the instance type provider takes.
+//
+// A *utilization.Provider that is nil cannot simply be passed: assigning it to a non-nil interface
+// value would make every nil check downstream pass and then panic on the first call. Returning an
+// untyped nil is the only thing that reads as "no quota provider".
+func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
+	if quotas == nil {
+		return nil
+	}
+	return quotas
 }
 
 // inventoryConfig is the sled inventory configuration, resolved once at startup.

@@ -130,6 +130,12 @@ spec:
                 secretKeyRef:
                   name: {{ required "settings.oxide.tokenSecret.name is required" .Values.settings.oxide.tokenSecret.name | quote }}
                   key: {{ .Values.settings.oxide.tokenSecret.key | quote }}
+            # Silo quota. Always set, since this defaults to on and absent would mean on anyway;
+            # setting it explicitly is what lets the chart turn it off.
+            - name: OXIDE_QUOTA_ENABLED
+              value: {{ .Values.settings.quota.enabled | quote }}
+            - name: OXIDE_QUOTA_REFRESH_PERIOD
+              value: {{ .Values.settings.quota.refreshPeriod | quote }}
           {{- if .Values.settings.inventory.enabled }}
             # Sled inventory. Only set when enabled: absent means off, so a chart that never mentions
             # inventory cannot turn it on.
