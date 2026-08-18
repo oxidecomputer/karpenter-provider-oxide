@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 
-	"github.com/oxidecomputer/karpenter/pkg/apis"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis"
 )
 
 func init() {

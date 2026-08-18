@@ -10,8 +10,8 @@ import (
 
 	"github.com/awslabs/operatorpkg/reasonable"
 	"github.com/awslabs/operatorpkg/status"
-	"github.com/oxidecomputer/karpenter/pkg/apis/v1alpha1"
-	"github.com/oxidecomputer/karpenter/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	discoveryv1 "k8s.io/api/discovery/v1"

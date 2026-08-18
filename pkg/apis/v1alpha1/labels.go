@@ -20,7 +20,7 @@ import (
 	coreapis "sigs.k8s.io/karpenter/pkg/apis"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
-	"github.com/oxidecomputer/karpenter/pkg/apis"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis"
 )
 
 func init() {

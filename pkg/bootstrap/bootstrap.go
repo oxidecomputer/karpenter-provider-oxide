@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/oxidecomputer/karpenter/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )

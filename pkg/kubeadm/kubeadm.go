@@ -20,8 +20,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/oxidecomputer/karpenter/pkg/apis/v1alpha1"
-	"github.com/oxidecomputer/karpenter/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

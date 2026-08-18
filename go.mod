@@ -1,4 +1,4 @@
-module github.com/oxidecomputer/karpenter
+module github.com/oxidecomputer/karpenter-provider-oxide
 
 go 1.26.3
 
