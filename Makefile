@@ -186,7 +186,8 @@ run: ## Run the controller against your local cluster with the latest CRDs. Requ
 		SYSTEM_NAMESPACE=$(KARPENTER_NAMESPACE) \
 		KUBERNETES_MIN_VERSION="1.19.0-0" \
 		DISABLE_LEADER_ELECTION=true \
-		FEATURE_GATES="NodeOverlay=true,StaticCapacity=true" \
+		FEATURE_GATES="NodeOverlay=true,StaticCapacity=true,NodeRepair=true" \
+		OXIDE_INVENTORY_ENABLED="true" \
 		LOG_LEVEL="debug" \
 		go run ./cmd/controller/main.go
 

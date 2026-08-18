@@ -37,6 +37,7 @@ type OxideCloudProvider struct {
 	instanceProvider     *instance.Provider
 	instanceTypeProvider *instancetype.Provider
 	bootstrappers        bootstrap.Bootstrappers
+	repairPolicies       []cloudprovider.RepairPolicy
 }
 
 func NewOxideCloudProvider(
@@ -45,6 +46,7 @@ func NewOxideCloudProvider(
 	project string,
 	instanceTypeProvider *instancetype.Provider,
 	bootstrappers bootstrap.Bootstrappers,
+	repairPolicies []cloudprovider.RepairPolicy,
 ) *OxideCloudProvider {
 	return &OxideCloudProvider{
 		kubeClient:           kubeClient,
@@ -53,6 +55,7 @@ func NewOxideCloudProvider(
 		instanceProvider:     instance.NewProvider(ox, project),
 		instanceTypeProvider: instanceTypeProvider,
 		bootstrappers:        bootstrappers,
+		repairPolicies:       repairPolicies,
 	}
 }
 
@@ -405,8 +408,13 @@ func (c *OxideCloudProvider) IsDrifted(
 
 // RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter
 // to monitor on the node.
+//
+// This is empty unless sled inventory is enabled, because nothing else sets the condition it would
+// name: there is no way to observe that a node's hardware is being retired without the fleet-scoped
+// system API. Returning it empty is also what keeps core from registering its health controller at
+// all, so an installation without inventory has no node repair machinery running for this provider.
 func (c *OxideCloudProvider) RepairPolicies() []cloudprovider.RepairPolicy {
-	return nil
+	return c.repairPolicies
 }
 
 // GetSupportedNodeClasses returns CloudProvider NodeClass that implements status.Object

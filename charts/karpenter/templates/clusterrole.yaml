@@ -48,6 +48,14 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["create", "patch", "delete", "update"]
+  {{- if .Values.settings.inventory.enabled }}
+  # Sled inventory records sled health as a Node status condition, which is a separate subresource
+  # from the Node itself. Only granted when inventory is enabled, since nothing else here writes
+  # node status.
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch", "update"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]

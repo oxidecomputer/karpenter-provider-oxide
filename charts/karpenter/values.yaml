@@ -137,6 +137,25 @@ settings:
     tokenSecret:
       name: oxide-api-token
       key: token
+  # -- Sled inventory configuration. Records which physical sled each node landed on, as labels and
+  # annotations on the Node and NodeClaim. This is observability only: nothing in the provider reads
+  # it, and provisioning is unaffected whether it is enabled, disabled, or failing.
+  inventory:
+    # -- Enable the sled inventory controllers. This requires an Oxide token with fleet-level read
+    # access to the system API (/v1/system/hardware/sleds), which is a much broader grant than
+    # provisioning instances into a single project. Leave this disabled unless the placement labels
+    # are wanted. If enabled with a token that cannot read the system API, the controller logs the
+    # failure and applies no labels rather than failing.
+    enabled: false
+    # -- How often the sled inventory is re-read from the Oxide API. Building it costs one API call
+    # per sled in the rack, so lowering this raises fleet API load proportionally.
+    refreshPeriod: 5m
+    # -- How long a node may sit on a sled that is being taken out of service (expunged, or closed to
+    # new placements) before Karpenter drains it and provisions a replacement. Replacement ALSO
+    # requires settings.featureGates.nodeRepair, and is subject to core's node repair guardrail that
+    # blocks repair while more than 20% of a NodePool's nodes are unhealthy. Set to 0 to record sled
+    # health without ever replacing nodes for it.
+    repairTolerationDuration: 30m
   # -- The maximum length of a batch window. The longer this is, the more pods we can consider for
   # provisioning at one time which usually results in fewer but larger nodes.
   batchMaxDuration: 10s

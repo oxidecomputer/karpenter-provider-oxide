@@ -130,6 +130,16 @@ spec:
                 secretKeyRef:
                   name: {{ required "settings.oxide.tokenSecret.name is required" .Values.settings.oxide.tokenSecret.name | quote }}
                   key: {{ .Values.settings.oxide.tokenSecret.key | quote }}
+          {{- if .Values.settings.inventory.enabled }}
+            # Sled inventory. Only set when enabled: absent means off, so a chart that never mentions
+            # inventory cannot turn it on.
+            - name: OXIDE_INVENTORY_ENABLED
+              value: "true"
+            - name: OXIDE_INVENTORY_REFRESH_PERIOD
+              value: {{ .Values.settings.inventory.refreshPeriod | quote }}
+            - name: OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION
+              value: {{ .Values.settings.inventory.repairTolerationDuration | quote }}
+          {{- end }}
           {{- with .Values.controller.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
