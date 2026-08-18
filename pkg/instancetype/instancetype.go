@@ -53,12 +53,12 @@ var (
 type Provider struct {
 	mu            sync.Mutex
 	instanceTypes []*cloudprovider.InstanceType
-	// generation is the combined unavailable-offering and quota generation instanceTypes was built
-	// against, which is what makes the list stale.
+	// generation is the combined capacity and quota generation instanceTypes was built against, which
+	// is what makes the list stale.
 	generation generation
 	built      bool
 
-	unavailable *UnavailableOfferings
+	capacity *CapacityManager
 	// quotas is the silo's quota, or nil when quota awareness is switched off. It is consulted when
 	// offerings are built so that a shape the silo is not entitled to is never offered in the first
 	// place, rather than offered, launched, and refused.
@@ -82,8 +82,8 @@ type QuotaProvider interface {
 // generation is the pair of counters the built instance type list depends on. Both move
 // independently, so staleness is only correctly detected by comparing them together.
 type generation struct {
-	unavailable uint64
-	quota       uint64
+	capacity uint64
+	quota    uint64
 }
 
 type Specs struct {
@@ -95,8 +95,8 @@ type Specs struct {
 // constrained by the silo's quota.
 func NewProvider(quotas QuotaProvider) *Provider {
 	return &Provider{
-		unavailable: NewUnavailableOfferings(),
-		quotas:      quotas,
+		capacity: NewCapacityManager(),
+		quotas:   quotas,
 	}
 }
 
@@ -132,20 +132,38 @@ func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) 
 	return nil, false
 }
 
-// MarkUnavailable takes a shape, and every shape at least as large, out of consideration until the
-// entry expires. It is called when a launch of that shape is refused, with the reason the refusal was
-// diagnosed as.
-func (i *Provider) MarkUnavailable(ctx context.Context, specs Specs, reason Reason) {
-	i.unavailable.Mark(ctx, specs, reason)
+// RecordICE takes a shape, and every shape at least as large, out of consideration until its backoff
+// elapses. It is called when a launch of that shape is refused, with the reason the refusal was
+// diagnosed as, and each consecutive refusal lengthens the wait.
+func (i *Provider) RecordICE(ctx context.Context, specs Specs, reason Reason) {
+	i.capacity.RecordICE(ctx, specs, reason)
+}
+
+// RecordSuccess reports that a launch of this shape succeeded, which clears the refusal history of
+// every shape that success disproves.
+func (i *Provider) RecordSuccess(ctx context.Context, specs Specs) {
+	i.capacity.RecordSuccess(ctx, specs)
+}
+
+// TryAcquire reserves the right to launch this shape, and reports whether the caller got it. It only
+// refuses when a shape whose backoff just elapsed is already being probed by another launch, in which
+// case the caller should pick a different shape rather than pile onto the probe.
+func (i *Provider) TryAcquire(specs Specs) bool {
+	return i.capacity.TryAcquire(specs)
+}
+
+// ReleaseProbe hands back a reservation taken by TryAcquire for a launch that never reached the rack.
+func (i *Provider) ReleaseProbe(specs Specs) {
+	i.capacity.ReleaseProbe(specs)
 }
 
 // IsUnavailable reports whether a shape is currently ruled out, and why.
 //
 // A shape is ruled out either because a launch of it was refused recently, or because the silo's
-// quota has no room for it. The quota is checked live rather than through the cache so that raising a
-// quota takes effect on the next refresh instead of waiting out a TTL.
+// quota has no room for it. The quota is checked live rather than through the capacity manager so
+// that raising a quota takes effect on the next refresh instead of waiting out a backoff.
 func (i *Provider) IsUnavailable(specs Specs) (bool, Reason) {
-	if unavailable, reason := i.unavailable.IsUnavailable(specs); unavailable {
+	if unavailable, reason := i.capacity.IsUnavailable(specs); unavailable {
 		return true, reason
 	}
 	quota, err := i.quota()
@@ -219,7 +237,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	current := generation{unavailable: i.unavailable.Generation()}
+	current := generation{capacity: i.capacity.Generation()}
 	if i.quotas != nil {
 		current.quota = i.quotas.Generation()
 	}
@@ -227,7 +245,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		return i.instanceTypes
 	}
 
-	unavailable := i.unavailable.Snapshot()
+	unavailable := i.capacity.Snapshot()
 	// Read once for the whole build rather than per shape. There are thousands of shapes and they all
 	// have to be judged against the same quota, or the list is internally inconsistent.
 	quota, quotaErr := i.quota()

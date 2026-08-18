@@ -132,33 +132,44 @@ func (c *OxideCloudProvider) Create(
 		)
 	}
 
-	minInstanceType := ""
-	if len(available) > 0 {
-		minInstanceType = slices.MinFunc(available, func(a, b string) int {
-			aSpecs, err := instancetype.InstanceTypeToSpecs(a)
-			if err != nil {
-				return 0
-			}
-			bSpecs, err := instancetype.InstanceTypeToSpecs(b)
-			if err != nil {
-				return 0
-			}
-			cpuDelta := aSpecs.Ncpus - bSpecs.Ncpus
-			if cpuDelta == 0 {
-				return aSpecs.MemInGiB - bSpecs.MemInGiB
-			}
+	// Smallest first, so the launch takes the least of the rack that satisfies the NodeClaim.
+	ordered := lo.FilterMap(available, func(candidate string, _ int) (instancetype.Specs, bool) {
+		specs, err := instancetype.InstanceTypeToSpecs(candidate)
+		return specs, err == nil
+	})
+	slices.SortFunc(ordered, func(a, b instancetype.Specs) int {
+		if cpuDelta := a.Ncpus - b.Ncpus; cpuDelta != 0 {
 			return cpuDelta
-		})
-	}
+		}
+		return a.MemInGiB - b.MemInGiB
+	})
 
-	if minInstanceType == "" {
+	if len(ordered) == 0 {
 		return nil, fmt.Errorf("no instance types match NodeClaim requirements")
 	}
 
-	instanceType, err := instancetype.InstanceTypeToSpecs(minInstanceType)
-	if err != nil {
-		return nil, fmt.Errorf("invalid instance type: %w", err)
+	// A shape whose backoff has just elapsed is offered again, but only one launch is allowed to test
+	// it. Losing that race is not a capacity failure, so this walks on to the next shape rather than
+	// turning a local interlock into a refusal the rack never issued.
+	instanceType, held := instancetype.Specs{}, false
+	for _, specs := range ordered {
+		if c.instanceTypeProvider.TryAcquire(specs) {
+			instanceType, held = specs, true
+			break
+		}
 	}
+	if !held {
+		// Retryable on purpose. The probe ahead of this one settles the question within a launch or
+		// two, and whichever way it goes the next attempt has a better answer than this one could.
+		return nil, fmt.Errorf(
+			"all %d instance types the NodeClaim can use are being probed by another launch",
+			len(ordered),
+		)
+	}
+	// Nothing below reports an outcome for a launch abandoned before the rack sees it, so the
+	// reservation is handed back here. RecordICE and RecordSuccess release it themselves; this is
+	// idempotent alongside them.
+	defer c.instanceTypeProvider.ReleaseProbe(instanceType)
 	// Checked before anything is created, and before a bootstrapper mints a join credential the
 	// launch would waste. This is the only place the boot disk is known, so it is the only place the
 	// storage quota can be checked at all: disk size comes from the OxideNodeClass, not the shape, so
@@ -174,7 +185,7 @@ func (c *OxideCloudProvider) Create(
 			// equally, so taking this one and everything larger out of consideration would say something
 			// untrue about the shape and would not help the next attempt find a smaller one that fits.
 			if resource != utilization.ResourceStorage {
-				c.instanceTypeProvider.MarkUnavailable(ctx, instanceType, instancetype.ReasonQuota)
+				c.instanceTypeProvider.RecordICE(ctx, instanceType, instancetype.ReasonQuota)
 			}
 			return nil, cloudprovider.NewInsufficientCapacityError(
 				fmt.Errorf("%s", quota.Explain(request, resource)),
@@ -273,7 +284,7 @@ func (c *OxideCloudProvider) Create(
 			reason, diagnosis := c.diagnoseRefusal(request, err)
 			// Rescheduling only helps if it lands somewhere else, so this shape and everything
 			// larger comes out of consideration while the limit holds.
-			c.instanceTypeProvider.MarkUnavailable(ctx, instanceType, reason)
+			c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)
 			if reason == instancetype.ReasonQuota {
 				// Direct evidence that the snapshot overstated the headroom. Re-reading now means the rest
 				// of an in-flight burst is judged against the truth instead of failing the same way.
@@ -283,6 +294,12 @@ func (c *OxideCloudProvider) Create(
 		}
 		return nil, err
 	}
+
+	// The rack placed this shape, which disproves every recorded claim that it could not be placed,
+	// including the ones recorded against smaller shapes. Closing the breaker here is what stops a
+	// shape that recovered from carrying its refusal history into the next incident and backing off
+	// from the second refusal as though it were the fifth.
+	c.instanceTypeProvider.RecordSuccess(ctx, instanceType)
 
 	resolvedNodeClaim, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
 	if err != nil {
@@ -502,7 +519,7 @@ func (c *OxideCloudProvider) noCandidatesError(
 // The API does not distinguish them, so this asks the question the API answers implicitly: if the
 // quota had no room for this request, the quota is the binding constraint and the rack never got a
 // say. An unknown quota falls back to capacity, which is both the more common cause and the
-// conservative guess, since it expires from the unavailable cache on its own.
+// conservative guess, since the breaker retries it on its own.
 func (c *OxideCloudProvider) diagnoseRefusal(
 	request utilization.Request,
 	cause error,

@@ -65,7 +65,7 @@ func TestPriceIsIndependentOfAvailability(t *testing.T) {
 	}
 	want := before.Offerings[0].Price
 
-	p.MarkUnavailable(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+	p.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	after, ok := p.Get("8-16")
 	if !ok {

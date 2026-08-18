@@ -127,7 +127,7 @@ func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 func TestQuotaAndRefusalsCombine(t *testing.T) {
 	p := NewProvider(&fakeQuotas{quota: smallQuota()})
 
-	p.MarkUnavailable(context.Background(), Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
+	p.RecordICE(context.Background(), Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
 
 	for _, tc := range []struct {
 		name   string
@@ -154,30 +154,30 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 // Quota wins when both reasons cover a shape. It is the more useful thing to report: rack capacity is
 // transient and Karpenter retries into it, whereas a quota keeps refusing until somebody changes it.
 func TestQuotaReasonWinsOverCapacity(t *testing.T) {
-	u := NewUnavailableOfferings()
+	c := NewCapacityManager()
 	ctx := context.Background()
 
-	u.Mark(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
-	u.Mark(ctx, Specs{Ncpus: 4, MemInGiB: 8}, ReasonQuota)
+	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+	c.RecordICE(ctx, Specs{Ncpus: 4, MemInGiB: 8}, ReasonQuota)
 
-	if _, reason := u.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); reason != ReasonQuota {
+	if _, reason := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); reason != ReasonQuota {
 		t.Errorf("reason = %q, want %q when both cover the shape", reason, ReasonQuota)
 	}
 }
 
-// Marking ignores the reason when subsuming, because coverage is what an offering is filtered on. A
+// Recording a refusal ignores the reason when subsuming, because coverage is what an offering is filtered on. A
 // smaller shape refused for quota genuinely does explain a larger one refused for capacity.
-func TestMarkSubsumesAcrossReasons(t *testing.T) {
-	u := NewUnavailableOfferings()
+func TestRecordICESubsumesAcrossReasons(t *testing.T) {
+	c := NewCapacityManager()
 	ctx := context.Background()
 
-	u.Mark(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	u.Mark(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonQuota)
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonQuota)
 
-	if got := len(u.Snapshot()); got != 1 {
+	if got := len(c.Snapshot()); got != 1 {
 		t.Fatalf("snapshot has %d entries, want the larger capacity entry subsumed", got)
 	}
-	unavailable, reason := u.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32})
+	unavailable, reason := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32})
 	if !unavailable || reason != ReasonQuota {
 		t.Errorf("IsUnavailable = (%v, %q), want (true, %q)", unavailable, reason, ReasonQuota)
 	}
