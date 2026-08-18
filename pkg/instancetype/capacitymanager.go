@@ -204,6 +204,49 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 	}
 }
 
+// RecordCapacityReleased reports that the rack has taken back the resources of an instance of this
+// shape, and reopens the shapes that plausibly makes room for.
+//
+// The trigger is Oxide confirming the instance is gone, not a delete being asked for. Until the
+// instance actually stops, its CPU and memory are still held on whatever sled it was placed on, and
+// reopening a shape on the strength of an intention is how consolidation ends up planning a
+// replacement against capacity that does not exist yet.
+//
+// Only shapes the release could actually have made room for are reopened. A sled that just got an 8
+// CPU, 16 GiB instance back has room for something that size, and no more than that: nothing here
+// knows what else was already free, so a claim that a larger shape does not fit is left standing
+// until its own backoff elapses. Deleting one small instance must not reopen every shape on the rack.
+//
+// The refusal history is deliberately left alone. This is evidence that the shape is worth trying
+// again, not evidence that it works; only a launch that succeeds is that. So the shape gets its one
+// probe, and if the rack refuses it anyway the backoff picks up where it left off rather than
+// restarting at three minutes.
+func (c *CapacityManager) RecordCapacityReleased(ctx context.Context, released Specs) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweep()
+
+	for key, entry := range c.entries {
+		if entry.State != StateBackoff || !fits(entry.Specs, released) {
+			continue
+		}
+		entry.State = StateHalfOpen
+		entry.probeInFlight = false
+		c.generation.Add(1)
+
+		log.FromContext(ctx).V(1).Info(
+			"capacity state changed",
+			"instance-type", key,
+			"from", StateBackoff,
+			"to", StateHalfOpen,
+			"reason", "capacity-released",
+			"released", SpecsToInstanceTypeName(released.Ncpus, released.MemInGiB),
+			"consecutive-ices", entry.ConsecutiveICEs,
+			"backoff-remaining", entry.RetryAfter.Sub(c.now()),
+		)
+	}
+}
+
 // TryAcquire reserves the right to launch this shape, and reports whether the caller got it.
 //
 // It only ever refuses a half-open shape that another launch is already probing. Letting the rest of
@@ -358,4 +401,11 @@ func covered(entries []Entry, specs Specs) (bool, Reason) {
 // specs asks for at least as much of both resources.
 func covers(marked, specs Specs) bool {
 	return specs.Ncpus >= marked.Ncpus && specs.MemInGiB >= marked.MemInGiB
+}
+
+// fits reports whether a shape would fit in the resources a released one gave back, which is the
+// case when it asks for no more of either. It is the mirror of covers, and reads better at the call
+// site than covers with its arguments the other way around.
+func fits(specs, released Specs) bool {
+	return specs.Ncpus <= released.Ncpus && specs.MemInGiB <= released.MemInGiB
 }

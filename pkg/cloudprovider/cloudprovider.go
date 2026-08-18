@@ -50,10 +50,25 @@ func NewOxideCloudProvider(
 	repairPolicies []cloudprovider.RepairPolicy,
 ) *OxideCloudProvider {
 	return &OxideCloudProvider{
-		kubeClient:           kubeClient,
-		ox:                   ox,
-		project:              project,
-		instanceProvider:     instance.NewProvider(ox, project),
+		kubeClient: kubeClient,
+		ox:         ox,
+		project:    project,
+		// Every teardown reports what it gave back, including the ones that happen inside a failed
+		// launch. A shape the rack refused an hour ago may well fit in the room a terminating node
+		// just left, and waiting out the rest of its backoff to find that out is exactly the delay
+		// this is here to avoid.
+		instanceProvider: instance.NewProvider(
+			ox,
+			project,
+			func(ctx context.Context, released instance.Released) {
+				instanceTypeProvider.RecordCapacityReleased(ctx, instancetype.Specs{
+					Ncpus: released.Ncpus,
+					// Truncating is the conservative direction: it can only understate what came
+					// back, which reopens fewer shapes rather than more.
+					MemInGiB: int(released.Memory / GiB),
+				})
+			},
+		),
 		instanceTypeProvider: instanceTypeProvider,
 		bootstrappers:        bootstrappers,
 		repairPolicies:       repairPolicies,

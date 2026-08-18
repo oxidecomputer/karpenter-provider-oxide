@@ -54,16 +54,33 @@ var (
 	ErrInsufficientCapacity = errors.New("insufficient capacity")
 )
 
+// Released is the rack capacity an instance gave back when it was torn down.
+type Released struct {
+	Ncpus  int
+	Memory uint64
+}
+
 // Provider creates and deletes instances in a single Oxide project.
 type Provider struct {
 	ox      *oxide.Client
 	project string
+	// onRelease is called once the rack has confirmed an instance is gone, with what it gave back. It
+	// is how the caller learns that capacity it was told did not exist may now exist, without this
+	// package knowing anything about instance shapes or scheduling. May be nil.
+	onRelease func(context.Context, Released)
 }
 
-func NewProvider(ox *oxide.Client, project string) *Provider {
+// NewProvider builds an instance provider. onRelease may be nil, in which case nothing is told about
+// the capacity a teardown frees.
+func NewProvider(
+	ox *oxide.Client,
+	project string,
+	onRelease func(context.Context, Released),
+) *Provider {
 	return &Provider{
-		ox:      ox,
-		project: project,
+		ox:        ox,
+		project:   project,
+		onRelease: onRelease,
 	}
 }
 
@@ -135,6 +152,10 @@ func (p *Provider) Create(
 // was attached to. Only disks outlive the instance: its network interfaces, ephemeral external IPs
 // and anti-affinity group memberships are all released by the instance delete itself.
 //
+// The provider's onRelease is called once the API has confirmed the instance itself is gone, which
+// is before the disks are dealt with: the CPU and memory are back on the sled at that point, and a
+// disk that will not delete holds neither.
+//
 // It is safe to call repeatedly, and each step tolerates its resource already being gone. ref is a
 // name or an ID, so a launch that failed before it learned the ID can still clean up by name.
 // bootDiskName is the name the boot disk was created with, used to finish the cleanup on a retry
@@ -163,6 +184,9 @@ func (p *Provider) Delete(ctx context.Context, ref string, bootDiskName string) 
 
 	if err := p.stop(ctx, instance); err != nil {
 		if errors.Is(err, ErrNotFound) {
+			// The instance disappeared while it was being stopped, so the rack has it back whether or
+			// not this call is what removed it.
+			p.notifyReleased(ctx, instance)
 			if diskErr := p.deleteDisks(ctx, disks); diskErr != nil {
 				return diskErr
 			}
@@ -177,8 +201,25 @@ func (p *Provider) Delete(ctx context.Context, ref string, bootDiskName string) 
 	}); err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
 		return fmt.Errorf("unable to delete the instance, %w", err)
 	}
+	// Announced here rather than at the end, because the instance's CPU and memory are back on its
+	// sled at this point and a disk that will not delete does not hold either of them. A retry to
+	// finish the disks finds the instance already gone and does not announce it twice.
+	p.notifyReleased(ctx, instance)
 
 	return p.deleteDisks(ctx, disks)
+}
+
+// notifyReleased tells the caller what an instance gave back to the rack. It is only ever called
+// once the API has confirmed the instance is gone: a delete that has merely been asked for frees
+// nothing, and reporting it would have callers believe in capacity that is still being held.
+func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance) {
+	if p.onRelease == nil {
+		return
+	}
+	p.onRelease(ctx, Released{
+		Ncpus:  int(instance.Ncpus),
+		Memory: uint64(instance.Memory),
+	})
 }
 
 // adopt takes over an instance that already exists under the name a create tried to use, which is

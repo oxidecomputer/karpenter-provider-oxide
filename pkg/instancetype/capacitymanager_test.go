@@ -368,6 +368,137 @@ func TestJitterStaysWithinItsFraction(t *testing.T) {
 	}
 }
 
+// The point of the whole mechanism: a shape sitting on a long backoff gets its probe as soon as the
+// rack visibly has room for it, instead of waiting out a wait that was set when it did not.
+func TestCapacityReleaseShortensALongBackoff(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	ctx := context.Background()
+
+	for range 5 {
+		c.RecordICE(ctx, specs, ReasonCapacity)
+		now = now.Add(retryAfterOf(t, c, specs).Sub(now))
+	}
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	if got := retryAfterOf(t, c, specs).Sub(now); got != 30*time.Minute {
+		t.Fatalf("backoff = %v, want the capped 30m to be shortened", got)
+	}
+
+	now = now.Add(time.Minute)
+	c.RecordCapacityReleased(ctx, specs)
+
+	if unavailable, _ := c.IsUnavailable(specs); unavailable {
+		t.Error("the shape is still ruled out after the rack gave back room for it")
+	}
+	if state := stateOf(t, c, specs); state != StateHalfOpen {
+		t.Errorf("state = %q, want %q", state, StateHalfOpen)
+	}
+	if !c.TryAcquire(specs) {
+		t.Error("the reopened shape could not be probed")
+	}
+	if c.TryAcquire(specs) {
+		t.Error("a release opened the shape to the whole burst instead of to one probe")
+	}
+}
+
+// A release is evidence the shape is worth trying, not evidence that it works. If the rack refuses
+// the probe anyway, the backoff has to pick up where it left off rather than start over, or a cluster
+// churning through terminations retries a hopeless shape every few minutes forever.
+func TestCapacityReleaseKeepsTheRefusalHistory(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	ctx := context.Background()
+
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	c.RecordCapacityReleased(ctx, specs)
+
+	if got := ices(t, c, specs); got != 1 {
+		t.Errorf("consecutive ICEs = %d, want the release to leave the history alone", got)
+	}
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	if got := retryAfterOf(t, c, specs).Sub(now); got != 6*time.Minute {
+		t.Errorf("backoff after the refused probe = %v, want the escalation to continue at 6m", got)
+	}
+}
+
+// Freeing one small instance must not reopen the whole rack. A claim that a shape does not fit is only
+// disturbed by a release big enough to have made room for that shape.
+func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+
+	for _, specs := range []Specs{
+		{Ncpus: 2, MemInGiB: 4},   // fits in the release
+		{Ncpus: 8, MemInGiB: 16},  // exactly the release
+		{Ncpus: 16, MemInGiB: 16}, // too many cpus
+		{Ncpus: 8, MemInGiB: 64},  // too much memory
+	} {
+		c.RecordICE(ctx, specs, ReasonCapacity)
+	}
+
+	c.RecordCapacityReleased(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+
+	for _, tc := range []struct {
+		specs Specs
+		want  State
+	}{
+		{Specs{Ncpus: 2, MemInGiB: 4}, StateHalfOpen},
+		{Specs{Ncpus: 8, MemInGiB: 16}, StateHalfOpen},
+		{Specs{Ncpus: 16, MemInGiB: 16}, StateBackoff},
+		{Specs{Ncpus: 8, MemInGiB: 64}, StateBackoff},
+	} {
+		if got := stateOf(t, c, tc.specs); got != tc.want {
+			t.Errorf("%d-%d state = %q, want %q",
+				tc.specs.Ncpus, tc.specs.MemInGiB, got, tc.want)
+		}
+	}
+}
+
+// Offerings are only rebuilt when the generation moves, so a release that reopens something has to
+// move it, and one that reopens nothing must not: a cluster terminating nodes steadily would
+// otherwise rebuild thousands of instance types for every one of them.
+func TestCapacityReleaseMovesTheGenerationOnlyWhenItReopens(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+
+	before := c.Generation()
+	c.RecordCapacityReleased(ctx, Specs{Ncpus: 1, MemInGiB: 2})
+	if got := c.Generation(); got != before {
+		t.Error("a release that reopened nothing rebuilt the offerings anyway")
+	}
+
+	c.RecordCapacityReleased(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+	if got := c.Generation(); got == before {
+		t.Error("a release that reopened a shape did not move the generation")
+	}
+}
+
+// A shape that is already being probed is not disturbed by a release. It is mid-experiment, and
+// clearing the interlock underneath it would let a second launch pile onto the same question.
+func TestCapacityReleaseDoesNotDisturbAnInFlightProbe(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	ctx := context.Background()
+
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	now = now.Add(3 * time.Minute)
+	if !c.TryAcquire(specs) {
+		t.Fatal("the probe could not be acquired once the backoff elapsed")
+	}
+
+	c.RecordCapacityReleased(ctx, specs)
+
+	if c.TryAcquire(specs) {
+		t.Error("the release released a probe that was still in flight")
+	}
+}
+
 func entryOf(t *testing.T, c *CapacityManager, specs Specs) Entry {
 	t.Helper()
 	for _, e := range c.Snapshot() {

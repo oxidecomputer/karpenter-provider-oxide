@@ -145,6 +145,13 @@ func (i *Provider) RecordSuccess(ctx context.Context, specs Specs) {
 	i.capacity.RecordSuccess(ctx, specs)
 }
 
+// RecordCapacityReleased reports that the rack has taken back the resources of an instance of this
+// shape, which gives every shape that release could have made room for an immediate probe instead of
+// the rest of its backoff.
+func (i *Provider) RecordCapacityReleased(ctx context.Context, specs Specs) {
+	i.capacity.RecordCapacityReleased(ctx, specs)
+}
+
 // TryAcquire reserves the right to launch this shape, and reports whether the caller got it. It only
 // refuses when a shape whose backoff just elapsed is already being probed by another launch, in which
 // case the caller should pick a different shape rather than pile onto the probe.
