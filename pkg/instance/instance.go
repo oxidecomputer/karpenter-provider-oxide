@@ -1,9 +1,9 @@
 // Package instance wraps the two Oxide instance workflows Karpenter drives: launching an instance
 // and tearing one down along with the resources created with it.
 //
-// Neither is a single API call. A create only starts the provision saga, so whether the instance is
-// really coming up is only knowable afterwards, and a delete is rejected until the instance has
-// fully stopped and leaves the boot disk behind once it succeeds. Both are also resumed rather than
+// Neither is a single API call. A create that starts the instance places it, but the guest still has
+// to boot before the instance is any use, and a delete is rejected until the instance has fully
+// stopped and leaves the boot disk behind once it succeeds. Both are also resumed rather than
 // restarted: Karpenter retries the same NodeClaim, so every step tolerates the work having been
 // half done by an earlier attempt.
 package instance
@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -24,9 +25,8 @@ const (
 	// pollInterval is how often an instance's run state is re-read while waiting for a transition to
 	// complete.
 	pollInterval = 2 * time.Second
-	// runTimeout bounds how long Create waits for an instance to reach the running state. The
-	// provision saga runs after the create call returns, so this is where a rack with no sled large
-	// enough for the request actually surfaces.
+	// runTimeout bounds how long Create waits for an instance to reach the running state. The create
+	// itself places the instance, so this only covers the transition out of creating and starting.
 	runTimeout = 3 * time.Minute
 	// stopTimeout bounds how long a single Delete call blocks waiting for an instance to reach a
 	// state the API will accept a delete in. Exceeding it is not fatal: the error is returned so the
@@ -41,10 +41,6 @@ const (
 	// the time it is deleted, so the call should return promptly; a disk in a bad state can
 	// otherwise hang the request indefinitely and burn the whole retry budget on one attempt.
 	diskDeleteAttemptTimeout = 10 * time.Second
-	// maxStartAttempts caps how many times Create will start an instance that keeps falling back to
-	// stopped. One retry covers a lost start request; beyond that the instance is not coming up and
-	// waiting out runTimeout on it only delays rescheduling.
-	maxStartAttempts = 2
 )
 
 var (
@@ -73,10 +69,12 @@ func NewProvider(ox *oxide.Client, project string) *Provider {
 
 // Create launches an instance and returns it once it is running.
 //
-// params is the Oxide API's own create shape, with the project defaulted to the provider's. The
-// instance is not reported as launched until its run state is actually running: the create call
-// returns before the instance has been placed on a sled, so a rack that cannot fit this instance
-// size fails the provision saga afterwards rather than failing the call.
+// params is the Oxide API's own create shape, with the project defaulted to the provider's and the
+// instance always started. Starting is what places the instance on a sled, so asking for it as part
+// of the create is what makes a rack with no room for this instance size fail the create itself
+// rather than leaving the instance sitting stopped for a later start to discover. The instance is
+// still not reported as launched until its run state is actually running, since placement only gets
+// it as far as booting.
 //
 // An instance left over under the same name from an earlier attempt is adopted where it can be, and
 // removed where it cannot so the next attempt starts clean. An instance that will not run is torn
@@ -84,7 +82,7 @@ func NewProvider(ox *oxide.Client, project string) *Provider {
 // it again.
 //
 // The returned error wraps ErrInsufficientCapacity when the rack had no room for the instance,
-// whether that surfaced on the create, on a start, or as a provision saga that gave up.
+// whether that surfaced on the create or on the start of an adopted instance.
 func (p *Provider) Create(
 	ctx context.Context,
 	params oxide.InstanceCreateParams,
@@ -95,6 +93,10 @@ func (p *Provider) Create(
 	if params.Project == "" {
 		params.Project = oxide.NameOrId(p.project)
 	}
+	// Not left to the API's default: an instance that is never asked to start is never placed, and a
+	// launch that cannot be placed has to fail here, where the caller can still pick a different
+	// shape, rather than one poll interval later.
+	params.Body.Start = lo.ToPtr(true)
 	name := string(params.Body.Name)
 	// The name the boot disk is created with, which is the only handle on it left once the instance
 	// is gone and can no longer be asked which disk it booted from.
@@ -251,7 +253,6 @@ func (p *Provider) waitForRunning(
 	defer cancel()
 
 	current := instance
-	startAttempts := 0
 	err := wait.PollUntilContextCancel(
 		pollCtx,
 		pollInterval,
@@ -273,24 +274,16 @@ func (p *Provider) waitForRunning(
 			case oxide.InstanceStateRunning:
 				return true, nil
 
-			// Placed but not left running, which is where an instance created against a rack with no
-			// room for it lands. A create does not report that, but a start does, so the start is
-			// both the recovery and the way to learn why the instance is sitting here.
-			case oxide.InstanceStateStopped:
-				if startAttempts >= maxStartAttempts {
-					return false, errNotPlaced(view.RunState)
-				}
-				startAttempts++
-				if _, err := p.start(ctx, view.Id); err != nil {
-					return false, err
-				}
-				return false, nil
-
-			// The provision saga gave up for good.
-			case oxide.InstanceStateFailed, oxide.InstanceStateDestroyed:
+			// The create already placed this instance and asked it to start, so none of these are
+			// states it comes back from on its own. Starting it again would be starting an instance
+			// that has already given up once, and waiting out runTimeout on it only delays
+			// rescheduling.
+			case oxide.InstanceStateStopped,
+				oxide.InstanceStateFailed,
+				oxide.InstanceStateDestroyed:
 				return false, errNotPlaced(view.RunState)
 
-			// Still being placed or booted.
+			// Still booting.
 			default:
 				return false, nil
 			}
@@ -313,8 +306,8 @@ func (p *Provider) waitForRunning(
 	}
 }
 
-// start starts a stopped instance. An instance the rack has no room for is accepted at create time
-// and only reports that on start, so this is one of the places insufficient capacity surfaces.
+// start starts a stopped instance left behind by an earlier attempt. Starting is the placement
+// decision, so this is where an adoption of an instance the rack no longer has room for fails.
 func (p *Provider) start(ctx context.Context, id string) (*oxide.Instance, error) {
 	started, err := p.ox.InstanceStart(
 		ctx,
@@ -551,13 +544,15 @@ func bootDiskName(body *oxide.InstanceCreate) string {
 	return ""
 }
 
-// errNotPlaced builds the insufficient capacity error a launch fails with when the provision saga
-// left the instance somewhere other than running. Sizing is the usual reason a saga fails, and
-// giving up on the launch is the right response either way.
+// errNotPlaced builds the error a launch fails with when an instance that was created and asked to
+// start settled somewhere other than running. It is reported as insufficient capacity so the
+// NodeClaim is rescheduled onto a different shape immediately: an instance that gave up on its own
+// is not going to come up on a retry under the same name, and waiting out the registration timeout
+// to learn that only delays the pods.
 func errNotPlaced(state oxide.InstanceState) error {
 	return fmt.Errorf(
 		"instance entered run state %q instead of running, "+
-			"the rack likely has no sled with room for it, %w",
+			"the rack likely could not accommodate it, %w",
 		state, ErrInsufficientCapacity,
 	)
 }
