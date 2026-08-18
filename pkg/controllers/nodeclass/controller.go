@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
-	"github.com/awslabs/operatorpkg/status"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -29,6 +28,11 @@ import (
 // kubeletArgsAlways are the kubelet arguments every launched node needs regardless of how it is
 // bootstrapped. The Oxide CCM assigns provider IDs, so the kubelet must not do it itself.
 var kubeletArgsAlways = []string{"cloud-provider=external"}
+
+// maxStatusImages caps how many resolved images are reported on the nodeclass status. Only the
+// first is launched; the rest are there to make a wildcard version selector auditable without
+// growing the object unboundedly when a selector matches a large image list.
+const maxStatusImages = 3
 
 type Controller struct {
 	kubeClient client.Client
@@ -92,7 +96,18 @@ func (c *Controller) Reconcile(
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve image: %w", err)
 	}
-	nodeClass.Status.Images = []v1alpha1.OxideImage{lo.FirstOrEmpty(images)}
+	// Only the first image is ever launched. The runners-up are still reported so that a wildcard
+	// selector can be understood from the nodeclass alone: what it matched, and why the winner won.
+	nodeClass.Status.Images = images[:min(len(images), maxStatusImages)]
+	if len(images) == 0 {
+		nodeClass.StatusConditions().SetFalse(
+			v1alpha1.ConditionTypeImagesResolved,
+			"ImagesNotFound",
+			describeImageSelectors(nodeClass.Spec.ImageSelector),
+		)
+	} else {
+		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesResolved)
+	}
 
 	subnets, err := c.resolveSubnets(ctx, nodeClass.Spec.SubnetSelector)
 	if err != nil {
@@ -112,7 +127,8 @@ func (c *Controller) Reconcile(
 	}
 	nodeClass.Status.IPPools = ipPools
 
-	nodeClass.StatusConditions().SetTrue(status.ConditionReady)
+	// Ready is not set here. It is recomputed from the dependent conditions every time one of them
+	// is set, so asserting it after the fact would just overwrite a false the dependents earned.
 
 	if !equality.Semantic.DeepEqual(stored, nodeClass) {
 		if err := c.kubeClient.Status().
@@ -355,6 +371,33 @@ func (c *Controller) resolveSSHKeys(
 	return sshKeys, nil
 }
 
+// describeImageSelectors renders the image selectors back as the terms they were written with, so
+// the ImagesResolved condition can say what was looked for rather than only that nothing was found.
+func describeImageSelectors(selectors []v1alpha1.ImageSelector) string {
+	if len(selectors) == 0 {
+		return "no image selectors are configured"
+	}
+	described := lo.Map(selectors, func(selector v1alpha1.ImageSelector, _ int) string {
+		terms := []string{}
+		for _, term := range []struct{ key, value string }{
+			{"id", selector.ID},
+			{"name", selector.Name},
+			{"os", selector.OS},
+			{"version", selector.Version},
+			{"project", selector.Project},
+		} {
+			if term.value != "" {
+				terms = append(terms, fmt.Sprintf("%s=%s", term.key, term.value))
+			}
+		}
+		if len(terms) == 0 {
+			return "{}"
+		}
+		return "{" + strings.Join(terms, ",") + "}"
+	})
+	return "no images matched " + strings.Join(described, " or ")
+}
+
 func (c *Controller) resolveImages(
 	ctx context.Context,
 	imageSelectors []v1alpha1.ImageSelector,
@@ -369,9 +412,11 @@ func (c *Controller) resolveImages(
 			nameOrID = imageSelector.ID
 			// project cannot be used to query if ID is used
 			project = ""
-		} else if imageSelector.Name != "" {
+		} else if imageSelector.Name != "" && !strings.Contains(imageSelector.Name, "*") {
 			nameOrID = imageSelector.Name
 		} else {
+			// A wildcard name is not a name the API can look up, so it is resolved by listing and
+			// matching like the other non-exact terms.
 			listImageSelector = append(listImageSelector, imageSelector)
 			continue
 		}
@@ -393,7 +438,7 @@ func (c *Controller) resolveImages(
 		resolvedImages = append(resolvedImages, *image)
 	}
 
-	// All listImageSelectors do not have a name or ID, else they would have been looked up via a direct query (ImageView).
+	// No listImageSelector has an ID or an exact name, else it would have been looked up via a direct query (ImageView).
 	// To efficiently make API calls, we now group by project.
 	projectToSelectors := lo.GroupBy(
 		listImageSelector,
@@ -408,10 +453,13 @@ func (c *Controller) resolveImages(
 		}
 		for _, selector := range selectors {
 			for _, image := range images {
+				if selector.Name != "" && !matchName(selector.Name, string(image.Name)) {
+					continue
+				}
 				if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
 					continue
 				}
-				if selector.Version != "" && !strings.EqualFold(selector.Version, image.Version) {
+				if selector.Version != "" && !matchVersion(selector.Version, image.Version) {
 					continue
 				}
 				resolvedImages = append(resolvedImages, image)

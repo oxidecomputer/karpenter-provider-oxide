@@ -217,7 +217,10 @@ func (c *OxideCloudProvider) Create(
 						Value: &oxide.DiskBackendDistributed{
 							DiskSource: oxide.DiskSource{
 								Value: &oxide.DiskSourceImage{
-									ImageId: nodeClass.Status.Images[0].ID,
+									// Images is empty when no selector matched. Launch with an empty
+									// image and let the Oxide API reject it, which is what happened
+									// when an unmatched selector still left a zero-valued entry here.
+									ImageId: lo.FirstOrEmpty(nodeClass.Status.Images).ID,
 								},
 							},
 						},
@@ -381,7 +384,7 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 	labels = lo.Assign(labels, nodeClaim.Labels)
 	nodeClaim.Labels = labels
 	if nodeClass != nil {
-		nodeClaim.Status.ImageID = nodeClass.Status.Images[0].ID
+		nodeClaim.Status.ImageID = lo.FirstOrEmpty(nodeClass.Status.Images).ID
 	}
 	return nodeClaim, nil
 }

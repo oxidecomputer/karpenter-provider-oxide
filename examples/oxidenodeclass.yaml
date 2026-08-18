@@ -18,6 +18,12 @@ spec:
     - name: rke2-ubuntu-1780929039
       os: ubuntu
       project: brandon
+    # Versions are matched literally unless they contain a "*", which matches whole segments: this
+    # takes the newest 1.2.x image, but never 1.2 or 1.20. Selectors are OR'd, so this only applies
+    # if the image named above is gone.
+    # - os: ubuntu
+    #   version: 1.2.*
+    #   project: brandon
   subnetSelector:
     - project: brandon
       vpcName: default

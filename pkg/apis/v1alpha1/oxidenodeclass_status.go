@@ -5,6 +5,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ConditionTypeImagesResolved reports whether the image selectors matched at least one image.
+// Nodes cannot launch without one, so this holds the nodeclass un-Ready rather than letting the
+// launch fail later against the Oxide API with nothing on the nodeclass to explain why.
+const ConditionTypeImagesResolved = "ImagesResolved"
+
 // Condition types owned by the bootstrap providers. Each type is only registered on nodeclasses
 // using the provider that owns it, so an unused provider never holds Ready false.
 const (
@@ -27,7 +32,10 @@ type OxideNodeClassStatus struct {
 	// NodeTaints contain user-defined and system default node taints that are applied to launched nodes
 	// +optional
 	NodeTaints []string `json:"nodeTaints,omitempty"`
-	// Images contain selected images to use for the boot disk of launched nodes
+	// Images contain selected images to use for the boot disk of launched nodes, most recently
+	// uploaded first. Nodes always launch with the first entry; the remaining entries are the
+	// runners-up a wildcard version selector also matched, and are reported only so the selection
+	// can be understood. The list is truncated, so it is not necessarily every match.
 	// +optional
 	Images []OxideImage `json:"images"`
 	// Subnets contain selected subnets for launching nodes into
@@ -99,7 +107,10 @@ type OxideIPPool struct {
 // bootstrap provider this nodeclass uses. Registering provider conditions conditionally keeps an
 // unset provider from ever holding the nodeclass un-Ready.
 func (in *OxideNodeClass) StatusConditions() status.ConditionSet {
-	conds := []string{}
+	// ImagesResolved applies to every nodeclass regardless of how it bootstraps. Registering at
+	// least one dependent unconditionally is also what lets Ready be derived rather than asserted:
+	// with no dependents at all, the condition set never recomputes the root.
+	conds := []string{ConditionTypeImagesResolved}
 	switch in.Spec.Bootstrap.Kind() {
 	case BootstrapKindRKE2:
 		if in.Spec.Bootstrap.RKE2.TokenRefSecret.Name != "" {

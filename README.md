@@ -135,6 +135,64 @@ removes once the node is ready. Check what your cluster applies with:
 kubectl get nodes -w -o jsonpath='{.metadata.name}{"\t"}{.spec.taints}{"\n"}'
 ```
 
+### Selecting an Image
+
+`spec.imageSelector` is a list of selectors OR'd together; the terms within one selector are AND'd.
+An `id` selects one image directly, while `name`, `os`, and `version` select from the images in
+`project` (or the silo images not linked to a project, when `project` is unset). When more than one
+image matches, nodes launch with the most recently uploaded one.
+
+`name` is matched exactly unless it contains a `*`, where each `*` stands for any run of
+characters, including none. `rke2-ubuntu-*` and `rke2-*` both select `rke2-ubuntu-1780929039`, as
+does `*-ubuntu-*`. A wildcard does not have to fall on a `-` boundary, so `ubuntu*` selects
+`ubuntu-2404`.
+
+Oxide image versions are free-form, so `version` is matched literally unless it contains a `*`. A
+`*` matches whole segments, split on `.`, `-`, `_`, or whitespace, with a leading `v` ignored on
+both sides. In the last position it matches one or more remaining segments; anywhere else it
+matches exactly one:
+
+| `version`         | Matches                        | Does not match           |
+| ----------------- | ------------------------------ | ------------------------ |
+| `1.2.3`           | `1.2.3`                        | `1.2.30`, `v1.2.3`       |
+| `1.2.*`           | `1.2.3`, `1.2.11`              | `1.2`, `1.3.0`, `1.20`   |
+| `1.*`             | `1.4`, `1.4.2`                 | `1`, `10.1`              |
+| `24.04 *`         | `24.04 2026-05-09`             | `24.10 2026-05-09`       |
+| `*`               | any version                    | an image with no version |
+
+Because a `*` cannot consume part of a segment, `1.2.*` will never drift onto `1.20`.
+
+```
+kubectl apply -f - <<EOF
+apiVersion: karpenter.oxide.computer/v1alpha1
+kind: OxideNodeClass
+metadata:
+  name: default
+spec:
+  imageSelector:
+    # The newest 1.2.x image in the "prod" project, whatever patch that is today.
+    - os: ubuntu
+      version: 1.2.*
+      project: prod
+EOF
+```
+
+`status.images` reports the images the selectors resolved to, newest first. Nodes always launch
+with the first entry; up to two runners-up are listed after it so a wildcard's selection can be
+checked without re-deriving it:
+
+```
+kubectl get oxidenodeclass default -o jsonpath='{.status.images}' | jq
+```
+
+When nothing matches, the nodeclass reports `ImagesResolved=False` and is held un-Ready, so
+Karpenter will not launch against it. The condition message repeats the selectors that were tried:
+
+```
+$ kubectl get oxidenodeclass default -o jsonpath='{.status.conditions}' | jq -r '.[] | select(.type=="ImagesResolved") | .message'
+no images matched {os=ubuntu,version=1.2.*,project=prod}
+```
+
 ### Create a Deployment
 
 ```

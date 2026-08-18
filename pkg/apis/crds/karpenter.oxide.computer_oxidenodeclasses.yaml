@@ -145,7 +145,15 @@ spec:
                       description: ID is the exact image UUID
                       type: string
                     name:
-                      description: Name is the exact name of an image
+                      description: |-
+                        Name is the name of an image. A name without a "*" must match exactly, ignoring case.
+
+                        A name containing "*" selects every image whose name matches, where each "*" stands for any
+                        run of characters including none. So "rke2-ubuntu-*" and "rke2-*" both select
+                        "rke2-ubuntu-1780929039", and "*-ubuntu-*" selects it as well. Unlike a version, a name is
+                        matched character by character, so a wildcard does not have to fall on a "-" boundary.
+
+                        When a wildcard matches several images the most recently uploaded one is launched.
                       type: string
                     os:
                       description: OS is the operating system of the image
@@ -157,7 +165,17 @@ spec:
                         that are not linked to a project.
                       type: string
                     version:
-                      description: Version is the version of the image or OS
+                      description: |-
+                        Version is the version of the image or OS. Oxide image versions are free-form, so a version
+                        without a "*" is matched literally and case-insensitively.
+
+                        A version containing "*" is instead matched a segment at a time, where segments are separated
+                        by ".", "-", "_", or whitespace, and a leading "v" is ignored on both sides. A "*" matches
+                        exactly one segment, except as the last segment of the version, where it matches one or more
+                        remaining segments. So "1.2.*" selects "1.2.3" but not "1.2" or "1.20"; "1.*" selects both
+                        "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
+
+                        When a wildcard matches several images the most recently uploaded one is launched.
                       type: string
                   type: object
                 type: array
@@ -319,8 +337,11 @@ spec:
                   type: object
                 type: array
               images:
-                description: Images contain selected images to use for the boot disk
-                  of launched nodes
+                description: |-
+                  Images contain selected images to use for the boot disk of launched nodes, most recently
+                  uploaded first. Nodes always launch with the first entry; the remaining entries are the
+                  runners-up a wildcard version selector also matched, and are reported only so the selection
+                  can be understood. The list is truncated, so it is not necessarily every match.
                 items:
                   properties:
                     id:

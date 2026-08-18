@@ -124,7 +124,14 @@ type ImageSelector struct {
 	// ID is the exact image UUID
 	// +optional
 	ID string `json:"id,omitempty"`
-	// Name is the exact name of an image
+	// Name is the name of an image. A name without a "*" must match exactly, ignoring case.
+	//
+	// A name containing "*" selects every image whose name matches, where each "*" stands for any
+	// run of characters including none. So "rke2-ubuntu-*" and "rke2-*" both select
+	// "rke2-ubuntu-1780929039", and "*-ubuntu-*" selects it as well. Unlike a version, a name is
+	// matched character by character, so a wildcard does not have to fall on a "-" boundary.
+	//
+	// When a wildcard matches several images the most recently uploaded one is launched.
 	// +optional
 	Name string `json:"name,omitempty"`
 	// Project where the image is located.
@@ -135,7 +142,16 @@ type ImageSelector struct {
 	// OS is the operating system of the image
 	// +optional
 	OS string `json:"os,omitempty"`
-	// Version is the version of the image or OS
+	// Version is the version of the image or OS. Oxide image versions are free-form, so a version
+	// without a "*" is matched literally and case-insensitively.
+	//
+	// A version containing "*" is instead matched a segment at a time, where segments are separated
+	// by ".", "-", "_", or whitespace, and a leading "v" is ignored on both sides. A "*" matches
+	// exactly one segment, except as the last segment of the version, where it matches one or more
+	// remaining segments. So "1.2.*" selects "1.2.3" but not "1.2" or "1.20"; "1.*" selects both
+	// "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
+	//
+	// When a wildcard matches several images the most recently uploaded one is launched.
 	// +optional
 	Version string `json:"version,omitempty"`
 }
