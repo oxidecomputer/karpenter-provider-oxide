@@ -35,6 +35,14 @@ const (
 	// configuration will support this. If the control plane errors, we'll mark this offering as
 	// unavailable, so the system will stabilize even when this number is too big.
 	maxSledMemGiB = 1536
+
+	// cpuCostWeight and memCostWeight turn a shape into the synthetic price Karpenter compares
+	// offerings by. There is no dollar price on a rack, but consolidation only ever asks whether a
+	// replacement is cheaper than what is running, so any cost that rises with the resources a shape
+	// consumes is enough. The weights are scaled so that memory-heavy ratios cost more than
+	// CPU-heavy ones at equal CPU, which matches which of the two runs a rack out of headroom first.
+	cpuCostWeight = 1.0
+	memCostWeight = 0.125
 )
 
 var (
@@ -283,6 +291,10 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 					Offerings: cloudprovider.Offerings{
 						&cloudprovider.Offering{
 							Available: !refused && !overQuota,
+							// Deliberately independent of Available and of the quota: price has to stay
+							// stable across rebuilds or the disruption controller churns every time quota
+							// moves.
+							Price: price(specs),
 							Requirements: scheduling.Requirements{
 								corev1.LabelTopologyZone: scheduling.NewRequirement(
 									corev1.LabelTopologyZone,
@@ -305,6 +317,13 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.generation = current
 	i.built = true
 	return instanceTypes
+}
+
+// price is the synthetic hourly cost of a shape. It is strictly increasing in both CPU and memory,
+// which is what stops consolidation from oscillating between two shapes it would otherwise consider
+// equally cheap. The absolute scale carries no meaning; only the ordering does.
+func price(specs Specs) float64 {
+	return float64(specs.Ncpus)*cpuCostWeight + float64(specs.MemInGiB)*memCostWeight
 }
 
 type tier struct {
