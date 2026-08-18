@@ -36,7 +36,13 @@ const (
 func run() error {
 	ctx, karpcore := karpentercore.NewOperator()
 
-	host, token, project := os.Getenv(envOxideHost), os.Getenv(envOxideToken), os.Getenv(envOxideProject)
+	host, token, project := os.Getenv(
+		envOxideHost,
+	), os.Getenv(
+		envOxideToken,
+	), os.Getenv(
+		envOxideProject,
+	)
 	for name, value := range map[string]string{envOxideHost: host, envOxideToken: token, envOxideProject: project} {
 		if value == "" {
 			return fmt.Errorf("%s must be set", name)
@@ -57,9 +63,19 @@ func run() error {
 		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient()),
 	)
 
-	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(karpcore.GetClient(), ox, project, instancetype.NewProvider(), bootstrappers)
+	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
+		karpcore.GetClient(),
+		ox,
+		project,
+		instancetype.NewProvider(),
+		bootstrappers,
+	)
 	overlayUndecoratedCloudProvider := metrics.Decorate(oxideCloudProivder)
-	cloudProvider := overlay.Decorate(overlayUndecoratedCloudProvider, karpcore.GetClient(), karpcore.InstanceTypeStore)
+	cloudProvider := overlay.Decorate(
+		overlayUndecoratedCloudProvider,
+		karpcore.GetClient(),
+		karpcore.InstanceTypeStore,
+	)
 	clusterState := state.NewCluster(karpcore.Clock, karpcore.GetClient(), cloudProvider)
 
 	karpcore.WithControllers(ctx, corecontrollers.NewControllers(

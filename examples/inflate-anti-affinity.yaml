@@ -26,7 +26,7 @@ spec:
         fsGroup: 2000
       containers:
         - name: inflate-anti-affinity
-          image: ghcr.io/containerd/ghcr.io/containerd/pause@sha256:1d54a4311989cea19b8c22d87c2e8d63311c9677d4776a1c7197782c1f9a7717
+          image: ghcr.io/containerd/pause@sha256:1d54a4311989cea19b8c22d87c2e8d63311c9677d4776a1c7197782c1f9a7717
           resources:
             requests:
               cpu: 1

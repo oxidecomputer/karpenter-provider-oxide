@@ -68,7 +68,11 @@ func (b *Bootstrapper) Name() string {
 
 // Resolve renders the supervisor URL agents join through and reports whether the configured agent
 // token Secret is readable.
-func (b *Bootstrapper) Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, cluster bootstrap.Cluster) error {
+func (b *Bootstrapper) Resolve(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	cluster bootstrap.Cluster,
+) error {
 	if cluster.ServerOverride != "" {
 		nodeClass.Status.Server = cluster.ServerOverride
 	} else {
@@ -87,9 +91,11 @@ func (b *Bootstrapper) Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNod
 	secret := &corev1.Secret{}
 	tokenSecretObjKey := client.ObjectKey{Namespace: tokenRef.Namespace, Name: tokenRef.Name}
 	if err := b.reader.Get(ctx, tokenSecretObjKey, secret); err != nil {
-		nodeClass.StatusConditions().SetFalse(v1alpha1.ConditionTypeTokenRefSecretAccessible, "TokenKeyAccessErr", err.Error())
+		nodeClass.StatusConditions().
+			SetFalse(v1alpha1.ConditionTypeTokenRefSecretAccessible, "TokenKeyAccessErr", err.Error())
 	} else if _, ok := secret.Data[tokenRef.Key]; !ok {
-		nodeClass.StatusConditions().SetFalse(v1alpha1.ConditionTypeTokenRefSecretAccessible, "TokenKeyNotFound", "Token is accessible but key not found")
+		nodeClass.StatusConditions().
+			SetFalse(v1alpha1.ConditionTypeTokenRefSecretAccessible, "TokenKeyNotFound", "Token is accessible but key not found")
 	} else {
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeTokenRefSecretAccessible)
 	}
@@ -97,7 +103,11 @@ func (b *Bootstrapper) Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNod
 }
 
 // UserData writes the agent config.yaml and starts rke2-agent.
-func (b *Bootstrapper) UserData(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, req bootstrap.Request) (string, error) {
+func (b *Bootstrapper) UserData(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	req bootstrap.Request,
+) (string, error) {
 	token, err := b.token(ctx, nodeClass)
 	if err != nil {
 		return "", err
@@ -121,7 +131,10 @@ func (b *Bootstrapper) UserData(ctx context.Context, nodeClass *v1alpha1.OxideNo
 }
 
 // token reads the long-lived agent join token from the referenced Secret.
-func (b *Bootstrapper) token(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass) (string, error) {
+func (b *Bootstrapper) token(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+) (string, error) {
 	tokenRef := nodeClass.Spec.Bootstrap.RKE2.TokenRefSecret
 	if tokenRef.Name == "" {
 		return "", nil
@@ -134,7 +147,11 @@ func (b *Bootstrapper) token(ctx context.Context, nodeClass *v1alpha1.OxideNodeC
 	}
 	token, ok := secret.Data[tokenRef.Key]
 	if !ok {
-		return "", fmt.Errorf("token was not found from secret reference %s key %s", tokenSecretObjKey, tokenRef.Key)
+		return "", fmt.Errorf(
+			"token was not found from secret reference %s key %s",
+			tokenSecretObjKey,
+			tokenRef.Key,
+		)
 	}
 	return string(token), nil
 }

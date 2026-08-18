@@ -1,7 +1,7 @@
 apiVersion: karpenter.oxide.computer/v1alpha1
 kind: OxideNodeClass
 metadata:
-  name: kubeadm
+  name: default
 spec:
   bootDiskSize: 20Gi
   kubeletArgs:
@@ -15,8 +15,7 @@ spec:
       # Use kubeadm.k8s.io/v1beta3 on clusters older than Kubernetes 1.31.
       configVersion: kubeadm.k8s.io/v1beta4
   imageSelector:
-    - os: ubuntu
-      project: brandon
+    - id: 444f4178-6bee-45f7-a654-c6ecafd4bb9e
   subnetSelector:
     - project: brandon
-      vpcName: default
+      vpcName: oxke

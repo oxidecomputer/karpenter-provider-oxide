@@ -72,11 +72,18 @@ func New(bootstrappers ...Bootstrapper) Bootstrappers {
 func (b Bootstrappers) For(nodeClass *v1alpha1.OxideNodeClass) (Bootstrapper, error) {
 	kind := nodeClass.Spec.Bootstrap.Kind()
 	if kind == "" {
-		return nil, fmt.Errorf("no bootstrap provider configured on OxideNodeClass %q", nodeClass.Name)
+		return nil, fmt.Errorf(
+			"no bootstrap provider configured on OxideNodeClass %q",
+			nodeClass.Name,
+		)
 	}
 	bootstrapper, ok := b[kind]
 	if !ok {
-		return nil, fmt.Errorf("unsupported bootstrap provider %q on OxideNodeClass %q", kind, nodeClass.Name)
+		return nil, fmt.Errorf(
+			"unsupported bootstrap provider %q on OxideNodeClass %q",
+			kind,
+			nodeClass.Name,
+		)
 	}
 	return bootstrapper, nil
 }

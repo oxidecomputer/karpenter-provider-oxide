@@ -1,14 +1,22 @@
 # karpenter-crd
 
-![Version: 1.3.2](https://img.shields.io/badge/Version-1.3.2-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 1.3.2](https://img.shields.io/badge/AppVersion-1.3.2-informational?style=flat-square)
+![Version: 0.0.1](https://img.shields.io/badge/Version-0.0.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.1](https://img.shields.io/badge/AppVersion-0.0.1-informational?style=flat-square)
 
-A Helm chart for Karpenter Custom Resource Definitions (CRDs).
+A Helm chart for the Karpenter Oxide provider Custom Resource Definitions (CRDs).
 
-**Homepage:** <https://karpenter.sh/>
+**Homepage:** <https://github.com/oxidecomputer/karpenter>
+
+## Installing the Chart
+
+To install the chart with the release name `karpenter-crds`:
+
+```console
+helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter-crd
+```
 
 ## Source Code
 
-* <https://github.com/aws/karpenter/>
+* <https://github.com/oxidecomputer/karpenter>
 
 ## Values
 

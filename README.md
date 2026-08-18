@@ -2,16 +2,14 @@
 
 ## Getting Started
 
-### Clone the repo
-
-```
-git clone 
-```
+Both charts are published to ghcr.io alongside the controller image. Their chart version matches the
+release version, and the controller image defaults to the matching tag, so no image values need to be
+set.
 
 ### Install Karpenter CRDs (NodeClaim, NodePool, NodeOverlay, OxideNodeClass)
 
 ```
-helm upgrade --install karpenter-crds charts/karpenter-crd
+helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter-crd
 ```
 
 ### Add the Oxide API Token Secret
@@ -26,11 +24,15 @@ kubectl create secret --namespace kube-system generic oxide-api-token --from-lit
 ### Install the Controller
 
 ```
-helm upgrade --install karpenter charts/karpenter --namespace kube-system \
+helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter \
+  --namespace kube-system \
   --set settings.oxide.host=${OXIDE_HOST} \
-  --set settings.oxide.project=${OXIDE_PROJECT} \
-  --set controller.image.repository=${IMAGE_REPOSITORY}
+  --set settings.oxide.project=${OXIDE_PROJECT}
 ```
+
+To install from a checkout instead, point Helm at `charts/karpenter-crd` and `charts/karpenter`. The
+chart versions in the repo are placeholders, so `--set controller.image.repository`/`.tag` are needed
+to select an image.
 
 ## Bootstrap Providers
 
@@ -118,6 +120,21 @@ spec:
 EOF
 ```
 
+If your CNI or cloud controller manager taints a node while it starts up, list that taint under
+`spec.template.spec.startupTaints`. Karpenter discounts a node's startup taints while it is
+registered but not yet initialized; a taint it does not know about instead makes the node look
+unusable, and Karpenter launches a second node for pods the first one was already going to take.
+It already knows about `node.kubernetes.io/not-ready`,
+`node.cloudprovider.kubernetes.io/uninitialized:NoSchedule`, and `karpenter.sh/unregistered`,
+matching by key and effect only. See `examples/nodepool.yaml`.
+
+Startup taints are also applied to the node when it registers, so only list taints that something
+removes once the node is ready. Check what your cluster applies with:
+
+```
+kubectl get nodes -w -o jsonpath='{.metadata.name}{"\t"}{.spec.taints}{"\n"}'
+```
+
 ### Create a Deployment
 
 ```
@@ -200,3 +217,75 @@ spec:
           allowPrivilegeEscalation: false
 EOF
 ```
+
+## Contributing
+
+### Tooling
+
+Run the following to download the tools required for development into `bin/`:
+
+```
+make tools
+```
+
+Tool versions are pinned in `tools/go.mod`, which is kept separate from the controller's `go.mod` so
+their dependencies never enter the controller's module graph.
+
+### Development
+
+Generated artifacts — deepcopy code, the OxideNodeClass CRD, the vendored `karpenter.sh` CRDs, and the
+chart READMEs — are produced by:
+
+```
+make generate
+```
+
+To run the controller against the cluster in your current kube context, or to build the image with
+[ko](https://ko.build) and deploy it there:
+
+```
+make run
+make apply
+```
+
+To see all available recipes:
+
+```
+make help
+```
+
+### Before Opening a PR
+
+```
+make precommit
+```
+
+This runs the same steps CI does (`make ci-verify`): fixes and lints, generates, tests, and builds a
+local snapshot release. CI additionally fails if any of those steps leave the working tree dirty.
+
+## Release
+
+Tag the commit you are releasing with the semver release version (i.e. v1.0.9). A GitHub Actions
+workflow will kick off that performs the release using [goreleaser](https://goreleaser.com): multi-arch
+images are pushed to `ghcr.io/oxidecomputer/karpenter`, both charts are pushed to
+`oci://ghcr.io/oxidecomputer/karpenter/helm-charts` at the release version, and a GitHub release is
+created.
+
+```
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+## License
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

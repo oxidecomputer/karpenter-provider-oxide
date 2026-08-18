@@ -1,6 +1,7 @@
 package instancetype
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -24,11 +25,13 @@ const (
 	// GKE default hard eviction threshold (memory.available<100Mi).
 	evictionMemBytes int64 = 100 * MiB
 
-	// maxSledCPUs is the maximum number of CPUs a sled could have. Not every sled or rack configuration will support this.
-	// If the control plane errors, we'll mark this offering as unavailable, so the system will stabilize even when this number is too big.
+	// maxSledCPUs is the maximum number of CPUs a sled could have. Not every sled or rack
+	// configuration will support this. If the control plane errors, we'll mark this offering as
+	// unavailable, so the system will stabilize even when this number is too big.
 	maxSledCPUs = 384
-	// maxSledMemGiB if the maximum amount of memory a sled could have. Not every sled or rack configuration will support this.
-	// If the control plane errors, we'll mark this offering as unavailable, so the system will stabilize even when this number is too big.
+	// maxSledMemGiB if the maximum amount of memory a sled could have. Not every sled or rack
+	// configuration will support this. If the control plane errors, we'll mark this offering as
+	// unavailable, so the system will stabilize even when this number is too big.
 	maxSledMemGiB = 1536
 )
 
@@ -38,8 +41,14 @@ var (
 )
 
 type Provider struct {
-	instanceTypes []*cloudprovider.InstanceType
 	mu            sync.Mutex
+	instanceTypes []*cloudprovider.InstanceType
+	// generation is the unavailable offering generation instanceTypes was built against, which is
+	// what makes the list stale.
+	generation uint64
+	built      bool
+
+	unavailable *UnavailableOfferings
 }
 
 type Specs struct {
@@ -48,7 +57,9 @@ type Specs struct {
 }
 
 func NewProvider() *Provider {
-	return &Provider{}
+	return &Provider{
+		unavailable: NewUnavailableOfferings(),
+	}
 }
 
 func SpecsToInstanceTypeName(ncpus, memInGiB int) string {
@@ -83,16 +94,33 @@ func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) 
 	return nil, false
 }
 
+// MarkUnavailable takes a shape, and every shape at least as large, out of consideration until the
+// entry expires. It is called when the rack refuses to place an instance of that shape.
+func (i *Provider) MarkUnavailable(ctx context.Context, specs Specs) {
+	i.unavailable.Mark(ctx, specs)
+}
+
+// IsUnavailable reports whether a shape is currently ruled out by an insufficient capacity error.
+func (i *Provider) IsUnavailable(specs Specs) bool {
+	return i.unavailable.IsUnavailable(specs)
+}
+
+// InstanceTypes returns every instance type, with the offerings of the shapes the rack has recently
+// refused to place marked unavailable so scheduling passes over them.
+//
+// The list is rebuilt rather than updated in place, since the one already returned is read
+// concurrently by the scheduler. Rebuilding only happens when the set of unavailable shapes has
+// actually changed, so the steady state is a cache hit.
 func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
-	if len(i.instanceTypes) != 0 {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	generation := i.unavailable.Generation()
+	if i.built && i.generation == generation {
 		return i.instanceTypes
 	}
 
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if len(i.instanceTypes) != 0 {
-		return i.instanceTypes
-	}
+	unavailable := i.unavailable.Snapshot()
 	var instanceTypes []*cloudprovider.InstanceType
 	for cpus := 1; cpus <= maxSledCPUs; cpus++ {
 		for _, memRatio := range memRatios {
@@ -108,10 +136,25 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 					Name:     fmt.Sprintf("%d-%d", cpus, mem),
 					Capacity: capacity,
 					Requirements: scheduling.Requirements{
-						corev1.LabelInstanceTypeStable: scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, instanceTypeName),
-						corev1.LabelArchStable:         scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
-						corev1.LabelOSStable:           scheduling.NewRequirement(corev1.LabelOSStable, corev1.NodeSelectorOpIn, "linux"),
-						corev1.LabelWindowsBuild:       scheduling.NewRequirement(corev1.LabelWindowsBuild, corev1.NodeSelectorOpDoesNotExist),
+						corev1.LabelInstanceTypeStable: scheduling.NewRequirement(
+							corev1.LabelInstanceTypeStable,
+							corev1.NodeSelectorOpIn,
+							instanceTypeName,
+						),
+						corev1.LabelArchStable: scheduling.NewRequirement(
+							corev1.LabelArchStable,
+							corev1.NodeSelectorOpIn,
+							"amd64",
+						),
+						corev1.LabelOSStable: scheduling.NewRequirement(
+							corev1.LabelOSStable,
+							corev1.NodeSelectorOpIn,
+							"linux",
+						),
+						corev1.LabelWindowsBuild: scheduling.NewRequirement(
+							corev1.LabelWindowsBuild,
+							corev1.NodeSelectorOpDoesNotExist,
+						),
 					},
 					Overhead: &cloudprovider.InstanceTypeOverhead{
 						KubeReserved: corev1.ResourceList{
@@ -128,10 +171,18 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 					},
 					Offerings: cloudprovider.Offerings{
 						&cloudprovider.Offering{
-							Available: true,
+							Available: !covered(unavailable, Specs{Ncpus: cpus, MemInGiB: mem}),
 							Requirements: scheduling.Requirements{
-								corev1.LabelTopologyZone:    scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "rack"),
-								karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, "on-demand"),
+								corev1.LabelTopologyZone: scheduling.NewRequirement(
+									corev1.LabelTopologyZone,
+									corev1.NodeSelectorOpIn,
+									"rack",
+								),
+								karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
+									karpv1.CapacityTypeLabelKey,
+									corev1.NodeSelectorOpIn,
+									"on-demand",
+								),
 							},
 						},
 					},
@@ -140,6 +191,8 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		}
 	}
 	i.instanceTypes = instanceTypes
+	i.generation = generation
+	i.built = true
 	return instanceTypes
 }
 
@@ -156,10 +209,7 @@ func reserveTiered(total int64, tiers []tier) int64 {
 		if total <= prev {
 			break
 		}
-		upper := t.limit
-		if total < upper {
-			upper = total
-		}
+		upper := min(total, t.limit)
 		reserved += float64(upper-prev) * t.percent
 		prev = t.limit
 	}

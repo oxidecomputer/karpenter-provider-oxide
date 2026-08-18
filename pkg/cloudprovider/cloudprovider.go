@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter/pkg/instance"
 	"github.com/oxidecomputer/karpenter/pkg/instancetype"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -33,15 +34,23 @@ type OxideCloudProvider struct {
 	ox         *oxide.Client
 	project    string
 
+	instanceProvider     *instance.Provider
 	instanceTypeProvider *instancetype.Provider
 	bootstrappers        bootstrap.Bootstrappers
 }
 
-func NewOxideCloudProvider(kubeClient client.Client, ox *oxide.Client, project string, instanceTypeProvider *instancetype.Provider, bootstrappers bootstrap.Bootstrappers) *OxideCloudProvider {
+func NewOxideCloudProvider(
+	kubeClient client.Client,
+	ox *oxide.Client,
+	project string,
+	instanceTypeProvider *instancetype.Provider,
+	bootstrappers bootstrap.Bootstrappers,
+) *OxideCloudProvider {
 	return &OxideCloudProvider{
 		kubeClient:           kubeClient,
 		ox:                   ox,
 		project:              project,
+		instanceProvider:     instance.NewProvider(ox, project),
 		instanceTypeProvider: instanceTypeProvider,
 		bootstrappers:        bootstrappers,
 	}
@@ -54,20 +63,30 @@ func (c *OxideCloudProvider) Name() string {
 
 // Create launches a NodeClaim with the given resource requests and requirements and returns a hydrated
 // NodeClaim back with resolved NodeClaim labels for the launched NodeClaim
-func (c *OxideCloudProvider) Create(ctx context.Context, nodeClaim *karpcorev1.NodeClaim) (*karpcorev1.NodeClaim, error) {
+func (c *OxideCloudProvider) Create(
+	ctx context.Context,
+	nodeClaim *karpcorev1.NodeClaim,
+) (*karpcorev1.NodeClaim, error) {
 
 	// Get the Oxide Node Class from the NodeClaim
 	nodeClass := &v1alpha1.OxideNodeClass{}
-	if err := c.kubeClient.Get(ctx, client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name}, nodeClass); err != nil {
+	if err := c.kubeClient.Get(
+		ctx,
+		client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name},
+		nodeClass,
+	); err != nil {
 		return nil, fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
 	}
 
 	// Taints are per-NodeClaim rather than per-nodeclass, so they are resolved here and handed to the
 	// bootstrapper to apply in whatever form it registers nodes with.
-	nodeTaints := append(append(nodeClaim.Spec.Taints, nodeClaim.Spec.StartupTaints...), corev1.Taint{
-		Key:    karpcorev1.UnregisteredTaintKey,
-		Effect: corev1.TaintEffectNoExecute,
-	})
+	nodeTaints := append(
+		append(nodeClaim.Spec.Taints, nodeClaim.Spec.StartupTaints...),
+		corev1.Taint{
+			Key:    karpcorev1.UnregisteredTaintKey,
+			Effect: corev1.TaintEffectNoExecute,
+		},
+	)
 	nodeTaints = lo.UniqBy(nodeTaints, func(t corev1.Taint) string { return t.Key })
 
 	bootstrapper, err := c.bootstrappers.For(nodeClass)
@@ -75,13 +94,35 @@ func (c *OxideCloudProvider) Create(ctx context.Context, nodeClaim *karpcorev1.N
 		return nil, err
 	}
 
-	var minInstanceType string
+	var candidates []string
 
 	for _, req := range nodeClaim.Spec.Requirements {
 		if req.Key != corev1.LabelInstanceTypeStable {
 			continue
 		}
-		minInstanceType = slices.MinFunc(req.Values, func(a, b string) int {
+		candidates = req.Values
+	}
+
+	// Shapes the rack has recently refused to place are dropped here as well as from the offerings
+	// the scheduler sees. The NodeClaim carries the requirements it was built with, so one that was
+	// already in flight when a shape was marked can still ask for it.
+	available := lo.Filter(candidates, func(candidate string, _ int) bool {
+		specs, err := instancetype.InstanceTypeToSpecs(candidate)
+		if err != nil {
+			return false
+		}
+		return !c.instanceTypeProvider.IsUnavailable(specs)
+	})
+
+	if len(candidates) > 0 && len(available) == 0 {
+		return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf(
+			"every instance type the NodeClaim can use was recently refused for insufficient capacity",
+		))
+	}
+
+	minInstanceType := ""
+	if len(available) > 0 {
+		minInstanceType = slices.MinFunc(available, func(a, b string) int {
 			aSpecs, err := instancetype.InstanceTypeToSpecs(a)
 			if err != nil {
 				return 0
@@ -121,7 +162,9 @@ func (c *OxideCloudProvider) Create(ctx context.Context, nodeClaim *karpcorev1.N
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
 	}
 
-	instance, err := c.ox.InstanceCreate(ctx, oxide.InstanceCreateParams{
+	// Create resolves the whole launch: it adopts or clears an instance left behind by an earlier
+	// attempt, and does not return until the instance is actually running.
+	launched, err := c.instanceProvider.Create(ctx, oxide.InstanceCreateParams{
 		Project: oxide.NameOrId(c.project),
 		Body: &oxide.InstanceCreate{
 			Name:        oxide.Name(name),
@@ -158,37 +201,42 @@ func (c *OxideCloudProvider) Create(ctx context.Context, nodeClaim *karpcorev1.N
 					},
 				},
 			},
-			ExternalIps: lo.Map(nodeClass.Status.IPPools, func(ipPool v1alpha1.OxideIPPool, _ int) oxide.ExternalIpCreate {
-				return oxide.ExternalIpCreate{
-					Value: &oxide.ExternalIpCreateEphemeral{
-						PoolSelector: oxide.PoolSelector{
-							Value: &oxide.PoolSelectorExplicit{
-								Pool: oxide.NameOrId(ipPool.Name),
+			ExternalIps: lo.Map(
+				nodeClass.Status.IPPools,
+				func(ipPool v1alpha1.OxideIPPool, _ int) oxide.ExternalIpCreate {
+					return oxide.ExternalIpCreate{
+						Value: &oxide.ExternalIpCreateEphemeral{
+							PoolSelector: oxide.PoolSelector{
+								Value: &oxide.PoolSelectorExplicit{
+									Pool: oxide.NameOrId(ipPool.Name),
+								},
 							},
 						},
-					},
-				}
-			}),
-			SshPublicKeys: lo.Map(nodeClass.Status.SSHKeys, func(sshKey v1alpha1.OxideSSHKey, _ int) oxide.NameOrId {
-				return oxide.NameOrId(sshKey.Name)
-			}),
+					}
+				},
+			),
+			SshPublicKeys: lo.Map(
+				nodeClass.Status.SSHKeys,
+				func(sshKey v1alpha1.OxideSSHKey, _ int) oxide.NameOrId {
+					return oxide.NameOrId(sshKey.Name)
+				},
+			),
 		},
 	})
-
 	if err != nil {
-		// TODO: we should check if it's stopped and then start it if necessary, otherwise do nothing
-		if errors.Is(err, oxide.ErrObjectAlreadyExists) {
-			var startErr error
-			_, startErr = c.ox.InstanceStart(ctx, oxide.InstanceStartParams{
-				Project:  oxide.NameOrId(c.project),
-				Instance: oxide.NameOrId(name),
-			})
-			return nil, fmt.Errorf("unable to create instance, %w, unable to start instance, %w", err, startErr)
+		// Karpenter deletes the NodeClaim immediately on an insufficient capacity error and
+		// reschedules its pods. Without this the NodeClaim sits around holding a launch that the
+		// rack cannot satisfy until the 15 minute registration timeout expires.
+		if errors.Is(err, instance.ErrInsufficientCapacity) {
+			// Rescheduling only helps if it lands somewhere else, so this shape and everything
+			// larger comes out of consideration while the rack stays this full.
+			c.instanceTypeProvider.MarkUnavailable(ctx, instanceType)
+			return nil, cloudprovider.NewInsufficientCapacityError(err)
 		}
 		return nil, err
 	}
 
-	resolvedNodeClaim, err := c.InstanceToNodeClaim(instance, nodeClass, nodeClaim.DeepCopy())
+	resolvedNodeClaim, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
 	if err != nil {
 		return nil, err
 	}
@@ -200,65 +248,76 @@ func (c *OxideCloudProvider) Create(ctx context.Context, nodeClaim *karpcorev1.N
 // NodeClaimNotFoundError if the cloudProvider instance is already terminated and nil if deletion was triggered.
 // Karpenter will keep retrying until Delete returns a NodeClaimNotFound error.
 func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.NodeClaim) error {
-	if !strings.HasPrefix(nodeClaim.Status.ProviderID, "oxide://") {
-		return fmt.Errorf("invalid provider id, must use the oxide ccm")
-	}
-	instanceID := strings.TrimPrefix(nodeClaim.Status.ProviderID, "oxide://")
-	_, err := c.ox.InstanceStop(ctx, oxide.InstanceStopParams{
-		Instance: oxide.NameOrId(instanceID),
-	})
+	instanceID, err := InstanceIDFromProviderID(nodeClaim.Status.ProviderID)
 	if err != nil {
-		if errors.Is(err, oxide.ErrObjectNotFound) {
+		return fmt.Errorf("invalid provider id, must use the oxide ccm: %w", err)
+	}
+
+	// Matches the instance and boot disk names assigned in Create. It is the fallback used to find
+	// the boot disk when the instance is already gone and can no longer be asked for its disk ID.
+	bootDiskName := InstanceNamePrefix + nodeClaim.Name
+
+	if err := c.instanceProvider.Delete(ctx, instanceID, bootDiskName); err != nil {
+		if errors.Is(err, instance.ErrNotFound) {
 			return cloudprovider.NewNodeClaimNotFoundError(err)
 		}
-		return fmt.Errorf("unable to stop the instance, %w", err)
+		return err
 	}
 
-	err = c.ox.InstanceDelete(ctx, oxide.InstanceDeleteParams{
-		Instance: oxide.NameOrId(instanceID),
-	})
-	if err != nil {
-		return fmt.Errorf("unable to delete the instance, %w", err)
-	}
-
-	err = c.ox.DiskDelete(ctx, oxide.DiskDeleteParams{
-		Project: oxide.NameOrId(c.project),
-		Disk:    oxide.NameOrId(nodeClaim.Name),
-	})
-	if err != nil {
-		return fmt.Errorf("unable to delete boot disk, %w", err)
-	}
-	return nil
+	// The instance and its disks are gone by the time Delete returns without an error, so report the
+	// terminal state directly rather than making Karpenter retry to discover it.
+	return cloudprovider.NewNodeClaimNotFoundError(instance.ErrNotFound)
 }
 
 // Get retrieves a NodeClaim from the cloudprovider by its provider id
-func (c *OxideCloudProvider) Get(ctx context.Context, providerID string) (*karpcorev1.NodeClaim, error) {
+func (c *OxideCloudProvider) Get(
+	ctx context.Context,
+	providerID string,
+) (*karpcorev1.NodeClaim, error) {
 	instanceID, err := InstanceIDFromProviderID(providerID)
 	if err != nil {
 		return nil, err
 	}
-	instance, err := c.ox.InstanceView(ctx, oxide.InstanceViewParams{Instance: oxide.NameOrId(instanceID)})
+	oxideInstance, err := c.ox.InstanceView(
+		ctx,
+		oxide.InstanceViewParams{Instance: oxide.NameOrId(instanceID)},
+	)
 	if err != nil {
+		// Karpenter's termination flow only removes finalizers once the cloudprovider reports the
+		// instance as gone, so a 404 must surface as a NodeClaimNotFoundError rather than a generic
+		// error that gets retried forever.
+		if errors.Is(err, oxide.ErrObjectNotFound) {
+			return nil, cloudprovider.NewNodeClaimNotFoundError(err)
+		}
 		return nil, fmt.Errorf("unable to get instance with instance ID %s, %w", instanceID, err)
 	}
-	nodeClaim, err := c.InstanceToNodeClaim(instance, nil, nil)
+	nodeClaim, err := c.InstanceToNodeClaim(oxideInstance, nil, nil)
 	if err != nil {
 		return nil, err
 	}
 	return nodeClaim, nil
 }
 
-func (c *OxideCloudProvider) InstanceToNodeClaim(instance *oxide.Instance, nodeClass *v1alpha1.OxideNodeClass, nodeClaim *karpcorev1.NodeClaim) (*karpcorev1.NodeClaim, error) {
+func (c *OxideCloudProvider) InstanceToNodeClaim(
+	oxideInstance *oxide.Instance,
+	nodeClass *v1alpha1.OxideNodeClass,
+	nodeClaim *karpcorev1.NodeClaim,
+) (*karpcorev1.NodeClaim, error) {
 	if nodeClaim == nil {
 		nodeClaim = &karpcorev1.NodeClaim{
 			ObjectMeta: v1.ObjectMeta{
-				Name: strings.TrimPrefix(instance.Hostname, InstanceNamePrefix),
+				Name: strings.TrimPrefix(oxideInstance.Hostname, InstanceNamePrefix),
 			},
 		}
 	}
-	nodeClaim.Status.ProviderID = fmt.Sprintf("oxide://%s", instance.Id)
+	nodeClaim.Status.ProviderID = fmt.Sprintf("oxide://%s", oxideInstance.Id)
 	labels := map[string]string{}
-	if it, ok := c.instanceTypeProvider.Get(instancetype.SpecsToInstanceTypeName(int(instance.Ncpus), int(instance.Memory)/GiB)); ok {
+	if it, ok := c.instanceTypeProvider.Get(
+		instancetype.SpecsToInstanceTypeName(
+			int(oxideInstance.Ncpus),
+			int(oxideInstance.Memory)/GiB,
+		),
+	); ok {
 		for key, req := range it.Requirements {
 			if req.Operator() != corev1.NodeSelectorOpIn {
 				continue
@@ -303,16 +362,19 @@ func InstanceIDFromProviderID(providerID string) (string, error) {
 
 // List retrieves all NodeClaims from the cloudprovider
 func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim, error) {
-	instances, err := c.ox.InstanceListAllPages(ctx, oxide.InstanceListParams{Project: oxide.NameOrId(c.project)})
+	instances, err := c.ox.InstanceListAllPages(
+		ctx,
+		oxide.InstanceListParams{Project: oxide.NameOrId(c.project)},
+	)
 	if err != nil {
 		return nil, err
 	}
 	var nodeClaims []*karpcorev1.NodeClaim
-	for _, instance := range instances {
-		if !strings.HasPrefix(string(instance.Name), InstanceNamePrefix) {
+	for _, oxideInstance := range instances {
+		if !strings.HasPrefix(string(oxideInstance.Name), InstanceNamePrefix) {
 			continue
 		}
-		nodeClaim, err := c.InstanceToNodeClaim(&instance, nil, nil)
+		nodeClaim, err := c.InstanceToNodeClaim(&oxideInstance, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -325,13 +387,19 @@ func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim,
 // Availability of types or zone may vary by nodepool or over time.  Regardless of
 // availability, the GetInstanceTypes method should always return all instance types,
 // even those with no offerings available.
-func (c *OxideCloudProvider) GetInstanceTypes(context.Context, *karpcorev1.NodePool) ([]*cloudprovider.InstanceType, error) {
+func (c *OxideCloudProvider) GetInstanceTypes(
+	context.Context,
+	*karpcorev1.NodePool,
+) ([]*cloudprovider.InstanceType, error) {
 	return c.instanceTypeProvider.InstanceTypes(), nil
 }
 
 // IsDrifted returns whether a NodeClaim has drifted from the provisioning requirements
 // it is tied to.
-func (c *OxideCloudProvider) IsDrifted(context.Context, *karpcorev1.NodeClaim) (cloudprovider.DriftReason, error) {
+func (c *OxideCloudProvider) IsDrifted(
+	context.Context,
+	*karpcorev1.NodeClaim,
+) (cloudprovider.DriftReason, error) {
 	return "", nil
 }
 

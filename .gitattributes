@@ -1,0 +1,2 @@
+pkg/apis/crds/karpenter.sh_*.yaml linguist-generated=true
+charts/karpenter-crd/templates/*.yaml linguist-generated=true

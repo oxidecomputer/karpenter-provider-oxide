@@ -7,6 +7,14 @@
 
 {{ template "chart.homepageLine" . }}
 
+## Installing the Chart
+
+To install the chart with the release name `karpenter-crds`:
+
+```console
+helm upgrade --install karpenter-crds oci://ghcr.io/oxidecomputer/karpenter/helm-charts/karpenter-crd
+```
+
 {{ template "chart.maintainersSection" . }}
 
 {{ template "chart.sourcesSection" . }}

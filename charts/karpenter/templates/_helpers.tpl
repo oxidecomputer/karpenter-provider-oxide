@@ -67,11 +67,16 @@ Create the name of the service account to use
 {{/*
 Karpenter image to use
 */}}
+{{/*
+The image tag defaults to the chart's appVersion, which `make manifests` stamps
+with the release version at package time. Release images are tagged without a
+"v" prefix (see .goreleaser.yaml), so the appVersion is used verbatim.
+*/}}
 {{- define "karpenter.controller.image" -}}
 {{- if .Values.controller.image.digest }}
-{{- printf "%s:%s@%s" .Values.controller.image.repository  (default (printf "v%s" .Chart.AppVersion) .Values.controller.image.tag) .Values.controller.image.digest }}
+{{- printf "%s:%s@%s" .Values.controller.image.repository (default .Chart.AppVersion .Values.controller.image.tag) .Values.controller.image.digest }}
 {{- else }}
-{{- printf "%s:%s" .Values.controller.image.repository  (default (printf "v%s" .Chart.AppVersion) .Values.controller.image.tag) }}
+{{- printf "%s:%s" .Values.controller.image.repository (default .Chart.AppVersion .Values.controller.image.tag) }}
 {{- end }}
 {{- end }}
 

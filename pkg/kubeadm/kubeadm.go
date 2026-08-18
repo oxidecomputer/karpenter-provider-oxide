@@ -96,12 +96,17 @@ func (b *Bootstrapper) Name() string {
 // Resolve reads cluster-info and records the endpoint and CA pins nodes will use to discover the
 // control plane. No token is minted here; tokens are per-node and short-lived, so they are created
 // in UserData instead.
-func (b *Bootstrapper) Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, cluster bootstrap.Cluster) error {
+func (b *Bootstrapper) Resolve(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	cluster bootstrap.Cluster,
+) error {
 	clusterInfo, err := b.clusterInfo(ctx)
 	if err != nil {
 		// cluster-info is expected to exist on every kubeadm cluster, so treat this as user-visible
 		// misconfiguration rather than a transient failure to retry against.
-		nodeClass.StatusConditions().SetFalse(v1alpha1.ConditionTypeClusterInfoAvailable, "ClusterInfoUnavailable", err.Error())
+		nodeClass.StatusConditions().
+			SetFalse(v1alpha1.ConditionTypeClusterInfoAvailable, "ClusterInfoUnavailable", err.Error())
 		return nil
 	}
 	nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeClusterInfoAvailable)
@@ -134,12 +139,22 @@ func (b *Bootstrapper) Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNod
 // UserData mints a short-lived bootstrap token for this NodeClaim and renders a JoinConfiguration
 // that uses it. The token is created here rather than during Resolve so that each node gets its own
 // credential and so that no token exists while no node is waiting to consume it.
-func (b *Bootstrapper) UserData(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, req bootstrap.Request) (string, error) {
+func (b *Bootstrapper) UserData(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	req bootstrap.Request,
+) (string, error) {
 	if nodeClass.Status.Bootstrap == nil || nodeClass.Status.Bootstrap.Kubeadm == nil {
-		return "", fmt.Errorf("kubeadm discovery information has not been resolved for OxideNodeClass %q", nodeClass.Name)
+		return "", fmt.Errorf(
+			"kubeadm discovery information has not been resolved for OxideNodeClass %q",
+			nodeClass.Name,
+		)
 	}
 	if nodeClass.Status.Server == "" {
-		return "", fmt.Errorf("no API server endpoint resolved for OxideNodeClass %q", nodeClass.Name)
+		return "", fmt.Errorf(
+			"no API server endpoint resolved for OxideNodeClass %q",
+			nodeClass.Name,
+		)
 	}
 
 	token, err := b.createToken(ctx, nodeClass, req)
@@ -171,12 +186,22 @@ func (b *Bootstrapper) clusterInfo(ctx context.Context) (*clusterInfoData, error
 	configMap := &corev1.ConfigMap{}
 	objKey := client.ObjectKey{Namespace: clusterInfoNamespace, Name: clusterInfoName}
 	if err := b.reader.Get(ctx, objKey, configMap); err != nil {
-		return nil, fmt.Errorf("unable to retrieve the %s/%s ConfigMap: %w", clusterInfoNamespace, clusterInfoName, err)
+		return nil, fmt.Errorf(
+			"unable to retrieve the %s/%s ConfigMap: %w",
+			clusterInfoNamespace,
+			clusterInfoName,
+			err,
+		)
 	}
 
 	kubeconfigData, ok := configMap.Data[clusterInfoKubeconfigKey]
 	if !ok {
-		return nil, fmt.Errorf("%s/%s ConfigMap has no %q key", clusterInfoNamespace, clusterInfoName, clusterInfoKubeconfigKey)
+		return nil, fmt.Errorf(
+			"%s/%s ConfigMap has no %q key",
+			clusterInfoNamespace,
+			clusterInfoName,
+			clusterInfoKubeconfigKey,
+		)
 	}
 
 	kubeconfig, err := clientcmd.Load([]byte(kubeconfigData))
@@ -242,11 +267,19 @@ func caCertHashes(caCertData []byte) ([]string, error) {
 
 // createToken mints a bootstrap token Secret scoped to a single node join.
 //
-// The token is granted only usage-bootstrap-authentication: signing the cluster-info JWS is
-// unnecessary because the node pins the CA by hash instead of trusting a signed cluster-info. The
-// Secret is never read back, and expired tokens are garbage collected by the control plane's
+// The token is granted both bootstrap usages. usage-bootstrap-authentication lets the node
+// authenticate to the API server, and usage-bootstrap-signing makes the control plane's
+// bootstrapsigner controller publish a "jws-kubeconfig-<tokenID>" entry in cluster-info. Token
+// discovery requires that signature unconditionally: kubeadm rejects a cluster-info that carries no
+// JWS for the token ID it was given, before it ever gets as far as checking the pinned CA hashes.
+//
+// The Secret is never read back, and expired tokens are garbage collected by the control plane's
 // tokencleaner controller, so the controller needs no read or delete access to kube-system Secrets.
-func (b *Bootstrapper) createToken(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, req bootstrap.Request) (string, error) {
+func (b *Bootstrapper) createToken(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	req bootstrap.Request,
+) (string, error) {
 	tokenID, err := randomString(tokenIDLength)
 	if err != nil {
 		return "", err
@@ -271,11 +304,15 @@ func (b *Bootstrapper) createToken(ctx context.Context, nodeClass *v1alpha1.Oxid
 		},
 		Type: tokenSecretType,
 		StringData: map[string]string{
-			"description":                    fmt.Sprintf("Karpenter bootstrap token for NodeClaim %s", req.NodeClaim.Name),
+			"description": fmt.Sprintf(
+				"Karpenter bootstrap token for NodeClaim %s",
+				req.NodeClaim.Name,
+			),
 			"token-id":                       tokenID,
 			"token-secret":                   tokenSecret,
 			"expiration":                     time.Now().Add(ttl).UTC().Format(time.RFC3339),
 			"usage-bootstrap-authentication": "true",
+			"usage-bootstrap-signing":        "true",
 			"auth-extra-groups":              nodeBootstrapGroup,
 		},
 	}
@@ -301,7 +338,11 @@ func randomString(length int) (string, error) {
 }
 
 // joinConfiguration renders the kubeadm JoinConfiguration document.
-func (b *Bootstrapper) joinConfiguration(nodeClass *v1alpha1.OxideNodeClass, req bootstrap.Request, token string) (string, error) {
+func (b *Bootstrapper) joinConfiguration(
+	nodeClass *v1alpha1.OxideNodeClass,
+	req bootstrap.Request,
+	token string,
+) (string, error) {
 	configVersion := nodeClass.Spec.Bootstrap.Kubeadm.ConfigVersion
 	if configVersion == "" {
 		configVersion = configVersionV1beta4
@@ -313,7 +354,10 @@ func (b *Bootstrapper) joinConfiguration(nodeClass *v1alpha1.OxideNodeClass, req
 	if req.Hostname != "" {
 		nodeRegistration["name"] = req.Hostname
 	}
-	if kubeletArgs := kubeletExtraArgs(nodeClass.Status.KubeletArgs, configVersion); kubeletArgs != nil {
+	if kubeletArgs := kubeletExtraArgs(
+		nodeClass.Status.KubeletArgs,
+		configVersion,
+	); kubeletArgs != nil {
 		nodeRegistration["kubeletExtraArgs"] = kubeletArgs
 	}
 

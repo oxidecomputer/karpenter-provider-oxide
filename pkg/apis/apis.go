@@ -22,7 +22,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
-//go:generate go tool controller-gen object crd paths="./..." output:crd:artifacts:config=crds
 var (
 	Group              = "karpenter.oxide.computer"
 	CompatibilityGroup = "compatibility." + Group

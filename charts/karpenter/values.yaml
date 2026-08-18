@@ -104,8 +104,8 @@ extraVolumes: []
 controller:
   image:
     # -- Repository path to the controller image.
-    repository: ""
-    # -- Tag of the controller image.
+    repository: ghcr.io/oxidecomputer/karpenter
+    # -- Tag of the controller image. Defaults to the chart's appVersion.
     tag: ""
     # -- SHA256 digest of the controller image.
     digest: ""

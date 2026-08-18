@@ -40,7 +40,12 @@ type Controller struct {
 	bootstrappers bootstrap.Bootstrappers
 }
 
-func NewController(kubeClient client.Client, reader client.Reader, oxideClient *oxide.Client, bootstrappers bootstrap.Bootstrappers) *Controller {
+func NewController(
+	kubeClient client.Client,
+	reader client.Reader,
+	oxideClient *oxide.Client,
+	bootstrappers bootstrap.Bootstrappers,
+) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		reader:        reader,
@@ -53,7 +58,10 @@ func (c *Controller) Name() string {
 	return "oxidenodeclass"
 }
 
-func (c *Controller) Reconcile(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass) (reconcile.Result, error) {
+func (c *Controller) Reconcile(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+) (reconcile.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
 	stored := nodeClass.DeepCopy()
 
@@ -73,7 +81,11 @@ func (c *Controller) Reconcile(ctx context.Context, nodeClass *v1alpha1.OxideNod
 	// Everything bootstrap-provider-specific, including the final form of Status.Server and the
 	// conditions the provider owns, is resolved behind this call.
 	if err := bootstrapper.Resolve(ctx, nodeClass, cluster); err != nil {
-		return reconcile.Result{}, fmt.Errorf("unable to resolve %s bootstrap configuration: %w", bootstrapper.Name(), err)
+		return reconcile.Result{}, fmt.Errorf(
+			"unable to resolve %s bootstrap configuration: %w",
+			bootstrapper.Name(),
+			err,
+		)
 	}
 
 	images, err := c.resolveImages(ctx, nodeClass.Spec.ImageSelector)
@@ -103,7 +115,8 @@ func (c *Controller) Reconcile(ctx context.Context, nodeClass *v1alpha1.OxideNod
 	nodeClass.StatusConditions().SetTrue(status.ConditionReady)
 
 	if !equality.Semantic.DeepEqual(stored, nodeClass) {
-		if err := c.kubeClient.Status().Patch(ctx, nodeClass, client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := c.kubeClient.Status().
+			Patch(ctx, nodeClass, client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{})); err != nil {
 			if kerrors.IsConflict(err) {
 				return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 			}
@@ -126,7 +139,10 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 
 // resolveCluster discovers where the kube-apiserver can be reached. Bootstrap providers join on
 // different ports, so this deliberately stops at the host and port and leaves rendering to them.
-func (c *Controller) resolveCluster(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass) (bootstrap.Cluster, error) {
+func (c *Controller) resolveCluster(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+) (bootstrap.Cluster, error) {
 	cluster := bootstrap.Cluster{ServerOverride: nodeClass.Spec.Server}
 	// A user-supplied server is used verbatim, so there is no reason to query the cluster for one.
 	if cluster.ServerOverride != "" {
@@ -134,12 +150,21 @@ func (c *Controller) resolveCluster(ctx context.Context, nodeClass *v1alpha1.Oxi
 	}
 
 	kubeEndpoint := &discoveryv1.EndpointSlice{}
-	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: "default", Name: "kubernetes"}, kubeEndpoint); err != nil {
-		return cluster, fmt.Errorf("unable to retrieve the Kubernetes API server IP from default/kubernetes service (endpoint slice), %w", err)
+	if err := c.reader.Get(
+		ctx,
+		client.ObjectKey{Namespace: "default", Name: "kubernetes"},
+		kubeEndpoint,
+	); err != nil {
+		return cluster, fmt.Errorf(
+			"unable to retrieve the Kubernetes API server IP from default/kubernetes service (endpoint slice), %w",
+			err,
+		)
 	}
 	firstEndpoint, ok := lo.First(kubeEndpoint.Endpoints)
 	if !ok || len(firstEndpoint.Addresses) == 0 {
-		return cluster, fmt.Errorf("no server specified in spec and the default/kubernetes service has no endpoint addresses")
+		return cluster, fmt.Errorf(
+			"no server specified in spec and the default/kubernetes service has no endpoint addresses",
+		)
 	}
 	cluster.Host = firstEndpoint.Addresses[0]
 	if port, ok := lo.First(kubeEndpoint.Ports); ok && port.Port != nil {
@@ -148,7 +173,10 @@ func (c *Controller) resolveCluster(ctx context.Context, nodeClass *v1alpha1.Oxi
 	return cluster, nil
 }
 
-func (c *Controller) resolveIPPools(ctx context.Context, ipPoolSelectors []v1alpha1.IPPoolSelector) ([]v1alpha1.OxideIPPool, error) {
+func (c *Controller) resolveIPPools(
+	ctx context.Context,
+	ipPoolSelectors []v1alpha1.IPPoolSelector,
+) ([]v1alpha1.OxideIPPool, error) {
 	var listSelectors []v1alpha1.IPPoolSelector
 	var resolvedIPPools []oxide.SiloIpPool
 	for _, ipPoolSelector := range ipPoolSelectors {
@@ -185,14 +213,18 @@ func (c *Controller) resolveIPPools(ctx context.Context, ipPoolSelectors []v1alp
 			if ipPoolSelector.Default && !*ipPool.IsDefault {
 				continue
 			}
-			if ipPoolSelector.IPVersion != "" && !strings.HasSuffix(ipPoolSelector.IPVersion, string(ipPool.IpVersion)) {
+			if ipPoolSelector.IPVersion != "" &&
+				!strings.HasSuffix(ipPoolSelector.IPVersion, string(ipPool.IpVersion)) {
 				continue
 			}
 			resolvedIPPools = append(resolvedIPPools, ipPool)
 		}
 	}
 
-	resolvedIPPools = lo.UniqBy(resolvedIPPools, func(ipPool oxide.SiloIpPool) string { return ipPool.Id })
+	resolvedIPPools = lo.UniqBy(
+		resolvedIPPools,
+		func(ipPool oxide.SiloIpPool) string { return ipPool.Id },
+	)
 	return lo.Map(resolvedIPPools, func(ipPool oxide.SiloIpPool, _ int) v1alpha1.OxideIPPool {
 		return v1alpha1.OxideIPPool{
 			ID:        ipPool.Id,
@@ -203,7 +235,10 @@ func (c *Controller) resolveIPPools(ctx context.Context, ipPoolSelectors []v1alp
 	}), nil
 }
 
-func (c *Controller) resolveSubnets(ctx context.Context, subnetSelectors []v1alpha1.SubnetSelector) ([]v1alpha1.OxideSubnet, error) {
+func (c *Controller) resolveSubnets(
+	ctx context.Context,
+	subnetSelectors []v1alpha1.SubnetSelector,
+) ([]v1alpha1.OxideSubnet, error) {
 	var resolvedSubnets []oxide.VpcSubnet
 	vpcIDToName := map[string]string{}
 	for _, subnetSelector := range subnetSelectors {
@@ -237,7 +272,13 @@ func (c *Controller) resolveSubnets(ctx context.Context, subnetSelectors []v1alp
 				if errors.Is(err, oxide.ErrObjectNotFound) {
 					continue
 				}
-				return nil, fmt.Errorf("subnet %q from VPC %q and project %q: %w", nameOrID, vpcNameOrID, project, err)
+				return nil, fmt.Errorf(
+					"subnet %q from VPC %q and project %q: %w",
+					nameOrID,
+					vpcNameOrID,
+					project,
+					err,
+				)
 			}
 			resolvedSubnets = append(resolvedSubnets, *subnet)
 		} else if vpcNameOrID != "" { // Only VPC is passed
@@ -249,12 +290,18 @@ func (c *Controller) resolveSubnets(ctx context.Context, subnetSelectors []v1alp
 				if errors.Is(err, oxide.ErrObjectNotFound) {
 					continue
 				}
-				return nil, fmt.Errorf("subnets from VPC %q and project %q: %w", vpcNameOrID, project, err)
+				return nil, fmt.Errorf(
+					"subnets from VPC %q and project %q: %w",
+					vpcNameOrID,
+					project,
+					err,
+				)
 			}
 			resolvedSubnets = append(resolvedSubnets, subnets...)
 		}
 
-		// Cache the VPC ID to Name mapping if a name is used in the selector since we need VPC Name in the instance create to create a network interface.
+		// Cache the VPC ID to Name mapping if a name is used in the selector since we need the VPC
+		// Name in the instance create to create a network interface.
 		// InstanceCreate#CreateNetworkInterface does not accept a VPC ID, only a Name.
 		if subnetSelector.VPCName != "" {
 			vpcIDToName[resolvedSubnets[len(resolvedSubnets)-1].VpcId] = subnetSelector.VPCName
@@ -287,7 +334,10 @@ func (c *Controller) resolveSubnets(ctx context.Context, subnetSelectors []v1alp
 	return oxideSubnets, nil
 }
 
-func (c *Controller) resolveSSHKeys(ctx context.Context, sshKeySelectors []v1alpha1.SSHKeySelector) ([]v1alpha1.OxideSSHKey, error) {
+func (c *Controller) resolveSSHKeys(
+	ctx context.Context,
+	sshKeySelectors []v1alpha1.SSHKeySelector,
+) ([]v1alpha1.OxideSSHKey, error) {
 	var sshKeys []v1alpha1.OxideSSHKey
 	for _, sshKeySelector := range sshKeySelectors {
 		nameOrID := lo.Ternary(sshKeySelector.ID != "", sshKeySelector.ID, sshKeySelector.Name)
@@ -305,7 +355,10 @@ func (c *Controller) resolveSSHKeys(ctx context.Context, sshKeySelectors []v1alp
 	return sshKeys, nil
 }
 
-func (c *Controller) resolveImages(ctx context.Context, imageSelectors []v1alpha1.ImageSelector) ([]v1alpha1.OxideImage, error) {
+func (c *Controller) resolveImages(
+	ctx context.Context,
+	imageSelectors []v1alpha1.ImageSelector,
+) ([]v1alpha1.OxideImage, error) {
 	var resolvedImages []oxide.Image
 	var listImageSelector []v1alpha1.ImageSelector
 	// Check for direct query images via name or ID
@@ -314,7 +367,7 @@ func (c *Controller) resolveImages(ctx context.Context, imageSelectors []v1alpha
 		project := imageSelector.Project
 		if imageSelector.ID != "" {
 			nameOrID = imageSelector.ID
-			//project cannot be used to query if ID is used
+			// project cannot be used to query if ID is used
 			project = ""
 		} else if imageSelector.Name != "" {
 			nameOrID = imageSelector.Name
@@ -330,14 +383,22 @@ func (c *Controller) resolveImages(ctx context.Context, imageSelectors []v1alpha
 			if errors.Is(err, oxide.ErrObjectNotFound) {
 				continue
 			}
-			return nil, fmt.Errorf("image %q from project %q: %w", nameOrID, imageSelector.Project, err)
+			return nil, fmt.Errorf(
+				"image %q from project %q: %w",
+				nameOrID,
+				imageSelector.Project,
+				err,
+			)
 		}
 		resolvedImages = append(resolvedImages, *image)
 	}
 
 	// All listImageSelectors do not have a name or ID, else they would have been looked up via a direct query (ImageView).
 	// To efficiently make API calls, we now group by project.
-	projectToSelectors := lo.GroupBy(listImageSelector, func(selector v1alpha1.ImageSelector) string { return selector.Project })
+	projectToSelectors := lo.GroupBy(
+		listImageSelector,
+		func(selector v1alpha1.ImageSelector) string { return selector.Project },
+	)
 	for project, selectors := range projectToSelectors {
 		images, err := c.oxideClient.ImageListAllPages(ctx, oxide.ImageListParams{
 			Project: oxide.NameOrId(project),
