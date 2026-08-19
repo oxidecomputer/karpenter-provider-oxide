@@ -54,10 +54,15 @@ func (c *RefreshController) Name() string {
 
 // Reconcile refreshes the snapshot and schedules the next refresh.
 //
-// It never returns an error. Inventory is opt-in observability that no other controller reads, so a
-// system API that cannot be reached has to degrade to "no placement labels" rather than surface a
-// failure: returning an error here would put the controller into exponential backoff and report an
-// unhealthy condition for something the provider does not need in order to launch nodes.
+// It never returns an error. Inventory is opt-in, and everything that reads it is built to carry on
+// without it: no placement labels, and scheduling decided from what the rack refuses rather than from
+// what it has room for. A system API that cannot be reached therefore has to degrade rather than
+// surface a failure, since returning an error here would put the controller into exponential backoff
+// and report an unhealthy condition for something the provider does not need in order to launch
+// nodes.
+//
+// A snapshot that stops being refreshed also stops being believed, so a failure here cannot leave a
+// stale reading suppressing offerings. See capacity.Snapshot.Fresh.
 func (c *RefreshController) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
 
@@ -72,9 +77,11 @@ func (c *RefreshController) Reconcile(ctx context.Context) (reconciler.Result, e
 			// permissions, and an operator who enabled inventory needs to be told that plainly.
 			log.FromContext(ctx).Error(
 				err,
-				"unable to refresh the sled inventory, sled placement labels will not be applied. "+
+				"unable to refresh the sled inventory, sled placement labels will not be applied "+
+					"and instance types will not be narrowed to what the rack has room for. "+
 					"This requires an Oxide token with fleet-level read access to the system API. "+
-					"Set settings.inventory.enabled=false to turn this off. Node provisioning is unaffected",
+					"Set settings.inventory.enabled=false to turn this off. Nodes still launch: "+
+					"shapes the rack cannot place are learned from refused launches instead",
 			)
 			c.permissionErrorLogged = true
 		}

@@ -149,8 +149,10 @@ settings:
     # whenever anything in the silo starts or stops.
     refreshPeriod: 1m
   # -- Sled inventory configuration. Records which physical sled each node landed on, as labels and
-  # annotations on the Node and NodeClaim. This is observability only: nothing in the provider reads
-  # it, and provisioning is unaffected whether it is enabled, disabled, or failing.
+  # annotations on the Node and NodeClaim, and uses the same rack reading to stop offering instance
+  # types no sled has room for. Provisioning still works whether this is enabled, disabled, or
+  # failing: a snapshot that stops refreshing is ignored, and unplaceable shapes are then learned
+  # from refused launches instead.
   inventory:
     # -- Enable the sled inventory controllers. This requires an Oxide token with fleet-level read
     # access to the system API (/v1/system/hardware/sleds), which is a much broader grant than
@@ -159,7 +161,9 @@ settings:
     # failure and applies no labels rather than failing.
     enabled: false
     # -- How often the sled inventory is re-read from the Oxide API. Building it costs one API call
-    # per sled in the rack, so lowering this raises fleet API load proportionally.
+    # per sled in the rack, so lowering this raises fleet API load proportionally. A reading is
+    # trusted for twice this long; past that it is ignored rather than allowed to constrain
+    # provisioning on stale information.
     refreshPeriod: 5m
     # -- How long a node may sit on a sled that is being taken out of service (expunged, or closed to
     # new placements) before Karpenter drains it and provisions a replacement. Replacement ALSO

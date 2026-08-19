@@ -28,14 +28,14 @@ func (f *fakeQuotas) Refresh(context.Context, bool) (bool, error) {
 // ask for a re-read, and must tolerate having no quota provider at all.
 func TestRefreshQuota(t *testing.T) {
 	quotas := &fakeQuotas{quota: smallQuota()}
-	NewProvider(quotas).RefreshQuota(context.Background())
+	NewProvider(quotas, nil).RefreshQuota(context.Background())
 
 	if quotas.refreshes != 1 {
 		t.Errorf("refreshes = %d, want 1", quotas.refreshes)
 	}
 
 	// Must not panic with quota awareness switched off.
-	NewProvider(nil).RefreshQuota(context.Background())
+	NewProvider(nil, nil).RefreshQuota(context.Background())
 }
 
 // A silo entitled to 16 vCPUs and 64 GiB, with nothing provisioned yet.
@@ -50,7 +50,7 @@ func smallQuota() utilization.Quota {
 // The point of reading the quota at all: without it the scheduler is offered shapes up to a whole
 // sled, and a silo entitled to 16 vCPUs would have Karpenter pick a 256 vCPU node and fail.
 func TestQuotaMarksOversizedOfferingsUnavailable(t *testing.T) {
-	p := NewProvider(&fakeQuotas{quota: smallQuota()})
+	p := NewProvider(&fakeQuotas{quota: smallQuota()}, nil)
 
 	for _, tc := range []struct {
 		name string
@@ -84,7 +84,7 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 		{"a provider with no snapshot", &fakeQuotas{err: utilization.ErrNoSnapshot}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewProvider(tc.quotas)
+			p := NewProvider(tc.quotas, nil)
 
 			it, ok := p.Get("256-512")
 			if !ok {
@@ -104,7 +104,7 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 // the generation would leave the old offerings in place indefinitely.
 func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 	quotas := &fakeQuotas{quota: smallQuota(), gen: 1}
-	p := NewProvider(quotas)
+	p := NewProvider(quotas, nil)
 
 	if it, _ := p.Get("32-64"); it.Offerings[0].Available {
 		t.Fatal("32-64 was available under a 16 vCPU quota")
@@ -125,7 +125,7 @@ func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 // Both sources of unavailability have to keep working independently, and a refusal must still register
 // while the quota has plenty of room.
 func TestQuotaAndRefusalsCombine(t *testing.T) {
-	p := NewProvider(&fakeQuotas{quota: smallQuota()})
+	p := NewProvider(&fakeQuotas{quota: smallQuota()}, nil)
 
 	p.RecordICE(context.Background(), Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
 
@@ -154,7 +154,7 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 // Quota wins when both reasons cover a shape. It is the more useful thing to report: rack capacity is
 // transient and Karpenter retries into it, whereas a quota keeps refusing until somebody changes it.
 func TestQuotaReasonWinsOverCapacity(t *testing.T) {
-	c := NewCapacityManager()
+	c := NewCapacityManager(nil)
 	ctx := context.Background()
 
 	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
@@ -168,7 +168,7 @@ func TestQuotaReasonWinsOverCapacity(t *testing.T) {
 // Recording a refusal ignores the reason when subsuming, because coverage is what an offering is filtered on. A
 // smaller shape refused for quota genuinely does explain a larger one refused for capacity.
 func TestRecordICESubsumesAcrossReasons(t *testing.T) {
-	c := NewCapacityManager()
+	c := NewCapacityManager(nil)
 	ctx := context.Background()
 
 	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)

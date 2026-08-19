@@ -10,7 +10,7 @@ import (
 // newTestCapacityManager returns a manager on a clock the test drives, with jitter switched off so
 // backoffs can be compared exactly. Real jitter is only there to spread a burst out.
 func newTestCapacityManager(now *time.Time) *CapacityManager {
-	c := NewCapacityManager()
+	c := NewCapacityManager(nil)
 	c.now = func() time.Time { return *now }
 	c.jitter = func(time.Duration) time.Duration { return 0 }
 	return c
@@ -352,7 +352,7 @@ func TestHistoryIsForgottenEventually(t *testing.T) {
 // together. It only ever adds, so a shape is never retried earlier than its backoff.
 func TestJitterStaysWithinItsFraction(t *testing.T) {
 	now := time.Now()
-	c := NewCapacityManager()
+	c := NewCapacityManager(nil)
 	c.now = func() time.Time { return now }
 	specs := Specs{Ncpus: 8, MemInGiB: 16}
 
@@ -526,7 +526,7 @@ func ices(t *testing.T, c *CapacityManager, specs Specs) int {
 }
 
 func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProvider(nil, nil)
 
 	before, ok := p.Get("8-16")
 	if !ok {
@@ -560,7 +560,7 @@ func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
 // into the breaker's own view, or nothing ever probes it.
 func TestReopenedShapesAreOfferedAgain(t *testing.T) {
 	now := time.Now()
-	p := NewProvider(nil)
+	p := NewProvider(nil, nil)
 	p.capacity = newTestCapacityManager(&now)
 
 	p.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)

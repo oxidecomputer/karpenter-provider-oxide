@@ -325,17 +325,38 @@ Because a storage quota refuses every shape equally, this does **not** mark the 
 there is no smaller instance type that would help, and saying otherwise about the shape would be
 untrue.
 
-### Interaction With the Unavailable Cache
+### Interaction With the Capacity Manager
 
-The cache of recently-refused shapes now records *why* each shape is out, `InsufficientCapacity` or
-`QuotaExceeded`. Both cover every shape at least as large in both dimensions, since a limit that
-refuses 8 vCPUs and 16 GiB also refuses 16 vCPUs and 32 GiB. When both reasons cover a shape, quota is
-reported: rack capacity is transient and Karpenter retries into it, whereas a quota keeps refusing
-until somebody changes it.
+Refused shapes are tracked by a circuit breaker rather than a fixed-TTL cache. It records *why* each
+shape is out, `InsufficientCapacity` or `QuotaExceeded`, and both cover every shape at least as large
+in both dimensions, since a limit that refuses 8 vCPUs and 16 GiB also refuses 16 vCPUs and 32 GiB.
+When both reasons cover a shape, quota is reported: rack capacity is transient and Karpenter retries
+into it, whereas a quota keeps refusing until somebody changes it.
 
-Quota-derived unavailability is not only reactive. It is recomputed from each utilization read, so
+Each consecutive refusal of a shape lengthens how long it stays out of consideration — 3m, 6m, 12m,
+24m, then 30m, plus jitter — so a shape the rack keeps refusing is retried at a cost that falls off
+rather than every three minutes forever. When the wait elapses the shape is offered again, but only
+**one** launch is allowed to test it; the rest of a burst of pending pods picks a different shape
+instead of piling a wave of refusals onto a shape that may well fit. A launch that succeeds clears the
+history, so the next incident starts over at three minutes.
+
+Three things reopen a shape early, without waiting out the backoff:
+
+| Event | Effect |
+| --- | --- |
+| A node is terminated and Oxide confirms the instance is gone | Shapes that fit in what it freed get one probe |
+| Sled inventory sees the rack gain room for a shape that had none | That shape gets one probe |
+| A quota is raised | Recomputed from the next utilization read, no probe needed |
+
+The first two keep the refusal history: they are evidence the shape is worth trying, not evidence that
+it works, so a refused probe resumes the escalation rather than restarting it. Deletion is only
+counted once the API confirms the instance is gone — a delete that has merely been requested has freed
+nothing, and treating it otherwise is how consolidation ends up planning against capacity that is
+still held.
+
+Quota-derived unavailability is not reactive at all. It is recomputed from each utilization read, so
 raising a quota takes effect on the next refresh (`settings.quota.refreshPeriod`, default `1m`) rather
-than waiting out a cache TTL.
+than waiting out any backoff.
 
 ### Failure Behavior
 
@@ -368,10 +389,34 @@ the fleet-scoped system API (`/v1/system/hardware/sleds`), which is a far broade
 instances in one project. If you would rather not give Karpenter fleet read access, leave this off:
 it is a supported configuration, not a degraded one.
 
-It is also non-load-bearing by construction. Nothing else in the provider reads what it writes. If
-inventory is enabled against a token that cannot reach the system API, the controller logs the
-failure once, applies no labels, and node provisioning proceeds exactly as it would with inventory
-disabled.
+It is non-load-bearing by construction. If inventory is enabled against a token that cannot reach the
+system API, the controller logs the failure once, applies no labels, and node provisioning proceeds
+exactly as it would with inventory disabled.
+
+### Which Shapes the Rack Can Actually Take
+
+The same rack walk that produces the labels also says how much room each sled has left, and that turns
+"no sled can take this shape" from something discovered by a refused launch into something never
+offered. Enabling inventory therefore does more than label nodes.
+
+The question is asked **per sled**, because that is how Oxide places an instance. A rack with 4 vCPUs
+free on each of two sleds has 8 vCPUs free in total and cannot place an 8 vCPU node; aggregating first
+is how a scheduler talks itself into launches the rack will refuse.
+
+Two guardrails keep this from ever being the thing that stops a cluster from scaling:
+
+- **The numbers are deliberately optimistic.** A sled's usable memory is not all offerable to
+  instances, and the control plane holds back reservations this API does not expose, so the computed
+  free space can exceed what Oxide would actually hand out. Being optimistic costs a refused launch,
+  which the circuit breaker above absorbs. Being pessimistic would suppress a shape the rack could
+  have placed — and a shape nobody offers is never tried, so that mistake would never be discovered.
+- **A reading that stops being refreshed stops being believed.** If refreshes stop for more than twice
+  `settings.inventory.refreshPeriod`, the snapshot is ignored entirely and the provider falls back to
+  learning from refused launches, exactly as it does with inventory off. An inventory controller that
+  breaks cannot freeze provisioning.
+
+Sleds that are expunged or closed to new placements contribute no headroom, since they will refuse
+everything placed on them regardless of what is free.
 
 ### What Gets Applied
 

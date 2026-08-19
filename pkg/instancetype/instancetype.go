@@ -91,11 +91,16 @@ type Specs struct {
 	MemInGiB int
 }
 
-// NewProvider builds an instance type provider. quotas may be nil, in which case offerings are not
-// constrained by the silo's quota.
-func NewProvider(quotas QuotaProvider) *Provider {
+// NewProvider builds an instance type provider.
+//
+// Both dependencies are optional and are left out by passing nil: without quotas offerings are not
+// constrained by the silo's entitlement, and without inventory they are not constrained by what the
+// rack physically has room for. Neither absence is a degraded mode. A provider with neither still
+// launches nodes and still learns from what the rack refuses, which is exactly how this provider
+// behaved before either existed.
+func NewProvider(quotas QuotaProvider, inventory InventoryProvider) *Provider {
 	return &Provider{
-		capacity: NewCapacityManager(),
+		capacity: NewCapacityManager(inventory),
 		quotas:   quotas,
 	}
 }
@@ -232,14 +237,16 @@ func requestFor(specs Specs) utilization.Request {
 // InstanceTypes returns every instance type, with the offerings of shapes that cannot currently be
 // launched marked unavailable so scheduling passes over them.
 //
-// A shape is unavailable either because a launch of it was recently refused, or because the silo's
-// quota has no room for it. The second is the reason to read the quota at all: an unconstrained list
-// offers the scheduler shapes up to a whole sled, and a silo entitled to 32 vCPUs would otherwise
-// have Karpenter confidently pick a 256 vCPU node, create a NodeClaim, fail, and delete it.
+// A shape is unavailable because a launch of it was recently refused, because the silo's quota has no
+// room for it, or because no sled on the rack has room for it. Each is a different way of being
+// unlaunchable and each is the reason to consult its source at all: an unconstrained list offers the
+// scheduler shapes up to a whole sled, and a silo entitled to 32 vCPUs, or a rack with 8 CPUs free on
+// its emptiest sled, would otherwise have Karpenter confidently pick a 256 vCPU node, create a
+// NodeClaim, fail, and delete it.
 //
 // The list is rebuilt rather than updated in place, since the one already returned is read
-// concurrently by the scheduler. Rebuilding only happens when the unavailable set or the quota has
-// actually changed, so the steady state is a cache hit.
+// concurrently by the scheduler. Rebuilding only happens when the unavailable set, the rack reading or
+// the quota has actually changed, so the steady state is a cache hit.
 func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -252,7 +259,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		return i.instanceTypes
 	}
 
-	unavailable := i.capacity.Snapshot()
+	availability := i.capacity.Availability()
 	// Read once for the whole build rather than per shape. There are thousands of shapes and they all
 	// have to be judged against the same quota, or the list is internally inconsistent.
 	quota, quotaErr := i.quota()
@@ -267,7 +274,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			}
 			instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 			specs := Specs{Ncpus: cpus, MemInGiB: mem}
-			refused, _ := covered(unavailable, specs)
+			refused, _ := availability.Unavailable(specs)
 			// A quota that could not be read constrains nothing. Failing open here is deliberate: the
 			// alternative is that a permissions problem or an API blip stops the cluster from scaling.
 			overQuota := false

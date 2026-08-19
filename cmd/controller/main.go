@@ -115,10 +115,7 @@ func run() error {
 	}
 	var sledProvider *sled.Provider
 	if inventoryCfg.enabled {
-		// The on-demand refresh floor is deliberately tighter than the scheduled period so that a node
-		// launched between refreshes gets labeled promptly, while a cluster full of unplaceable nodes
-		// still cannot drive more than one rack walk per floor.
-		sledProvider = sled.NewProvider(ox, project, inventoryCfg.refreshPeriod/4)
+		sledProvider = sled.NewProvider(ox, project, inventoryCfg.refreshPeriod)
 	}
 
 	// Quota awareness needs no permissions beyond launching instances, since a silo can read its own
@@ -140,9 +137,9 @@ func run() error {
 		karpcore.GetClient(),
 		ox,
 		project,
-		// Passed as an interface, so a nil *utilization.Provider has to be dropped rather than handed
-		// over: a typed nil inside a non-nil interface would satisfy the nil check and then panic.
-		instancetype.NewProvider(quotaProvider(quotas)),
+		// Both are passed as interfaces, so a nil provider has to be dropped rather than handed over: a
+		// typed nil inside a non-nil interface would satisfy the nil check and then panic.
+		instancetype.NewProvider(quotaProvider(quotas), inventoryProvider(sledProvider)),
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
 	)
@@ -232,6 +229,21 @@ func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
 		return nil
 	}
 	return quotas
+}
+
+// inventoryProvider adapts a possibly-nil sled provider to the interface the instance type provider
+// takes, for the same reason quotaProvider does: an untyped nil is the only value that reads as "there
+// is no inventory".
+//
+// This is the one place the two halves of inventory meet. The controllers read the rack for
+// observability, and handing the same snapshot to the instance type provider turns it into a
+// scheduling input: shapes no sled has room for stop being offered at all. With inventory off, that
+// input is simply absent and the provider decides from what the rack refuses, as it always has.
+func inventoryProvider(sledProvider *sled.Provider) instancetype.InventoryProvider {
+	if sledProvider == nil {
+		return nil
+	}
+	return sledProvider
 }
 
 // inventoryConfig is the sled inventory configuration, resolved once at startup.

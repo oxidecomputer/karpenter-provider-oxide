@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/oxide.go/oxide"
 )
 
@@ -182,5 +183,105 @@ func TestRefreshRateLimitsUnforcedCalls(t *testing.T) {
 	}
 	if refreshed {
 		t.Error("Refresh reported that it refreshed despite being inside the rate limit floor")
+	}
+}
+
+// The rate limit floor and the freshness window are both derived from the one period an operator
+// sets, so the relationship between them is worth pinning: refresh more often than the period, and
+// believe a reading for longer than it.
+func TestRefreshIntervalsAreDerivedFromThePeriod(t *testing.T) {
+	p := NewProvider(nil, "project", 8*time.Minute)
+
+	if p.minRefreshInterval >= 8*time.Minute {
+		t.Errorf("minRefreshInterval = %v, want it tighter than the period", p.minRefreshInterval)
+	}
+	if p.freshFor <= 8*time.Minute {
+		t.Errorf("freshFor = %v, want it looser than the period", p.freshFor)
+	}
+}
+
+// The rack has never been read, so nothing may be concluded about what fits. An empty reading here
+// would suppress every offering the provider has.
+func TestCapacityBeforeAnyRefreshIsUnknown(t *testing.T) {
+	p := NewProvider(nil, "project", time.Minute)
+
+	if p.Capacity().Known() {
+		t.Error("Capacity reported a reading of the rack before one was taken")
+	}
+}
+
+// A sled's own hardware totals are what it has to place instances with. Overstating the rack costs a
+// refused launch; understating it costs a shape nobody ever offers.
+func TestCapacityOfUsesTheSledHardwareTotals(t *testing.T) {
+	got := capacityOf(Placement{UsableHardwareThreads: 128, UsablePhysicalRam: 1024 * (1 << 30)})
+
+	if got.CPUs != 128 || got.Memory != 1024*(1<<30) {
+		t.Errorf("capacityOf() = %+v, want the sled's own totals", got)
+	}
+}
+
+// A sled being drained or expunged has free resources and will still refuse every placement, so it
+// must not contribute headroom.
+func TestProvisionableFollowsSledPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		placement Placement
+		want      bool
+	}{
+		{
+			name:      "in service and provisionable",
+			placement: Placement{State: "active", Policy: "in_service", ProvisionPolicy: "provisionable"},
+			want:      true,
+		},
+		{
+			name:      "closed to new placements",
+			placement: Placement{State: "active", Policy: "in_service", ProvisionPolicy: "non_provisionable"},
+		},
+		{
+			name:      "expunged from the rack",
+			placement: Placement{State: "decommissioned", Policy: "expunged"},
+		},
+		{
+			name:      "not active",
+			placement: Placement{State: "decommissioned", Policy: "in_service", ProvisionPolicy: "provisionable"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := provisionable(tc.placement); got != tc.want {
+				t.Errorf("provisionable() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An instance with no virtual machine on the sled is holding none of it, and counting it as spoken
+// for would understate the rack.
+func TestHoldsCountsOnlyResidentInstances(t *testing.T) {
+	cpus, memory := 8, 16*(1<<30)
+
+	resident := holds(oxide.SledInstance{
+		State:  oxide.InstanceStateRunning,
+		Ncpus:  &cpus,
+		Memory: &memory,
+	})
+	if resident.CPUs != 8 || resident.Memory != uint64(memory) {
+		t.Errorf("holds(running) = %+v, want the instance's own size", resident)
+	}
+
+	for _, state := range []oxide.InstanceState{
+		oxide.InstanceStateStopped,
+		oxide.InstanceStateFailed,
+		oxide.InstanceStateDestroyed,
+	} {
+		got := holds(oxide.SledInstance{State: state, Ncpus: &cpus, Memory: &memory})
+		if got != (capacity.Resources{}) {
+			t.Errorf("holds(%s) = %+v, want nothing held", state, got)
+		}
+	}
+
+	// The size fields are pointers on this API, and a missing one must not invent usage.
+	sizeless := holds(oxide.SledInstance{State: oxide.InstanceStateRunning})
+	if sizeless != (capacity.Resources{}) {
+		t.Errorf("holds(sizeless) = %+v, want nothing held", sizeless)
 	}
 }

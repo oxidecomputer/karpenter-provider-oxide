@@ -14,12 +14,16 @@ limitations under the License.
 
 // Package inventory records which physical sled each node landed on.
 //
-// Nothing in the provider needs this. Reading it requires fleet-level access to the Oxide system
+// Nothing in the provider requires this. Reading it requires fleet-level access to the Oxide system
 // API, which is a much broader grant than launching instances into one project, and an operator may
-// reasonably decline to give it. So the whole package is opt-in and strictly additive: it writes
-// labels and annotations that describe placement, and no other controller reads them. With inventory
-// disabled, or enabled against a token that cannot reach the system API, the provider behaves exactly
-// as it does without this package.
+// reasonably decline to give it. So the whole package is opt-in, and everything downstream of it is
+// built to work without it: with inventory disabled, or enabled against a token that cannot reach the
+// system API, the provider launches nodes exactly as it does without this package.
+//
+// What the controllers here write is additive. The rack walk they drive is not: the same snapshot
+// that produces these labels also tells the instance type provider what each sled has room for, which
+// turns "no sled can take this shape" into a shape that is never offered rather than one discovered
+// by a refused launch. See pkg/capacity.
 //
 // The placement is only knowable after the fact. Karpenter asks for an instance of a given size and
 // the provision saga decides which sled has room for it, so a sled is not something a NodePool can

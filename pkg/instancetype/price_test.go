@@ -9,7 +9,7 @@ import (
 // consumes more of either resource must never be cheaper. Without it, consolidation can replace a
 // node with one it considers equally cheap and then replace it back.
 func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProvider(nil, nil)
 	prices := map[Specs]float64{}
 	for _, it := range p.InstanceTypes() {
 		specs, err := InstanceTypeToSpecs(it.Name)
@@ -57,7 +57,7 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 // price. A price that tracks availability makes the disruption controller churn whenever quota or
 // capacity moves.
 func TestPriceIsIndependentOfAvailability(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProvider(nil, nil)
 
 	before, ok := p.Get("8-16")
 	if !ok {
@@ -82,7 +82,7 @@ func TestPriceIsIndependentOfAvailability(t *testing.T) {
 // TestPriceOrdersSmallerShapesCheaper is the case consolidation actually exercises: an oversized
 // node must have a strictly cheaper replacement available.
 func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
-	p := NewProvider(nil)
+	p := NewProvider(nil, nil)
 	for _, tc := range []struct{ cheaper, dearer string }{
 		{"2-4", "4-8"},
 		{"4-8", "4-16"},

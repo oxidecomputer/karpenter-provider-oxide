@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -104,9 +105,20 @@ type CapacityManager struct {
 	mu      sync.Mutex
 	entries map[string]*Entry
 	// generation changes whenever the set of unavailable shapes does, which is how the instance type
-	// provider knows its offerings have to be recomputed. Bumped both when a shape is refused and when
-	// one reopens, since either direction changes what is available.
+	// provider knows its offerings have to be recomputed. Bumped when a shape is refused, when one
+	// reopens, and when the rack has been read again, since all three change what is available.
 	generation atomic.Uint64
+
+	// inventory is what the rack has room for, or nil when inventory is switched off. It is an
+	// interface so that this package does not depend on how the rack is read, and so that leaving
+	// inventory out is a matter of passing nothing rather than a mode this code has to carry.
+	inventory InventoryProvider
+	// rack is the last reading of the rack this manager acted on, and rackFresh is whether that
+	// reading was still believable at the time. Both are refreshed by every sweep, and are held so
+	// that a new reading can be compared against the one before it: what makes a shape worth reopening
+	// is the rack having gained room for it, which is not visible in either reading alone.
+	rack      capacity.Snapshot
+	rackFresh bool
 
 	// now and jitter are injectable so tests can drive the breaker on a fake clock and compare exact
 	// backoffs. Nothing outside this package sets them.
@@ -114,11 +126,22 @@ type CapacityManager struct {
 	jitter func(time.Duration) time.Duration
 }
 
-func NewCapacityManager() *CapacityManager {
+// InventoryProvider is the rack inventory the capacity manager consults before believing that a shape
+// is worth offering. It may be nil, in which case every decision is made from refusal history alone.
+type InventoryProvider interface {
+	// Capacity returns the most recent reading of the rack. An unknown snapshot is the answer when
+	// the rack has never been read, and is not an error: inventory is opt-in and a provider without it
+	// has to keep launching nodes.
+	Capacity() capacity.Snapshot
+}
+
+// NewCapacityManager builds a capacity manager. inventory may be nil.
+func NewCapacityManager(inventory InventoryProvider) *CapacityManager {
 	return &CapacityManager{
-		entries: map[string]*Entry{},
-		now:     time.Now,
-		jitter:  randomJitter,
+		entries:   map[string]*Entry{},
+		inventory: inventory,
+		now:       time.Now,
+		jitter:    randomJitter,
 	}
 }
 
@@ -224,7 +247,7 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 func (c *CapacityManager) RecordCapacityReleased(ctx context.Context, released Specs) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sweep()
+	c.sweep(ctx)
 
 	for key, entry := range c.entries {
 		if entry.State != StateBackoff || !fits(entry.Specs, released) {
@@ -258,7 +281,7 @@ func (c *CapacityManager) RecordCapacityReleased(ctx context.Context, released S
 func (c *CapacityManager) TryAcquire(specs Specs) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sweep()
+	c.sweep(context.Background())
 
 	for _, entry := range c.entries {
 		if !covers(entry.Specs, specs) {
@@ -296,22 +319,57 @@ func (c *CapacityManager) ReleaseProbe(specs Specs) {
 // IsUnavailable reports whether a shape is currently ruled out, and why. A half-open shape is
 // available: the whole point of reopening it is that something tries it.
 func (c *CapacityManager) IsUnavailable(specs Specs) (bool, Reason) {
-	return covered(c.Snapshot(), specs)
+	return c.Availability().Unavailable(specs)
 }
 
-// Snapshot returns the entries the breaker currently holds. Callers checking many shapes at once take
-// one of these rather than asking about each shape individually, since every question is answered
-// against the same set.
-func (c *CapacityManager) Snapshot() []Entry {
+// Availability is everything needed to judge shapes, taken as one consistent reading.
+//
+// Callers judging many shapes at once, which is to say anything building the instance type list, take
+// one of these rather than asking about each shape individually. A list built from a set of entries
+// and a rack reading that changed halfway through would be internally inconsistent in a way nothing
+// downstream could detect.
+type Availability struct {
+	entries []Entry
+	// rack is the rack reading to judge against, and rackKnown is whether it may be believed about
+	// what does not fit. See CapacityManager.rackFresh.
+	rack      capacity.Snapshot
+	rackKnown bool
+}
+
+// Unavailable reports whether a shape is currently ruled out, and why.
+//
+// The rack is asked first, and it is the only thing that can rule a shape out indefinitely: a shape
+// no sled has room for is not worth offering, and no amount of waiting or probing changes that until
+// the rack itself changes. This is what a fixed retry interval gets wrong, by walking a scheduler
+// into the same impossible shape every few minutes for as long as the pods stay pending.
+//
+// It is only asked while its reading is believable. An inventory that has stopped refreshing, or was
+// never switched on, says nothing at all here and the decision falls back to refusal history, which
+// is exactly how the provider behaves without inventory.
+func (a Availability) Unavailable(specs Specs) (bool, Reason) {
+	if a.rackKnown && !a.rack.CanFit(resourcesFor(specs)) {
+		return true, ReasonCapacity
+	}
+	return covered(a.entries, specs)
+}
+
+// Availability takes one reading of the breaker and the rack together.
+func (c *CapacityManager) Availability() Availability {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sweep()
+	c.sweep(context.Background())
 
 	entries := make([]Entry, 0, len(c.entries))
 	for _, entry := range c.entries {
 		entries = append(entries, *entry)
 	}
-	return entries
+	return Availability{entries: entries, rack: c.rack, rackKnown: c.rackFresh}
+}
+
+// Snapshot returns the entries the breaker currently holds, for callers reporting on its state rather
+// than deciding with it.
+func (c *CapacityManager) Snapshot() []Entry {
+	return c.Availability().entries
 }
 
 // Generation identifies the current set of unavailable shapes. It changes whenever the set does, and
@@ -322,14 +380,21 @@ func (c *CapacityManager) Snapshot() []Entry {
 // looks.
 func (c *CapacityManager) Generation() uint64 {
 	c.mu.Lock()
-	c.sweep()
+	c.sweep(context.Background())
 	c.mu.Unlock()
 	return c.generation.Load()
 }
 
-// sweep applies everything the passage of time has changed: backoffs that have elapsed reopen, and
-// history nobody has refreshed in a long while is forgotten. Callers hold the lock.
-func (c *CapacityManager) sweep() {
+// sweep applies everything that has changed since the last look: backoffs that have elapsed reopen,
+// history nobody has refreshed in a long while is forgotten, and a rack that has been read again is
+// compared against the reading before it. Callers hold the lock.
+//
+// It is driven by reads rather than by a timer because every one of those transitions only matters to
+// a caller asking a question, and a caller is always about to ask one: the instance type list is
+// rebuilt from this on every scheduling pass.
+func (c *CapacityManager) sweep(ctx context.Context) {
+	c.reconcileInventory(ctx)
+
 	now := c.now()
 	for key, entry := range c.entries {
 		if entry.State == StateBackoff && !now.Before(entry.RetryAfter) {
@@ -346,6 +411,81 @@ func (c *CapacityManager) sweep() {
 		if entry.State == StateHalfOpen && now.Sub(entry.LastICE) > historyTTL {
 			delete(c.entries, key)
 		}
+	}
+}
+
+// reconcileInventory takes in a new reading of the rack and applies what it changed. Callers hold the
+// lock.
+//
+// Two things can change. The reading itself can be replaced, which changes what shapes are worth
+// offering at all and so has to invalidate anything built against the old one. And the reading can
+// stop being believable, when refreshes have stopped for long enough that it no longer describes the
+// rack; that flip matters just as much, because it is what releases shapes the old reading was
+// suppressing. Neither is noticed by anything else, so the generation is bumped here for both.
+func (c *CapacityManager) reconcileInventory(ctx context.Context) {
+	if c.inventory == nil {
+		return
+	}
+
+	current := c.inventory.Capacity()
+	fresh := current.Fresh(c.now())
+	if current.Generation() == c.rack.Generation() && fresh == c.rackFresh {
+		return
+	}
+
+	previous, previouslyFresh := c.rack, c.rackFresh
+	c.rack, c.rackFresh = current, fresh
+	c.generation.Add(1)
+
+	if previouslyFresh && !fresh {
+		log.FromContext(ctx).Info(
+			"the sled inventory has gone stale, falling back to retrying refused shapes",
+			"taken-at", current.TakenAt(),
+		)
+	}
+
+	// A shape is reopened by the rack gaining room it did not have, which takes two readings to see.
+	// Without a previous one there is nothing to compare against, and treating that as a gain would
+	// reopen every backed off shape the first time inventory is read.
+	if !fresh || !previous.Known() {
+		return
+	}
+	for key, entry := range c.entries {
+		if entry.State != StateBackoff {
+			continue
+		}
+		request := resourcesFor(entry.Specs)
+		previousCount := previous.FeasibleCount(request)
+		currentCount := current.FeasibleCount(request)
+		// Only a rise from nothing counts. A shape that was already feasible and was refused anyway was
+		// refused for something this reading cannot see, and more of the same room is not new evidence;
+		// reopening on every increase would also hand a busy rack, where these counts move constantly,
+		// a probe of every backed off shape on every refresh and quietly undo the backoff entirely.
+		if previousCount != 0 || currentCount == 0 {
+			continue
+		}
+		entry.State = StateHalfOpen
+		entry.probeInFlight = false
+
+		log.FromContext(ctx).V(1).Info(
+			"capacity state changed",
+			"instance-type", key,
+			"from", StateBackoff,
+			"to", StateHalfOpen,
+			"reason", "inventory-capacity-increased",
+			"previous-feasible", previousCount,
+			"current-feasible", currentCount,
+			"consecutive-ices", entry.ConsecutiveICEs,
+			"backoff-remaining", entry.RetryAfter.Sub(c.now()),
+		)
+	}
+}
+
+// resourcesFor is what launching one instance of this shape asks a sled for.
+func resourcesFor(specs Specs) capacity.Resources {
+	return capacity.Resources{
+		CPUs:   specs.Ncpus,
+		Memory: uint64(specs.MemInGiB) * GiB,
 	}
 }
 
