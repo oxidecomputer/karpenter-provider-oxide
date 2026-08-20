@@ -11,6 +11,7 @@ import (
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/google/uuid"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instance"
@@ -39,8 +40,12 @@ type OxideCloudProvider struct {
 
 	instanceProvider     *instance.Provider
 	instanceTypeProvider *instancetype.Provider
-	bootstrappers        bootstrap.Bootstrappers
-	repairPolicies       []cloudprovider.RepairPolicy
+	// affinityPolicy backs a nodeclass off when the rack cannot satisfy a fail-policy affinity group.
+	// Separate from instanceTypeProvider because such a refusal is not about a shape, so it must not
+	// reach the shape circuit breaker. See pkg/affinitypolicy.
+	affinityPolicy *affinitypolicy.Tracker
+	bootstrappers  bootstrap.Bootstrappers
+	repairPolicies []cloudprovider.RepairPolicy
 }
 
 func NewOxideCloudProvider(
@@ -48,6 +53,7 @@ func NewOxideCloudProvider(
 	ox *oxide.Client,
 	project string,
 	instanceTypeProvider *instancetype.Provider,
+	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 	repairPolicies []cloudprovider.RepairPolicy,
 ) *OxideCloudProvider {
@@ -72,6 +78,7 @@ func NewOxideCloudProvider(
 			},
 		),
 		instanceTypeProvider: instanceTypeProvider,
+		affinityPolicy:       affinityPolicy,
 		bootstrappers:        bootstrappers,
 		repairPolicies:       repairPolicies,
 	}
@@ -336,16 +343,31 @@ func (c *OxideCloudProvider) Create(
 			//
 			// Storage is left out of the question. The boot disk already exists by the time the instance
 			// create runs, so its storage was accounted for and whatever refused this launch was not it.
-			//
-			// Not yet told apart from a launch refused because a policy: fail group could not be
-			// satisfied, which is a different thing entirely: it says nothing about the instance type,
-			// so recording it below takes this shape and everything larger out of consideration for no
-			// reason. Distinguishing them needs the status code and error body the rack answers such a
-			// refusal with, which is not yet known. Defaulting policy to allow keeps the hazard opt-in.
 			reason, diagnosis := c.diagnoseRefusal(
 				utilization.Request{CPUs: request.CPUs, Memory: request.Memory},
 				err,
 			)
+			// A nodeclass launching into a fail-policy affinity group has a second way to be refused
+			// that arrives as this same error, and it is not about the shape: the rack could not place
+			// the instance within the group's constraint, which no smaller shape would have fixed.
+			// Recording it against the shape would take that shape and every larger one out of
+			// consideration for every nodeclass in the cluster, over a limit none of them hit.
+			//
+			// So it is attributed to the nodeclass and backed off there instead. Only when the quota
+			// had room: a refusal the quota explains is genuinely about the quota, whatever groups the
+			// nodeclass also asked for.
+			//
+			// TODO: attribute this on the error itself once the Oxide API distinguishes a fail-policy
+			// refusal from a capacity one. Today both arrive as InsufficientCapacity with nothing to
+			// separate them, so this leans on the nodeclass's own configuration and consequently also
+			// catches genuine capacity refusals for these nodeclasses -- costing the other nodeclasses
+			// one wasted launch each to rediscover a full rack, rather than wrongly ruling out shapes
+			// cluster-wide. See pkg/affinitypolicy.
+			if reason == instancetype.ReasonCapacity &&
+				affinitypolicy.Attributable(nodeClass.Status.AffinityGroups) {
+				c.affinityPolicy.RecordRefusal(ctx, nodeClass.Name, diagnosis.Error())
+				return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
+			}
 			// Rescheduling only helps if it lands somewhere else, so this shape and everything
 			// larger comes out of consideration while the limit holds.
 			c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)
@@ -364,6 +386,9 @@ func (c *OxideCloudProvider) Create(
 	// shape that recovered from carrying its refusal history into the next incident and backing off
 	// from the second refusal as though it were the fifth.
 	c.instanceTypeProvider.RecordSuccess(ctx, instanceType)
+	// And it placed within whatever groups the nodeclass asked for, which is the only proof a fail
+	// policy is satisfiable. Cleared unconditionally: a nodeclass with no history is a no-op.
+	c.affinityPolicy.RecordSuccess(ctx, nodeClass.Name)
 
 	resolvedNodeClaim, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
 	if err != nil {

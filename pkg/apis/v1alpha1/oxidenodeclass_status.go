@@ -25,6 +25,25 @@ const (
 // never held un-Ready by it.
 const ConditionTypeAffinityGroupsResolved = "AffinityGroupsResolved"
 
+// ConditionTypeAffinityPolicySatisfiable reports whether the rack could satisfy the nodeclass's
+// fail-policy affinity groups the last time it was asked.
+//
+// False holds the nodeclass un-Ready, which is what takes it out of provisioning: an unsatisfiable
+// fail policy refuses every launch regardless of shape, so the alternative is a NodeClaim created and
+// deleted for every pending pod, forever. It clears itself when the back-off elapses, and one launch
+// then probes whether the policy has become satisfiable.
+//
+// This is registered on every nodeclass that sets spec.affinity, not only those with a fail policy.
+// A group's policy is only known once the group is resolved, and a condition that appeared and
+// disappeared as the project changed underneath it would flap; a nodeclass with no fail policy simply
+// carries this as always true.
+const ConditionTypeAffinityPolicySatisfiable = "AffinityPolicySatisfiable"
+
+// ConditionReasonAffinityPolicyUnsatisfiable is a launch refused while a fail-policy group was in the
+// nodeclass's desired set. It names the policy rather than capacity because the shape had no bearing
+// on the refusal, even though the Oxide API reports the two identically today.
+const ConditionReasonAffinityPolicyUnsatisfiable = "AffinityPolicyUnsatisfiable"
+
 // Reasons recorded on ConditionTypeAffinityGroupsResolved.
 const (
 	// ConditionReasonAffinityGroupNotFound is a selector, wildcard included, that matched nothing.
@@ -170,7 +189,11 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		conds = append(conds, ConditionTypeClusterInfoAvailable)
 	}
 	if in.Spec.Affinity != nil {
-		conds = append(conds, ConditionTypeAffinityGroupsResolved)
+		conds = append(
+			conds,
+			ConditionTypeAffinityGroupsResolved,
+			ConditionTypeAffinityPolicySatisfiable,
+		)
 	}
 	return status.NewReadyConditions(conds...).For(in)
 }

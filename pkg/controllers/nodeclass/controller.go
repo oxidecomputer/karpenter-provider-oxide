@@ -10,6 +10,7 @@ import (
 
 	"github.com/awslabs/operatorpkg/reasonable"
 	"github.com/google/uuid"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -50,8 +51,11 @@ type Controller struct {
 	oxideClient *oxide.Client
 	// project is the Oxide project instances are launched into, which is what scopes the resources
 	// resolved by name rather than by ID.
-	project       string
-	bootstrappers bootstrap.Bootstrappers
+	project string
+	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
+	// Read rather than written here: this controller only publishes it as a condition.
+	affinityPolicy *affinitypolicy.Tracker
+	bootstrappers  bootstrap.Bootstrappers
 }
 
 func NewController(
@@ -59,14 +63,16 @@ func NewController(
 	reader client.Reader,
 	oxideClient *oxide.Client,
 	project string,
+	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
 	return &Controller{
-		kubeClient:    kubeClient,
-		reader:        reader,
-		oxideClient:   oxideClient,
-		project:       project,
-		bootstrappers: bootstrappers,
+		kubeClient:     kubeClient,
+		reader:         reader,
+		oxideClient:    oxideClient,
+		project:        project,
+		affinityPolicy: affinityPolicy,
+		bootstrappers:  bootstrappers,
 	}
 }
 
@@ -188,6 +194,26 @@ func (c *Controller) Reconcile(
 		)
 	}
 
+	// Whether the rack can currently satisfy a fail-policy group is not resolved from the API, only
+	// remembered from the last launch that tried. Held here rather than in the shape breaker because
+	// such a refusal is not about a shape, and published as a condition because a nodeclass that is
+	// not Ready is what stops the scheduler from producing NodeClaims that cannot launch.
+	policyRequeue := time.Duration(0)
+	if nodeClass.Spec.Affinity != nil {
+		if state, backingOff := c.affinityPolicy.State(nodeClass.Name); backingOff {
+			nodeClass.StatusConditions().SetFalse(
+				v1alpha1.ConditionTypeAffinityPolicySatisfiable,
+				v1alpha1.ConditionReasonAffinityPolicyUnsatisfiable,
+				state.Message,
+			)
+			// Requeued at the moment the wait elapses, since nothing else will prompt the reconcile
+			// that makes the nodeclass Ready again and lets one launch probe the policy.
+			policyRequeue = state.Remaining(time.Now())
+		} else {
+			nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeAffinityPolicySatisfiable)
+		}
+	}
+
 	// Ready is not set here. It is recomputed from the dependent conditions every time one of them
 	// is set, so asserting it after the fact would just overwrite a false the dependents earned.
 
@@ -212,13 +238,19 @@ func (c *Controller) Reconcile(
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
 	}
+	requeue := 30 * time.Minute
 	if held {
 		// A group waiting on its members to be replaced away. Nothing here can hurry that along, but
 		// checking back sooner than the resync is what makes a superseded group disappear promptly
 		// once the last node has left it, rather than half an hour later.
-		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
+		requeue = groupCollectionRequeue
 	}
-	return reconcile.Result{RequeueAfter: 30 * time.Minute}, nil
+	// Whichever comes first. The back-off expiring is the only thing that makes the nodeclass Ready
+	// again, so it must not be missed by a longer wait for something else.
+	if policyRequeue > 0 && policyRequeue < requeue {
+		requeue = policyRequeue
+	}
+	return reconcile.Result{RequeueAfter: requeue}, nil
 }
 
 // finalize removes every group this nodeclass owns before letting the nodeclass itself go, so that a
@@ -245,6 +277,10 @@ func (c *Controller) finalize(
 		)
 		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
 	}
+
+	// Nothing else drops this, and a nodeclass recreated under the same name is a different nodeclass
+	// that should not inherit the old one's back-off.
+	c.affinityPolicy.Forget(nodeClass.Name)
 
 	stored := nodeClass.DeepCopy()
 	controllerutil.RemoveFinalizer(nodeClass, v1alpha1.TerminationFinalizer)

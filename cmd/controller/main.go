@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
@@ -153,11 +154,16 @@ func run() error {
 		inventoryProvider(sledProvider),
 	)
 
+	// Shared between the launch path, which records refusals into it, and the nodeclass controller,
+	// which publishes them as the condition that holds a backing-off nodeclass out of provisioning.
+	affinityPolicy := affinitypolicy.NewTracker()
+
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
 		ox,
 		project,
 		instanceTypes,
+		affinityPolicy,
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
 	)
@@ -186,6 +192,7 @@ func run() error {
 			karpcore.GetAPIReader(),
 			ox,
 			project,
+			affinityPolicy,
 			bootstrappers,
 		),
 		// Registered unconditionally. The refusal history it reports is there whether or not inventory
