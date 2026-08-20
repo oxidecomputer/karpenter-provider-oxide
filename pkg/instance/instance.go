@@ -1,11 +1,43 @@
 // Package instance wraps the two Oxide instance workflows Karpenter drives: launching an instance
 // and tearing one down along with the resources created with it.
 //
-// Neither is a single API call. A create that starts the instance places it, but the guest still has
-// to boot before the instance is any use, and a delete is rejected until the instance has fully
-// stopped and leaves the boot disk behind once it succeeds. Both are also resumed rather than
-// restarted: Karpenter retries the same NodeClaim, so every step tolerates the work having been
-// half done by an earlier attempt.
+// Neither is a single API call. A launch is three, and the split is the whole design: the boot disk
+// is created, then the instance is created stopped, then the instance is started. A delete is
+// rejected until the instance has fully stopped and leaves the boot disk behind once it succeeds.
+// Both are also resumed rather than restarted: Karpenter retries the same NodeClaim, so every step
+// tolerates the work having been half done by an earlier attempt.
+//
+// A launch is split into three calls because each one asks the rack a different question and answers
+// it before returning, which is what lets a refusal be attributed to the thing that was actually
+// refused.
+//
+//   - Creating the boot disk asks whether there is storage. Crucible allocates the disk's regions
+//     before the call returns, so a rack with nowhere to put them refuses here.
+//   - Creating the instance stopped asks nothing of any sled. It only writes down what the instance
+//     is going to be.
+//   - Starting the instance is the placement decision: this is where a sled is chosen and reserved,
+//     and where a rack with no room for the shape refuses.
+//
+// The alternative the API offers is one create that provisions the disk and starts the instance
+// together. It is rejected here for two separate reasons. A create that provisions the disk too
+// refuses a launch the same way whether the rack ran out of storage or the sleds ran out of CPU and
+// memory: both come back as one InsufficientCapacity, and the message that would tell them apart is
+// deliberately not part of the API contract. The two call for opposite responses -- a sled that
+// cannot fit this shape is a reason to try a different shape, whereas a rack that cannot place a
+// Crucible region is not, since regions are allocated across three sleds independently of wherever
+// the instance lands and no shape is any smaller in the dimension that ran out.
+//
+// And a create that starts the instance does not hold the response until it has been placed. The
+// refusal arrives afterwards, leaving nothing to report it on: the caller is handed an instance that
+// looks fine and has to discover by watching that it never came up. Which is not merely slower. The
+// state an unplaced instance sits in is stopped, and so is the state an instance passes through on
+// its way up, so a caller watching for one finds the other, and reports healthy launches as a rack
+// with no room for the shape. Asking for the start explicitly costs one more round trip and gets a
+// synchronous, unambiguous answer, which is worth considerably more.
+//
+// Nothing here waits for the guest to boot. Placement is what the launch has to establish, and the
+// start establishes it; whether the node then registers is Karpenter's to time out on, and it
+// already does.
 package instance
 
 import (
@@ -16,18 +48,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/oxidecomputer/oxide.go/oxide"
-	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
 	// pollInterval is how often an instance's run state is re-read while waiting for a transition to
-	// complete.
+	// complete. Only teardown waits on one; a launch is answered by the calls it makes.
 	pollInterval = 2 * time.Second
-	// runTimeout bounds how long Create waits for an instance to reach the running state. The create
-	// itself places the instance, so this only covers the transition out of creating and starting.
-	runTimeout = 3 * time.Minute
 	// stopTimeout bounds how long a single Delete call blocks waiting for an instance to reach a
 	// state the API will accept a delete in. Exceeding it is not fatal: the error is returned so the
 	// caller retries and picks the wait back up.
@@ -41,6 +69,10 @@ const (
 	// the time it is deleted, so the call should return promptly; a disk in a bad state can
 	// otherwise hang the request indefinitely and burn the whole retry budget on one attempt.
 	diskDeleteAttemptTimeout = 10 * time.Second
+	// diskReadyTimeout bounds how long Create waits for a boot disk to become attachable. The create
+	// allocates the disk's regions before it returns, so this only covers the tail of a disk that
+	// came back still settling.
+	diskReadyTimeout = 2 * time.Minute
 )
 
 var (
@@ -48,10 +80,21 @@ var (
 	// instance and its disks are all gone, which is the terminal state its caller is waiting for.
 	ErrNotFound = errors.New("instance no longer exists")
 
-	// ErrInsufficientCapacity reports that the rack has no room for the instance. Callers are
-	// expected to give up on the launch rather than retry it, since nothing about a retry changes
-	// how much capacity the rack has.
+	// ErrInsufficientCapacity reports that no sled has room for the instance's CPU and memory.
+	// Callers are expected to give up on the launch rather than retry it, since nothing about a retry
+	// changes how much capacity the rack has. It comes from the start, which is the call that places
+	// the instance, so it is only ever about the shape and never about its boot disk.
 	ErrInsufficientCapacity = errors.New("insufficient capacity")
+
+	// ErrInsufficientStorage reports that the boot disk could not be provisioned for want of room,
+	// either in the silo's storage quota or across the rack's zpools.
+	//
+	// Deliberately not wrapping ErrInsufficientCapacity: the two are disjoint so that a caller
+	// choosing an instance shape cannot mistake one for the other. A storage refusal says nothing
+	// about the shape being launched, so treating it as one would take shapes out of consideration
+	// that were never the problem, and would leave the shape that could not be placed for want of
+	// CPU still in it.
+	ErrInsufficientStorage = errors.New("insufficient storage capacity")
 )
 
 // Released is the rack capacity an instance gave back when it was torn down.
@@ -84,22 +127,30 @@ func NewProvider(
 	}
 }
 
-// Create launches an instance and returns it once it is running.
+// Create launches an instance and returns it once the rack has placed it on a sled.
 //
 // params is the Oxide API's own create shape, with the project defaulted to the provider's and the
-// instance always started. Starting is what places the instance on a sled, so asking for it as part
-// of the create is what makes a rack with no room for this instance size fail the create itself
-// rather than leaving the instance sitting stopped for a later start to discover. The instance is
-// still not reported as launched until its run state is actually running, since placement only gets
-// it as far as booting.
+// instance explicitly not started. The start is issued as its own call afterwards, because that is
+// the one that places the instance and the only one that reports a rack with no room for the shape
+// while the caller can still do something about it. See the package comment.
 //
-// An instance left over under the same name from an earlier attempt is adopted where it can be, and
-// removed where it cannot so the next attempt starts clean. An instance that will not run is torn
-// down before returning, since the caller is being told the launch failed and will never reference
-// it again.
+// A boot disk the params ask to have created is created first, and the params are rewritten to
+// attach it by name. A boot disk the params ask to attach is left alone: it already exists, and it
+// is not this launch's to provision or to clean up.
 //
-// The returned error wraps ErrInsufficientCapacity when the rack had no room for the instance,
-// whether that surfaced on the create or on the start of an adopted instance.
+// An instance or boot disk left over under the same name from an earlier attempt is adopted where it
+// can be, and removed where it cannot so the next attempt starts clean. Anything this call created
+// for a launch that then failed is torn down before returning, since the caller is being told the
+// launch failed and will never reference any of it again.
+//
+// It returns as soon as the instance has been placed, not once it is running. Placement is what a
+// launch has to establish and what the caller is choosing a shape against; an instance that is
+// placed and then fails to boot is a node that never registers, which Karpenter already times out
+// on and which no shape the caller could pick instead would avoid.
+//
+// The returned error wraps ErrInsufficientStorage when the boot disk could not be provisioned for
+// want of room, and ErrInsufficientCapacity when no sled had room for the instance. The two are
+// never both present: they come from different calls, and the first to fail ends the launch.
 func (p *Provider) Create(
 	ctx context.Context,
 	params oxide.InstanceCreateParams,
@@ -110,38 +161,59 @@ func (p *Provider) Create(
 	if params.Project == "" {
 		params.Project = oxide.NameOrId(p.project)
 	}
-	// Not left to the API's default: an instance that is never asked to start is never placed, and a
-	// launch that cannot be placed has to fail here, where the caller can still pick a different
-	// shape, rather than one poll interval later.
-	params.Body.Start = lo.ToPtr(true)
+	// Not left to the API's default, which is to start. A create that starts the instance does not
+	// wait for it to be placed, so the refusal this launch exists to catch would arrive after the
+	// call had already returned success. Creating it stopped keeps placement in a call of its own.
+	params.Body.Start = new(false)
 	name := string(params.Body.Name)
 	// The name the boot disk is created with, which is the only handle on it left once the instance
-	// is gone and can no longer be asked which disk it booted from.
+	// is gone and can no longer be asked which disk it booted from. Resolved before the disk is
+	// provisioned, because provisioning rewrites the params to attach the disk instead of creating
+	// it, and asking to create it is what makes the disk this launch's to delete.
 	bootDiskName := bootDiskName(params.Body)
+
+	if spec, ok := bootDiskSpec(params.Body); ok {
+		if err := p.ensureBootDisk(ctx, spec); err != nil {
+			return nil, err
+		}
+		params.Body.BootDisk = oxide.InstanceDiskAttachment{
+			Value: &oxide.InstanceDiskAttachmentAttach{Name: spec.Name},
+		}
+	}
 
 	created, err := p.ox.InstanceCreate(ctx, params)
 	if err != nil {
 		switch {
-		// Nothing was created, so there is nothing to clean up.
+		// Not expected of a create that starts nothing, since no sled is asked for anything. Handled
+		// because the silo's CPU and memory are charged here rather than on the start, so a quota
+		// with no headroom is refused by this call, under the same error code the rack uses.
 		case errors.Is(err, oxide.ErrInsufficientCapacity):
+			// The boot disk exists and this launch is over, so it has to go. Karpenter reschedules an
+			// insufficient capacity failure onto a fresh NodeClaim under a different name, which would
+			// never come looking for this disk.
+			p.abandonDisk(ctx, bootDiskName, err)
 			return nil, fmt.Errorf(
 				"unable to create instance %s, %w, %w", name, ErrInsufficientCapacity, err,
 			)
 		case errors.Is(err, oxide.ErrObjectAlreadyExists):
-			if created, err = p.adopt(ctx, name, bootDiskName); err != nil {
-				return nil, err
-			}
+			// An adopted instance is already started, or has been started by the adoption, so it has
+			// had its placement decided and does not go through the start below again.
+			return p.adopt(ctx, name, bootDiskName)
 		default:
+			p.abandonDisk(ctx, bootDiskName, err)
 			return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 		}
 	}
 
-	running, err := p.waitForRunning(ctx, created)
+	started, err := p.start(ctx, created.Id)
 	if err != nil {
+		// Nothing else will come back for this instance: the caller is about to be told the launch
+		// failed, and an insufficient capacity failure is rescheduled onto a NodeClaim under a
+		// different name. Left behind, it would hold its boot disk and its name indefinitely.
 		p.abandon(ctx, created.Id, bootDiskName, err)
 		return nil, err
 	}
-	return running, nil
+	return started, nil
 }
 
 // Delete tears down an instance and every resource it owns that outlives it, and returns
@@ -222,12 +294,209 @@ func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance)
 	})
 }
 
+// ensureBootDisk provisions the boot disk an instance create asked for and returns once it is
+// attachable, adopting or replacing one left behind by an earlier attempt.
+//
+// The Oxide API allocates the disk's regions before the create returns, so a rack with nowhere to
+// put them fails here rather than leaving a disk to fault later. That is what makes this the call
+// that answers "is there storage", and it is reported as ErrInsufficientStorage so the caller does
+// not read it as a verdict on the instance shape.
+func (p *Provider) ensureBootDisk(
+	ctx context.Context,
+	spec *oxide.InstanceDiskAttachmentCreate,
+) error {
+	name := string(spec.Name)
+
+	// At most one replacement pass. The second create runs against a name this call just freed, so a
+	// conflict there is a concurrent launch rather than leftover state, and no amount of retrying
+	// within this launch resolves that.
+	for attempt := 0; ; attempt++ {
+		created, err := p.ox.DiskCreate(ctx, oxide.DiskCreateParams{
+			Project: oxide.NameOrId(p.project),
+			Body: &oxide.DiskCreate{
+				Name:        spec.Name,
+				Description: spec.Description,
+				Size:        spec.Size,
+				DiskBackend: spec.DiskBackend,
+			},
+		})
+		if err == nil {
+			if err := p.waitForDiskReady(ctx, created); err != nil {
+				// Nothing else has been created yet, so the disk is the whole of the cleanup.
+				p.abandonDisk(ctx, name, err)
+				return err
+			}
+			return nil
+		}
+
+		switch {
+		case errors.Is(err, oxide.ErrInsufficientCapacity):
+			return fmt.Errorf(
+				"unable to create boot disk %s, %w, %w", name, ErrInsufficientStorage, err,
+			)
+
+		case errors.Is(err, oxide.ErrObjectAlreadyExists) && attempt == 0:
+			replace, err := p.adoptBootDisk(ctx, spec)
+			if err != nil {
+				return err
+			}
+			if !replace {
+				return nil
+			}
+			// The name is free now, so fall through and create it again.
+
+		default:
+			return fmt.Errorf("unable to create boot disk %s, %w", name, err)
+		}
+	}
+}
+
+// adoptBootDisk takes over a boot disk that already exists under the name a create tried to use,
+// which is what an earlier attempt that died between creating the disk and creating the instance
+// looks like. It reports whether the caller should create the disk again, having removed the one
+// that was in the way.
+func (p *Provider) adoptBootDisk(
+	ctx context.Context,
+	spec *oxide.InstanceDiskAttachmentCreate,
+) (bool, error) {
+	name := string(spec.Name)
+	log.FromContext(ctx).V(1).Info("boot disk already exists, adopting it", "disk", name)
+
+	existing, err := p.ox.DiskView(ctx, oxide.DiskViewParams{
+		Disk:    oxide.NameOrId(name),
+		Project: oxide.NameOrId(p.project),
+	})
+	if err != nil {
+		if errors.Is(err, oxide.ErrObjectNotFound) {
+			// Deleted between the create and this view. Something else is working on this name, and
+			// creating it again here would race that rather than resolve it.
+			return false, fmt.Errorf(
+				"boot disk %s already exists but was deleted before it could be adopted", name,
+			)
+		}
+		return false, fmt.Errorf("unable to view existing boot disk %s, %w", name, err)
+	}
+
+	// Adopted on state alone. A disk whose size no longer matches the OxideNodeClass is adopted like
+	// any other: it boots a working node, just not the one the class now describes, which is drift and
+	// belongs to whatever reconciles drift rather than to a launch in progress. Replacing it here would
+	// also make a boot disk size edit destroy disks as a side effect of an unrelated retry.
+	switch state := existing.State.State(); state {
+	// Usable already, or on its way there under its own steam.
+	case oxide.DiskStateStateCreating,
+		oxide.DiskStateStateDetached,
+		oxide.DiskStateStateAttaching,
+		oxide.DiskStateStateAttached:
+		return false, p.waitForDiskReady(ctx, existing)
+
+	// Detaching, faulted, destroyed, or partway through an import this provider never starts. None of
+	// these become a usable boot disk on their own, so the name has to be freed before a create under
+	// it can succeed.
+	default:
+		if err := p.deleteDisk(ctx, existing.Id); err != nil {
+			return false, fmt.Errorf(
+				"boot disk %s already exists in state %q and could not be removed, %w",
+				name, state, err,
+			)
+		}
+		return true, nil
+	}
+}
+
+// waitForDiskReady waits for a boot disk to reach a state the instance create can attach it in.
+//
+// A disk that comes back already attachable is the common case: the create allocated its regions
+// synchronously. This only covers the tail, and the states it gives up on are the ones a disk does
+// not leave on its own.
+func (p *Provider) waitForDiskReady(ctx context.Context, disk *oxide.Disk) error {
+	if diskAttachable(disk.State.State()) {
+		return nil
+	}
+
+	pollCtx, cancel := context.WithTimeout(ctx, diskReadyTimeout)
+	defer cancel()
+
+	lastState := disk.State.State()
+	err := wait.PollUntilContextCancel(
+		pollCtx,
+		pollInterval,
+		false,
+		func(ctx context.Context) (bool, error) {
+			view, err := p.ox.DiskView(
+				ctx,
+				oxide.DiskViewParams{Disk: oxide.NameOrId(disk.Id)},
+			)
+			if err != nil {
+				if errors.Is(err, oxide.ErrObjectNotFound) {
+					return false, fmt.Errorf(
+						"boot disk %s was deleted before it became usable", disk.Name,
+					)
+				}
+				return false, fmt.Errorf("unable to view the boot disk, %w", err)
+			}
+			lastState = view.State.State()
+
+			switch {
+			case diskAttachable(lastState):
+				return true, nil
+
+			// Terminal. Reported as a plain failure rather than as insufficient storage: the create
+			// already got past the point where a rack with no room refuses, so whatever went wrong
+			// here is not something a smaller request would have avoided.
+			case lastState == oxide.DiskStateStateFaulted,
+				lastState == oxide.DiskStateStateDestroyed:
+				return false, fmt.Errorf(
+					"boot disk %s entered state %q instead of becoming usable",
+					disk.Name,
+					lastState,
+				)
+
+			default:
+				return false, nil
+			}
+		},
+	)
+	if err == nil {
+		return nil
+	}
+	if wait.Interrupted(err) {
+		return fmt.Errorf(
+			"boot disk %s did not become usable within %s, last observed state %q",
+			disk.Name, diskReadyTimeout, lastState,
+		)
+	}
+	return err
+}
+
+// abandonDisk removes a boot disk this launch created and is giving up on. The caller is about to be
+// told the launch failed, and Karpenter retries insufficient capacity onto a NodeClaim with a
+// different name, so a disk left behind here is one nothing ever comes back for. Failures are logged
+// rather than returned: cause is why the launch is being abandoned and is the more useful error to
+// surface.
+//
+// An empty name means the boot disk was one the caller asked to attach, which this launch did not
+// create and must not delete.
+func (p *Provider) abandonDisk(ctx context.Context, name string, cause error) {
+	if name == "" {
+		return
+	}
+	if err := p.deleteDisk(ctx, name); err != nil {
+		log.FromContext(ctx).Error(
+			err,
+			"unable to clean up a boot disk whose instance did not launch",
+			"disk", name,
+			"cause", cause.Error(),
+		)
+	}
+}
+
 // adopt takes over an instance that already exists under the name a create tried to use, which is
 // what an earlier attempt that died after creating the instance looks like.
 //
-// A stopped instance is one this launch can still pick up, so it is started. An instance in any
-// other non-running state is not adoptable, and is torn down so the next attempt creates it from
-// scratch. The instance is addressed by name because a create that failed never reported an ID.
+// A stopped instance is one this launch can still pick up, so it is started, which is the same
+// placement decision a fresh launch makes and fails the same way. An instance in any other
+// non-running state is not adoptable, and is torn down so the next attempt creates it from scratch.
+// The instance is addressed by name because a create that failed never reported an ID.
 func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide.Instance, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
 
@@ -247,7 +516,8 @@ func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide
 	}
 
 	switch instance.RunState {
-	// Already coming up on its own. The wait picks it up from here.
+	// Already placed. Whatever earlier attempt created this instance got as far as starting it, so
+	// the rack has had room for the shape since, and there is nothing left for this launch to do.
 	case oxide.InstanceStateRunning,
 		oxide.InstanceStateStarting,
 		oxide.InstanceStateRebooting,
@@ -281,74 +551,15 @@ func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide
 	}
 }
 
-// waitForRunning waits for an instance to reach the running state and returns its final view.
-func (p *Provider) waitForRunning(
-	ctx context.Context,
-	instance *oxide.Instance,
-) (*oxide.Instance, error) {
-	if instance.RunState == oxide.InstanceStateRunning {
-		return instance, nil
-	}
-
-	pollCtx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
-
-	current := instance
-	err := wait.PollUntilContextCancel(
-		pollCtx,
-		pollInterval,
-		false,
-		func(ctx context.Context) (bool, error) {
-			view, err := p.ox.InstanceView(
-				ctx,
-				oxide.InstanceViewParams{Instance: oxide.NameOrId(instance.Id)},
-			)
-			if err != nil {
-				if errors.Is(err, oxide.ErrObjectNotFound) {
-					return false, ErrNotFound
-				}
-				return false, fmt.Errorf("unable to view the instance, %w", err)
-			}
-			current = view
-
-			switch view.RunState {
-			case oxide.InstanceStateRunning:
-				return true, nil
-
-			// The create already placed this instance and asked it to start, so none of these are
-			// states it comes back from on its own. Starting it again would be starting an instance
-			// that has already given up once, and waiting out runTimeout on it only delays
-			// rescheduling.
-			case oxide.InstanceStateStopped,
-				oxide.InstanceStateFailed,
-				oxide.InstanceStateDestroyed:
-				return false, errNotPlaced(view.RunState)
-
-			// Still booting.
-			default:
-				return false, nil
-			}
-		},
-	)
-	if err == nil {
-		return current, nil
-	}
-
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return nil, fmt.Errorf("instance %s was deleted before it started running", instance.Id)
-	case wait.Interrupted(err):
-		return nil, fmt.Errorf(
-			"instance %s did not start running within %s, last observed run state %q",
-			instance.Id, runTimeout, current.RunState,
-		)
-	default:
-		return nil, err
-	}
-}
-
-// start starts a stopped instance left behind by an earlier attempt. Starting is the placement
-// decision, so this is where an adoption of an instance the rack no longer has room for fails.
+// start places a stopped instance on a sled, and is the call a launch turns on.
+//
+// Starting is the placement decision, and the API makes it before answering: a rack with no sled
+// that has room for the instance's CPU and memory refuses here, synchronously, while the caller can
+// still choose a different shape. That is the whole reason instances are created stopped, and it is
+// why nothing downstream has to infer capacity from a run state.
+//
+// A refusal is about the shape and nothing else. The boot disk was provisioned before the instance
+// was created, so storage has already been established by the time this runs.
 func (p *Provider) start(ctx context.Context, id string) (*oxide.Instance, error) {
 	started, err := p.ox.InstanceStart(
 		ctx,
@@ -576,26 +787,37 @@ func (p *Provider) projectFor(ref string) oxide.NameOrId {
 // cleanup needs when the instance itself can no longer be asked for it. It is empty when the boot
 // disk is an existing one being attached, since that disk is not this launch's to delete.
 func bootDiskName(body *oxide.InstanceCreate) string {
-	if create, ok := body.BootDisk.Value.(*oxide.InstanceDiskAttachmentCreate); ok {
-		return string(create.Name)
-	}
-	if create, ok := body.BootDisk.Value.(oxide.InstanceDiskAttachmentCreate); ok {
-		return string(create.Name)
+	if spec, ok := bootDiskSpec(body); ok {
+		return string(spec.Name)
 	}
 	return ""
 }
 
-// errNotPlaced builds the error a launch fails with when an instance that was created and asked to
-// start settled somewhere other than running. It is reported as insufficient capacity so the
-// NodeClaim is rescheduled onto a different shape immediately: an instance that gave up on its own
-// is not going to come up on a retry under the same name, and waiting out the registration timeout
-// to learn that only delays the pods.
-func errNotPlaced(state oxide.InstanceState) error {
-	return fmt.Errorf(
-		"instance entered run state %q instead of running, "+
-			"the rack likely could not accommodate it, %w",
-		state, ErrInsufficientCapacity,
-	)
+// bootDiskSpec returns the boot disk a create is asking to have made, if it is asking for one. The
+// API accepts either variant by value or by pointer, so both are matched.
+func bootDiskSpec(body *oxide.InstanceCreate) (*oxide.InstanceDiskAttachmentCreate, bool) {
+	switch spec := body.BootDisk.Value.(type) {
+	case *oxide.InstanceDiskAttachmentCreate:
+		return spec, true
+	case oxide.InstanceDiskAttachmentCreate:
+		return &spec, true
+	default:
+		return nil, false
+	}
+}
+
+// diskAttachable reports whether an instance create can attach a disk in this state. Attached counts:
+// it is what a disk the instance being adopted already booted from looks like, and asking for it
+// again is not what fails such a launch.
+func diskAttachable(state oxide.DiskStateState) bool {
+	switch state {
+	case oxide.DiskStateStateDetached,
+		oxide.DiskStateStateAttaching,
+		oxide.DiskStateStateAttached:
+		return true
+	default:
+		return false
+	}
 }
 
 // deletable reports whether the Oxide API accepts a delete for an instance in this run state.

@@ -106,7 +106,7 @@ type OxideIPPool struct {
 // StatusConditions registers the Ready condition along with the condition types owned by whichever
 // bootstrap provider this nodeclass uses. Registering provider conditions conditionally keeps an
 // unset provider from ever holding the nodeclass un-Ready.
-func (in *OxideNodeClass) StatusConditions() status.ConditionSet {
+func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
 	// ImagesResolved applies to every nodeclass regardless of how it bootstraps. Registering at
 	// least one dependent unconditionally is also what lets Ready be derived rather than asserted:
 	// with no dependents at all, the condition set never recomputes the root.

@@ -2,6 +2,7 @@ package instancetype
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -269,5 +270,148 @@ func TestInventoryConstrainsTheOfferedInstanceTypes(t *testing.T) {
 
 	if it, _ := p.Get("16-32"); !it.Offerings[0].Available {
 		t.Error("16-32 is still unavailable after the rack made room for it")
+	}
+}
+
+// The frontier the capacity view reports. "Largest" has to be well defined when neither dimension
+// dominates, which is what the price ordering is for.
+func TestLargestShapeThatFits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		free capacity.Resources
+		want string
+	}{
+		{
+			name: "bounded by memory",
+			free: capacity.Resources{CPUs: 64, Memory: 16 * GiB},
+			want: "8-16",
+		},
+		{
+			name: "bounded by cpus",
+			free: capacity.Resources{CPUs: 8, Memory: 512 * GiB},
+			want: "8-256",
+		},
+		{
+			name: "nothing fits",
+			free: capacity.Resources{CPUs: 0, Memory: 0},
+			want: "",
+		},
+		{
+			name: "smaller than the smallest shape",
+			free: capacity.Resources{CPUs: 1, Memory: 1 * GiB},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shape, ok := LargestShapeThatFits(tc.free)
+			if !ok {
+				if tc.want != "" {
+					t.Fatalf("no shape fits, want %s", tc.want)
+				}
+				return
+			}
+			got := SpecsToInstanceTypeName(shape.Ncpus, shape.MemInGiB)
+			if got != tc.want {
+				t.Errorf("largest shape = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The headroom is the same judgement Availability.Unavailable makes, published. It has to agree with
+// it exactly: a bound that ruled out a shape the rack would have placed would report a constraint that
+// is not there, and one that missed a shape would leave part of the unavailable count unexplained.
+func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sleds []capacity.Sled
+		want  []Specs
+	}{
+		{
+			// One sled, so one bound, covering both dimensions at once: anything wanting more CPUs or
+			// more memory than it has is out.
+			name:  "one sled",
+			sleds: []capacity.Sled{sledWithFree(8, 16)},
+			want:  []Specs{{Ncpus: 8, MemInGiB: 16}},
+		},
+		{
+			// Neither sled covers the other, so both are published and a shape is out only when it
+			// outgrows both: 8 CPUs with 64 GiB is too much memory for the CPU-heavy sled and too many
+			// CPUs for the memory-heavy one, though either number alone fits somewhere.
+			name:  "sleds that bound different dimensions",
+			sleds: []capacity.Sled{sledWithFree(64, 32), sledWithFree(4, 512)},
+			want:  []Specs{{Ncpus: 4, MemInGiB: 512}, {Ncpus: 64, MemInGiB: 32}},
+		},
+		{
+			// A sled with less of both rules nothing out the other allows, so it adds no bound.
+			name:  "a sled covered by another",
+			sleds: []capacity.Sled{sledWithFree(8, 16), sledWithFree(4, 8)},
+			want:  []Specs{{Ncpus: 8, MemInGiB: 16}},
+		},
+		{
+			// The catalog stops before this rack does, so no shape can outgrow the sled and there is
+			// nothing to report.
+			name:  "a rack larger than the catalog",
+			sleds: []capacity.Sled{sledWithFree(maxSledCPUs, maxSledMemGiB)},
+			want:  nil,
+		},
+		{
+			// Free space nobody can reach is not room. The whole catalog is out, and a headroom of
+			// nothing says so.
+			name: "nothing provisionable",
+			sleds: []capacity.Sled{func() capacity.Sled {
+				drained := sledWithFree(64, 128)
+				drained.Provisionable = false
+				return drained
+			}()},
+			want: []Specs{{}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rack := read(time.Now(), 1, tc.sleds...)
+
+			got := RackHeadroom(rack)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("headroom = %v, want %v", got, tc.want)
+			}
+
+			// The bounds are only worth anything if they say the same thing the rack does, so every
+			// shape in the catalog is asked of both. A shape is out when it fits inside no bound, since
+			// it only has to fit on one sled.
+			for _, specs := range shapes() {
+				out := len(got) > 0
+				for _, headroom := range got {
+					if specs.Ncpus <= headroom.Ncpus && specs.MemInGiB <= headroom.MemInGiB {
+						out = false
+						break
+					}
+				}
+				if fits := rack.CanFit(resourcesFor(specs)); fits == out {
+					t.Fatalf("%s fits on the rack = %t, and the headroom says it is out = %t",
+						SpecsToInstanceTypeName(specs.Ncpus, specs.MemInGiB), fits, out)
+				}
+			}
+		})
+	}
+}
+
+// The rack frontier is the largest shape that fits on some single sled, never the largest that fits in
+// the total, and a sled that accepts nothing contributes nothing.
+func TestLargestShapeOnRackIsPerSled(t *testing.T) {
+	drained := sledWithFree(64, 128)
+	drained.Provisionable = false
+	rack := read(time.Now(), 1, sledWithFree(4, 8), sledWithFree(8, 16), drained)
+
+	shape, ok := LargestShapeOnRack(rack)
+	if !ok {
+		t.Fatal("no shape fits on a rack with two provisionable sleds")
+	}
+	if got := SpecsToInstanceTypeName(shape.Ncpus, shape.MemInGiB); got != "8-16" {
+		t.Errorf("largest shape on the rack = %s, want 8-16", got)
+	}
+
+	empty := read(time.Now(), 1, drained)
+	if _, ok := LargestShapeOnRack(empty); ok {
+		t.Error("a rack of sleds accepting nothing reported a feasible shape")
 	}
 }

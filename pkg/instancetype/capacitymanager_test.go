@@ -53,6 +53,103 @@ func TestCapacityManagerDropsSubsumedEntries(t *testing.T) {
 	}
 }
 
+// The refusal the subsumed entry recorded still happened, and the shape replacing it is smaller, so
+// the run of refusals continues rather than starting over. Without this the entry that survives claims
+// to be a first refusal and backs off for three minutes on the strength of it.
+func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+	large := Specs{Ncpus: 16, MemInGiB: 32}
+	small := Specs{Ncpus: 8, MemInGiB: 16}
+
+	c.RecordICE(ctx, large, ReasonCapacity)
+	c.RecordICE(ctx, large, ReasonCapacity) // 2 refusals, 6m
+	c.RecordICE(ctx, small, ReasonCapacity)
+
+	if got := ices(t, c, small); got != 3 {
+		t.Errorf("consecutive ICEs = %d, want the subsumed entry's run continued", got)
+	}
+	if got := retryAfterOf(t, c, small).Sub(now); got != 12*time.Minute {
+		t.Errorf("backoff = %v, want the third refusal's backoff", got)
+	}
+}
+
+// The failure this whole mechanism exists to prevent, and the one the flat-3m behaviour let through: a
+// full rack does not refuse one shape repeatedly, it refuses whatever the scheduler proposes, and the
+// scheduler answers each refusal with something a little smaller. Every one of those is a new key, so
+// counting per key holds the backoff at its minimum for as long as there is a smaller shape to try.
+func TestWalkingDownShapesStillBacksOff(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+
+	// 21-42, 20-40, ... 17-34, as observed against a rack with nowhere to put any of them.
+	for cpus := 21; cpus >= 17; cpus-- {
+		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+	}
+
+	last := Specs{Ncpus: 17, MemInGiB: 34}
+	if got := ices(t, c, last); got != 5 {
+		t.Errorf("consecutive ICEs = %d, want one run of 5 rather than 5 runs of 1", got)
+	}
+	if got := retryAfterOf(t, c, last).Sub(now); got != 30*time.Minute {
+		t.Errorf("backoff = %v, want the run to have reached the cap", got)
+	}
+	if got := len(c.Snapshot()); got != 1 {
+		t.Errorf("snapshot has %d entries, want the boundary alone", got)
+	}
+}
+
+// Inheritance is not cumulative across unrelated shapes. Two boundaries that neither covers the other
+// describe different limits, and folding their counts together would let a rack with an odd shaped
+// hole in it back off as though one shape had been refused over and over.
+func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+
+	// Neither covers the other: one is CPU heavy, the other memory heavy.
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 64}, ReasonCapacity)
+	if got := len(c.Snapshot()); got != 2 {
+		t.Fatalf("snapshot has %d entries, want two independent boundaries", got)
+	}
+
+	// Subsumes both.
+	small := Specs{Ncpus: 8, MemInGiB: 32}
+	c.RecordICE(ctx, small, ReasonCapacity)
+
+	if got := ices(t, c, small); got != 3 {
+		t.Errorf("consecutive ICEs = %d, want the longest run plus this refusal, not the sum", got)
+	}
+}
+
+// A launch that succeeds is the one thing that disproves the run, and it has to take the inherited
+// history with it. Otherwise a boundary that carried a long run forward would leave the next refusal
+// of that shape backing off for half an hour on evidence a successful launch already contradicted.
+func TestSuccessClearsInheritedHistory(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	small := Specs{Ncpus: 8, MemInGiB: 16}
+	c.RecordICE(ctx, small, ReasonCapacity)
+
+	c.RecordSuccess(ctx, small)
+	if got := len(c.Snapshot()); got != 0 {
+		t.Fatalf("snapshot has %d entries, want the launch to have cleared the boundary", got)
+	}
+
+	c.RecordICE(ctx, small, ReasonCapacity)
+	if got := retryAfterOf(t, c, small).Sub(now); got != 3*time.Minute {
+		t.Errorf("backoff after a successful launch = %v, want the first-refusal backoff", got)
+	}
+}
+
 // The first refusal is the cheap one to retry: capacity comes and goes, so the shape is reconsidered
 // as soon as the rack has plausibly changed.
 func TestFirstICEBacksOffThreeMinutes(t *testing.T) {
@@ -348,6 +445,30 @@ func TestHistoryIsForgottenEventually(t *testing.T) {
 	}
 }
 
+// RetryAfter is what an operator reads to know when a shape that is out will be tried again, so a
+// refusal while half-open has to push it back out rather than leave the shape looking reopened.
+func TestARefusalMovesTheRetryTimeBackOut(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	ctx := context.Background()
+
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	now = now.Add(3 * time.Minute)
+	if state := entryOf(t, c, specs).State; state != StateHalfOpen {
+		t.Fatalf("state = %q, want the shape reopened by its backoff elapsing", state)
+	}
+
+	c.RecordICE(ctx, specs, ReasonCapacity)
+	entry := entryOf(t, c, specs)
+	if entry.State != StateBackoff {
+		t.Errorf("after a second refusal the shape is %q, want %q", entry.State, StateBackoff)
+	}
+	if got := entry.RetryAfter.Sub(now); got != 6*time.Minute {
+		t.Errorf("it retries in %v, want the second backoff of 6m", got)
+	}
+}
+
 // Jitter keeps a burst of refusals from reopening in the same instant and walking into the same wall
 // together. It only ever adds, so a shape is never retried earlier than its backoff.
 func TestJitterStaysWithinItsFraction(t *testing.T) {
@@ -572,5 +693,313 @@ func TestReopenedShapesAreOfferedAgain(t *testing.T) {
 
 	if it, _ := p.Get("8-16"); !it.Offerings[0].Available {
 		t.Error("8-16 is not offered again once its backoff elapsed")
+	}
+}
+
+// searchSim drives the manager the way the scheduler and the rack together do: it repeatedly offers
+// the largest shape still available, launches it, and reports the outcome back. maxLaunchableCPUs is
+// the rack's real boundary, which the manager cannot see and has to find.
+//
+// Shapes are the 1:2 memory family, which is what a NodeClaim's candidates look like: a chain under
+// covers, so there is exactly one largest available shape at any moment.
+type searchSim struct {
+	c                 *CapacityManager
+	maxLaunchableCPUs int
+	maxCPUs           int
+	// attempts is every shape launched, in order, and launched is the ones the rack accepted.
+	attempts []int
+	launched []int
+}
+
+// largestAvailable is the shape the scheduler would pick for a NodeClaim that wants as much as it
+// can get, which is what a big bin-packed claim asks for.
+func (s *searchSim) largestAvailable() (Specs, bool) {
+	for cpus := s.maxCPUs; cpus >= 1; cpus-- {
+		specs := Specs{Ncpus: cpus, MemInGiB: cpus * 2}
+		if unavailable, _ := s.c.IsUnavailable(specs); !unavailable {
+			return specs, true
+		}
+	}
+	return Specs{}, false
+}
+
+// run launches shapes until one is placed or the budget is spent, and returns the shape that
+// launched.
+func (s *searchSim) run(t *testing.T, budget int) Specs {
+	t.Helper()
+	for range budget {
+		specs, ok := s.largestAvailable()
+		if !ok {
+			t.Fatalf("every shape was ruled out after %d attempts: %v", len(s.attempts), s.attempts)
+		}
+		s.attempts = append(s.attempts, specs.Ncpus)
+		if specs.Ncpus <= s.maxLaunchableCPUs {
+			s.launched = append(s.launched, specs.Ncpus)
+			s.c.RecordSuccess(context.Background(), specs)
+			return specs
+		}
+		s.c.RecordICE(context.Background(), specs, ReasonCapacity)
+	}
+	t.Fatalf("no shape launched within %d attempts: %v", budget, s.attempts)
+	return Specs{}
+}
+
+// A rack with no room refuses the largest shape, the scheduler comes back one size smaller, and that
+// is refused too. Stepping through that one size at a time costs a launch per size and takes the
+// better part of twenty minutes across a wide instance type range, so the search descends
+// geometrically instead: each refusal past the first halves what is offered next.
+func TestCapacitySearchDescendsGeometrically(t *testing.T) {
+	now := time.Now()
+	sim := &searchSim{
+		c:                 newTestCapacityManager(&now),
+		maxLaunchableCPUs: 9,
+		maxCPUs:           38,
+	}
+
+	launched := sim.run(t, 10)
+
+	if launched.Ncpus > sim.maxLaunchableCPUs {
+		t.Fatalf("launched %d cpus, which the rack had no room for", launched.Ncpus)
+	}
+	// Stepping down one size at a time from 38 to 9 would be 29 refusals. Anything close to that is
+	// the walk this exists to avoid, whatever the exact halving works out to.
+	if len(sim.attempts) > 6 {
+		t.Errorf("took %d launches to place a shape, want a geometric descent: %v",
+			len(sim.attempts), sim.attempts)
+	}
+	// Each attempt must be meaningfully smaller than the last, not one size down.
+	for i := 2; i < len(sim.attempts); i++ {
+		if sim.attempts[i] > sim.attempts[i-1]/2 {
+			t.Errorf("attempt %d went from %d to %d cpus, want at most half: %v",
+				i, sim.attempts[i-1], sim.attempts[i], sim.attempts)
+		}
+	}
+}
+
+// Halving overshoots on purpose, so the search has to climb back. A shape that launches puts a floor
+// under the band nothing has tested, and the next offering is its midpoint rather than the floor
+// itself, which is what stops an aggressive skip from leaving the cluster on the smallest shape on
+// the rack for as long as the backoff lasts.
+func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
+	now := time.Now()
+	sim := &searchSim{
+		c:                 newTestCapacityManager(&now),
+		maxLaunchableCPUs: 9,
+		maxCPUs:           38,
+	}
+
+	first := sim.run(t, 10)
+	// The descent is expected to undershoot: it halves rather than testing every size, so it lands
+	// below the boundary and there is a band above it nothing has ruled out on evidence.
+	if first.Ncpus == sim.maxLaunchableCPUs {
+		t.Skip("the descent happened to land exactly on the boundary, leaving nothing to climb")
+	}
+
+	// Keep launching. Each success should reach higher than the last until the boundary is found.
+	for range 8 {
+		if sim.launched[len(sim.launched)-1] == sim.maxLaunchableCPUs {
+			break
+		}
+		sim.run(t, 6)
+	}
+
+	best := sim.launched[len(sim.launched)-1]
+	if best != sim.maxLaunchableCPUs {
+		t.Errorf(
+			"settled on %d cpus, want the search to find the boundary at %d: attempts %v, launched %v",
+			best,
+			sim.maxLaunchableCPUs,
+			sim.attempts,
+			sim.launched,
+		)
+	}
+	if len(sim.attempts) > 12 {
+		t.Errorf("took %d launches to find the boundary: %v", len(sim.attempts), sim.attempts)
+	}
+}
+
+// A skip is a guess, and a guess must never be the reason nothing can launch. However far a walk
+// runs, some shape has to be left offerable.
+func TestCapacitySearchNeverRulesOutEveryShape(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+
+	// A rack that refuses everything, walked all the way down.
+	for _, cpus := range []int{38, 19, 9, 4, 2, 1} {
+		c.RecordICE(context.Background(), Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+		smallest := Specs{Ncpus: 1, MemInGiB: 2}
+		if unavailable, _ := c.IsUnavailable(smallest); unavailable {
+			// The smallest shape may only be ruled out by having been refused itself, never by a skip.
+			if cpus > 1 {
+				t.Fatalf(
+					"a skip after refusing %d cpus ruled out the smallest shape on the rack",
+					cpus,
+				)
+			}
+		}
+	}
+}
+
+// Only the shape that was actually refused clears an entry. A launch below the reach is the search
+// working, not evidence against the refusal, and treating it as such would throw away a real refusal
+// and send the scheduler straight back to the top of the walk.
+func TestCapacitySuccessBelowTheReachDoesNotClearTheRefusal(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+
+	c.RecordICE(context.Background(), Specs{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
+	c.RecordICE(context.Background(), Specs{Ncpus: 31, MemInGiB: 62}, ReasonCapacity)
+
+	// The second refusal establishes the walk, so the reach is well below 31 cpus and a much smaller
+	// shape is offered.
+	c.RecordSuccess(context.Background(), Specs{Ncpus: 4, MemInGiB: 8})
+
+	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 31, MemInGiB: 62}); !unavailable {
+		t.Error("a refused shape became available again because something smaller launched")
+	}
+	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 4, MemInGiB: 8}); unavailable {
+		t.Error("the shape that just launched is still ruled out")
+	}
+}
+
+// Refusals arrive out of order, because a launch already in flight when a shape is refused still
+// runs and still fails. The later refusal is for a larger shape, so it does not subsume the smaller
+// entry and the two sit side by side.
+//
+// That is fine as long as the larger one does not search. If it descends a reach of its own, that
+// reach reaches below the smaller entry and rules out the smaller entry's own shape, so reopening
+// that shape for a probe achieves nothing: the probe cannot launch, and nothing says why.
+func TestOutOfOrderRefusalDoesNotSmotherTheSmallerEntry(t *testing.T) {
+	now := time.Now()
+	c := newTestCapacityManager(&now)
+	ctx := context.Background()
+
+	// A walk that has been running a while, so the smaller entry has a long run behind it.
+	for _, cpus := range []int{32, 16, 11} {
+		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+	}
+	// The 12 CPU launch that was already in flight when 11 was refused now fails too.
+	c.RecordICE(ctx, Specs{Ncpus: 12, MemInGiB: 24}, ReasonCapacity)
+
+	// A teardown frees enough for the shape the walk stopped on, reopening it for one probe.
+	c.RecordCapacityReleased(ctx, Specs{Ncpus: 11, MemInGiB: 22})
+
+	if got := stateOf(t, c, Specs{Ncpus: 11, MemInGiB: 22}); got != StateHalfOpen {
+		t.Fatalf("11-22 state = %q, want it reopened for a probe", got)
+	}
+	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 11, MemInGiB: 22}); unavailable {
+		t.Error("the reopened shape is still ruled out, so its probe can never run")
+	}
+	if !c.TryAcquire(Specs{Ncpus: 11, MemInGiB: 22}) {
+		t.Error("the reopened shape could not be acquired for its probe")
+	}
+	// The out-of-order refusal is still evidence, and still rules out what it refused.
+	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 12, MemInGiB: 24}); !unavailable {
+		t.Error("12-24 was refused and is being offered anyway")
+	}
+}
+
+// The case this was written for. A controller that has just started has launched nothing, so no entry
+// has a floor, and the descent is pure speculation: refusing 10-20 halves to 5-10 and takes the shape
+// every node in the cluster is running out of the catalogue along with it. A running node is proof its
+// shape placed, and seeding it brackets the search instead.
+func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
+	now := time.Now()
+	ctx := context.Background()
+
+	refused := Specs{Ncpus: 10, MemInGiB: 20}
+	running := Specs{Ncpus: 5, MemInGiB: 10}
+
+	unseeded := newTestCapacityManager(&now)
+	for range walkThreshold + 1 {
+		unseeded.RecordICE(ctx, refused, ReasonCapacity)
+	}
+	if got, _ := unseeded.IsUnavailable(running); !got {
+		t.Fatalf(
+			"without a floor the descent was expected to rule out %d-%d, so this test proves nothing",
+			running.Ncpus,
+			running.MemInGiB,
+		)
+	}
+
+	seeded := newTestCapacityManager(&now)
+	seeded.SeedLaunchable(ctx, running)
+	for range walkThreshold + 1 {
+		seeded.RecordICE(ctx, refused, ReasonCapacity)
+	}
+	if got, _ := seeded.IsUnavailable(running); got {
+		t.Errorf("IsUnavailable(%d-%d) = true, want a shape the cluster is running to stay offered",
+			running.Ncpus, running.MemInGiB)
+	}
+	// between(5-10, 10-20) puts the midpoint at 7-15 and rules out from one step above it.
+	if got := entryOf(t, seeded, refused).Reach; got != (Specs{Ncpus: 8, MemInGiB: 16}) {
+		t.Errorf("reach = %d-%d, want the bracketed midpoint 8-16", got.Ncpus, got.MemInGiB)
+	}
+}
+
+// A seed is weaker evidence than a launch and must never displace one. RecordSuccess sets a floor
+// during the entry's life; a seed taken from a node that has been up for hours is older news.
+func TestSeededFloorDoesNotDisplaceALaunchedOne(t *testing.T) {
+	now := time.Now()
+	ctx := context.Background()
+	c := newTestCapacityManager(&now)
+
+	c.SeedLaunchable(ctx, Specs{Ncpus: 2, MemInGiB: 4})
+	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordSuccess(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+
+	if got := entryOf(
+		t,
+		c,
+		Specs{Ncpus: 16, MemInGiB: 32},
+	).Floor; got != (Specs{Ncpus: 8, MemInGiB: 16}) {
+		t.Errorf(
+			"floor = %d-%d, want the launched shape rather than the seed",
+			got.Ncpus,
+			got.MemInGiB,
+		)
+	}
+}
+
+// Only the largest seed matters: a smaller running shape says nothing a larger one does not, and
+// order of arrival is whatever order the NodeClaims happened to list in.
+func TestSeedKeepsTheLargestShape(t *testing.T) {
+	now := time.Now()
+	ctx := context.Background()
+	c := newTestCapacityManager(&now)
+
+	c.SeedLaunchable(ctx, Specs{Ncpus: 12, MemInGiB: 24})
+	c.SeedLaunchable(ctx, Specs{Ncpus: 2, MemInGiB: 4})
+
+	refused := Specs{Ncpus: 32, MemInGiB: 64}
+	for range walkThreshold + 1 {
+		c.RecordICE(ctx, refused, ReasonCapacity)
+	}
+	if got, _ := c.IsUnavailable(Specs{Ncpus: 12, MemInGiB: 24}); got {
+		t.Error("the largest seeded shape was ruled out, so a later smaller seed overwrote it")
+	}
+}
+
+// A seed at or above the shape just refused describes a rack that has changed since. The refusal is
+// the newer evidence, so the search must fall back to descending rather than bracket above a shape
+// known not to fit.
+func TestSeedAtOrAboveTheRefusalIsDropped(t *testing.T) {
+	now := time.Now()
+	ctx := context.Background()
+	c := newTestCapacityManager(&now)
+
+	c.SeedLaunchable(ctx, Specs{Ncpus: 16, MemInGiB: 32})
+	refused := Specs{Ncpus: 8, MemInGiB: 16}
+	for range walkThreshold + 1 {
+		c.RecordICE(ctx, refused, ReasonCapacity)
+	}
+
+	entry := entryOf(t, c, refused)
+	if known(entry.Floor) {
+		t.Errorf("floor = %d-%d, want a stale seed above the refusal to be dropped",
+			entry.Floor.Ncpus, entry.Floor.MemInGiB)
+	}
+	if got := entry.Reach; got != (Specs{Ncpus: 4, MemInGiB: 8}) {
+		t.Errorf("reach = %d-%d, want the halving descent 4-8", got.Ncpus, got.MemInGiB)
 	}
 }

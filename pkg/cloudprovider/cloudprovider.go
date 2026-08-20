@@ -223,8 +223,10 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
 	}
 
-	// Create resolves the whole launch: it adopts or clears an instance left behind by an earlier
-	// attempt, and does not return until the instance is actually running.
+	// Create resolves the whole launch: it provisions the boot disk, creates the instance stopped,
+	// and starts it, adopting or clearing anything left behind by an earlier attempt. It returns once
+	// the rack has placed the instance, which is what the shape chosen above is being tested against.
+	// Whether the node then boots and registers is Karpenter's to time out on.
 	launched, err := c.instanceProvider.Create(ctx, oxide.InstanceCreateParams{
 		Project: oxide.NameOrId(c.project),
 		Body: &oxide.InstanceCreate{
@@ -291,12 +293,43 @@ func (c *OxideCloudProvider) Create(
 		// Karpenter deletes the NodeClaim immediately on an insufficient capacity error and
 		// reschedules its pods. Without this the NodeClaim sits around holding a launch that the
 		// rack cannot satisfy until the 15 minute registration timeout expires.
+		//
+		// The boot disk is created ahead of the instance, so a launch refused for want of storage says
+		// so on its own error. Nothing about the shape is recorded for it: Crucible spreads a disk's
+		// regions across three sleds chosen independently of where the instance lands, so the shape had
+		// no bearing on the refusal and no smaller one would have fared better. Marking this shape
+		// unavailable would take it out of consideration for a limit it did not hit, and would send the
+		// next attempt looking for a smaller shape that runs into exactly the same wall.
+		if errors.Is(err, instance.ErrInsufficientStorage) {
+			// Diagnosed against storage alone. The disk create is the only thing that was refused, so
+			// naming a CPU or memory quota here would blame a dimension that was never asked for.
+			reason, diagnosis := c.diagnoseRefusal(
+				utilization.Request{Storage: request.Storage},
+				err,
+			)
+			// Recorded rather than acted on. Nothing is filtered on it; it is what makes the OxideCapacity
+			// view able to say storage is why nothing is launching, which is otherwise only visible as
+			// every shape failing at once for no reason the view can name.
+			c.instanceTypeProvider.RecordStorageRefusal(ctx, reason, diagnosis.Error())
+			if reason == instancetype.ReasonQuota {
+				// Same reasoning as the capacity path: the snapshot said there was room and the API
+				// disagreed, so re-read it before the rest of an in-flight burst is judged against it.
+				c.instanceTypeProvider.RefreshQuota(ctx)
+			}
+			return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
+		}
 		if errors.Is(err, instance.ErrInsufficientCapacity) {
 			// The API reports a quota that has no room and a rack that has no room identically, so the
 			// two are told apart here by asking whether the quota would have allowed this launch. The
 			// quota was checked above, but a concurrent launch or a lowered quota can have consumed the
 			// headroom since, which is exactly the case worth naming rather than blaming the rack for.
-			reason, diagnosis := c.diagnoseRefusal(request, err)
+			//
+			// Storage is left out of the question. The boot disk already exists by the time the instance
+			// create runs, so its storage was accounted for and whatever refused this launch was not it.
+			reason, diagnosis := c.diagnoseRefusal(
+				utilization.Request{CPUs: request.CPUs, Memory: request.Memory},
+				err,
+			)
 			// Rescheduling only helps if it lands somewhere else, so this shape and everything
 			// larger comes out of consideration while the limit holds.
 			c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)

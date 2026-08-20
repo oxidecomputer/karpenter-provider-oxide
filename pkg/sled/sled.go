@@ -338,17 +338,52 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 	return true, nil
 }
 
+// vmmReservoirPercentOfPhysicalRAM is how much of a sled's physical RAM this provider treats as
+// available to hold guest memory.
+//
+// Guest memory does not come out of physical RAM. It comes out of the VMM reservoir, which is what
+// remains once the host OS and the control plane have been paid for, and the reservoir is the only thing
+// a placement is actually checked against. Omicron's own budget is, from omicron ff546dc31:
+//
+//   - sled-hardware/src/lib.rs, MemoryReservations::vmm_eligible: physical RAM, less 120 bytes of
+//     page_t per 4 KiB page, less a fixed control plane earmark
+//   - smf/sled-agent/gimlet/config.toml: that earmark is 45056 MiB, and vmm_reservoir_percentage takes
+//     86.3% of what is left
+//
+// That earmark covers Nexus, CockroachDB, ClickHouse, internal and external DNS and Crucible, plus OS
+// terms for network buffer slush, kernel heap and the ZFS ARC, all on the pessimistic assumption that
+// every one of those lands on this sled. It works out to roughly 80% of physical RAM on a 1 TiB Gimlet.
+//
+// One percentage of physical RAM stands in for the whole of that, deliberately. Reproducing the terms
+// individually implies a precision this cannot have: the real reservoir is whatever sled-agent managed
+// to allocate, alignment-rounded, on a sled whose earmark this code cannot read, and it is compared
+// against Propolis's reservation rather than against the instance's memory. A single number is honest
+// about being an estimate and is one thing to adjust when a rack disagrees with it.
+//
+// 87% is above Omicron's effective ~80%, so this errs high rather than low. That is the direction to err
+// here: a shape nobody offers is a shape nobody ever discovers the truth about, whereas one that is
+// offered and refused teaches the capacity manager something. Note that this is not the same 87 as
+// Omicron's 86.3 despite the resemblance — that percentage applies to already-derated memory, this one
+// to the raw total.
+const vmmReservoirPercentOfPhysicalRAM = 87
+
 // capacityOf is what a sled has to place instances with.
 //
-// These are the numbers the sled reports about its own hardware, which is more than the control plane
-// will actually hand out to instances: memory is held back for the hypervisor and the control plane,
-// and none of that is visible on this API. Treating the hardware totals as placeable therefore
-// overstates the rack, which is the direction that costs a refused launch rather than a shape nobody
-// ever offers.
+// CPUs are the sled's hardware threads, unreduced, because that is exactly what Omicron compares a
+// placement against. Its query admits a VMM only if all three of these hold:
+//
+//	sum(vmm hardware_threads) + requested <= sled.usable_hardware_threads
+//	sum(vmm rss_ram)          + requested <= sled.usable_physical_ram
+//	sum(vmm reservoir_ram)    + requested <= sled.reservoir_size
+//
+// See nexus/db-queries/src/db/queries/sled_reservation.rs, sled_find_targets_query. The first condition
+// is why no CPU overhead is subtracted here: the control plane's zones reduce a sled's memory but not
+// the threads it will hand out to instances. The third is the tight one, and the only term nothing in
+// the public API exposes, which is what vmmReservoirPercentOfPhysicalRAM stands in for.
 func capacityOf(placement Placement) capacity.Resources {
 	return capacity.Resources{
 		CPUs:   placement.UsableHardwareThreads,
-		Memory: placement.UsablePhysicalRam,
+		Memory: placement.UsablePhysicalRam / 100 * vmmReservoirPercentOfPhysicalRAM,
 	}
 }
 

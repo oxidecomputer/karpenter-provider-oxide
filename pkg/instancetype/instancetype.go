@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -145,9 +147,206 @@ func (i *Provider) RecordICE(ctx context.Context, specs Specs, reason Reason) {
 }
 
 // RecordSuccess reports that a launch of this shape succeeded, which clears the refusal history of
-// every shape that success disproves.
+// every shape that success disproves, along with anything recorded about storage: the launch created
+// a boot disk, so storage was available.
 func (i *Provider) RecordSuccess(ctx context.Context, specs Specs) {
 	i.capacity.RecordSuccess(ctx, specs)
+	i.capacity.ClearStorageRefusal(ctx)
+}
+
+// SeedLaunchable reports that the cluster is running a node of this shape. It gives the refusal
+// search a floor drawn from what is already up, which is the only floor available to a process that
+// has not launched anything yet. See CapacityManager.SeedLaunchable.
+func (i *Provider) SeedLaunchable(ctx context.Context, specs Specs) {
+	i.capacity.SeedLaunchable(ctx, specs)
+}
+
+// RecordStorageRefusal reports that a launch was refused because its boot disk could not be
+// provisioned. No shape is taken out of consideration for it, since a storage refusal says nothing
+// about the shape that was being launched.
+func (i *Provider) RecordStorageRefusal(ctx context.Context, reason Reason, message string) {
+	i.capacity.RecordStorageRefusal(ctx, reason, message)
+}
+
+// StorageRefusal returns the last launch refused for want of boot disk storage, and whether there is
+// one, for callers reporting on the provider's state.
+func (i *Provider) StorageRefusal() (StorageRefusal, bool) {
+	return i.capacity.StorageRefusal()
+}
+
+// Unavailable returns every shape currently out of consideration, for callers reporting on the
+// provider's state rather than deciding with it.
+func (i *Provider) Unavailable() []Entry {
+	return i.capacity.Snapshot()
+}
+
+// UnavailableInstanceTypeCount is how many instance types the scheduler is currently not being
+// offered, out of how many there are.
+//
+// This is a different number from len(Unavailable()), and the one an operator means by "how much is
+// unavailable". A refusal entry covers every shape at least as large in both dimensions, so a single
+// entry for a small shape rules out hundreds of instance types; a view reporting only the entries says
+// "1" while the scheduler has almost nothing left to pick from. It also counts shapes ruled out by the
+// quota and by the rack, which have no entries at all.
+//
+// Counted off the built list rather than recomputed, so it can never disagree with what the scheduler
+// was actually handed.
+func (i *Provider) UnavailableInstanceTypeCount() (unavailable, total int) {
+	instanceTypes := i.InstanceTypes()
+	for _, it := range instanceTypes {
+		if len(it.Offerings.Available()) == 0 {
+			unavailable++
+		}
+	}
+	return unavailable, len(instanceTypes)
+}
+
+// Rack returns the rack reading the provider is deciding against, and what that reading is worth.
+func (i *Provider) Rack() (capacity.Snapshot, InventoryState) {
+	return i.capacity.Rack()
+}
+
+// LargestShapeThatFits returns the largest shape the provider offers that fits in this much free
+// space, and whether there is one at all.
+//
+// "Largest" is the most expensive shape by the same synthetic price consolidation compares offerings
+// on, which is what makes it well defined: 8 CPUs with 16 GiB and 4 CPUs with 128 GiB are not ordered
+// by either dimension alone, and the price is the ordering the rest of the provider already uses.
+//
+// This exists to answer "how big a node could I get right now" with a shape rather than a pair of
+// numbers, since the numbers on their own suggest shapes the provider does not offer.
+func LargestShapeThatFits(free capacity.Resources) (Specs, bool) {
+	largest := Specs{}
+	found := false
+	for _, specs := range shapes() {
+		if specs.Ncpus > free.CPUs || uint64(specs.MemInGiB)*GiB > free.Memory {
+			continue
+		}
+		if !found || price(specs) > price(largest) {
+			largest, found = specs, true
+		}
+	}
+	return largest, found
+}
+
+// LargestShapeOnRack returns the largest shape any single sled in this reading could take.
+//
+// Per sled, and never summed, for the same reason feasibility is judged per sled: an instance runs on
+// one sled, so the largest shape a rack can place is the largest one that fits somewhere, not the one
+// that fits in the total.
+func LargestShapeOnRack(rack capacity.Snapshot) (Specs, bool) {
+	largest := Specs{}
+	found := false
+	for _, sled := range rack.Sleds() {
+		if !sled.Provisionable {
+			continue
+		}
+		shape, ok := LargestShapeThatFits(sled.Free())
+		if !ok {
+			continue
+		}
+		if !found || price(shape) > price(largest) {
+			largest, found = shape, true
+		}
+	}
+	return largest, found
+}
+
+// RackHeadroom returns the headroom of every distinct class of sled in this reading: the largest
+// amount of each resource a sled will still take. It is what Availability.Unavailable is effectively
+// applying, in a form that can be published.
+//
+// It exists because that decision is the one thing that rules shapes out without leaving a trace. A
+// refusal records an entry with a shape and a backoff; the rack ruling out a shape is a fresh
+// computation on every call, and a rack whose emptiest sled holds 128 CPUs takes hundreds of instance
+// types out of the catalog with nothing anywhere to say so. These are that judgement, published.
+//
+// Each entry bounds from above, and in either dimension: a sled takes a shape only if the shape fits
+// in both its free CPUs and its free memory, so a shape wanting more of either is beyond that sled.
+// That is why the headroom is one pair of numbers rather than a threshold per dimension - outgrowing a
+// sled in one dimension is already the whole condition.
+//
+// There can be more than one entry, because feasibility is per sled and sleds differ. A sled with 128
+// CPUs and 8 GiB free and one with 4 CPUs and 900 GiB free bound different things, and neither covers
+// the other. A shape is unavailable only when it outgrows all of them, since it needs to fit on just
+// one sled. Sleds that are covered by another are dropped, so a rack of like sleds yields exactly one
+// entry, which is the ordinary case.
+//
+// Returned smallest first. An empty result is the rack ruling nothing out.
+func RackHeadroom(rack capacity.Snapshot) []Specs {
+	// Only what a sled would actually accept. An unprovisionable sled has free space and takes nothing,
+	// exactly as in the feasibility check this describes.
+	var frontier []Specs
+	for _, sled := range rack.Sleds() {
+		if !sled.Provisionable {
+			continue
+		}
+		free := sled.Free()
+		// Whole GiB, because shapes are whole GiB. Rounding down is the conservative direction: it can
+		// only report a sled as having room for less than it does, never more.
+		room := Specs{Ncpus: free.CPUs, MemInGiB: int(free.Memory / GiB)}
+		if room.Ncpus <= 0 || room.MemInGiB <= 0 {
+			continue
+		}
+		frontier = append(frontier, room)
+	}
+	// Nothing anywhere has room, so the whole catalog is out and a headroom of nothing says it.
+	if len(frontier) == 0 {
+		return []Specs{{}}
+	}
+
+	// Only the sleds nothing else covers. A sled with less of both than another rules nothing out that
+	// the other does not already allow, and keeping it would publish a bound that binds nothing.
+	slices.SortFunc(frontier, func(a, b Specs) int {
+		if delta := b.Ncpus - a.Ncpus; delta != 0 {
+			return delta
+		}
+		return b.MemInGiB - a.MemInGiB
+	})
+	maximal := frontier[:0:0]
+	mostMemory := 0
+	for _, room := range frontier {
+		if room.MemInGiB <= mostMemory {
+			continue
+		}
+		maximal = append(maximal, room)
+		mostMemory = room.MemInGiB
+	}
+
+	// A sled with room for the largest shape the catalog offers rules nothing out, and neither then
+	// does the rack: a shape only has to fit somewhere, so one unbounded sled makes every bound moot.
+	for _, room := range maximal {
+		if room.Ncpus >= maxSledCPUs && room.MemInGiB >= maxSledMemGiB {
+			return nil
+		}
+	}
+
+	slices.SortFunc(maximal, func(a, b Specs) int {
+		if delta := a.Ncpus - b.Ncpus; delta != 0 {
+			return delta
+		}
+		return a.MemInGiB - b.MemInGiB
+	})
+	return maximal
+}
+
+// CatalogLimits is the largest of each dimension the provider's catalog contains. A bound at or above
+// one of these constrains nothing, since no shape asks for more.
+func CatalogLimits() Specs {
+	return Specs{Ncpus: maxSledCPUs, MemInGiB: maxSledMemGiB}
+}
+
+// shapes is every shape the provider offers, which is the catalog a frontier has to be chosen from.
+func shapes() []Specs {
+	var all []Specs
+	for cpus := 1; cpus <= maxSledCPUs; cpus++ {
+		for _, memRatio := range memRatios {
+			if mem := cpus * memRatio; mem <= maxSledMemGiB {
+				all = append(all, Specs{Ncpus: cpus, MemInGiB: mem})
+			}
+		}
+	}
+	return all
 }
 
 // RecordCapacityReleased reports that the rack has taken back the resources of an instance of this
@@ -267,7 +466,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	for cpus := 1; cpus <= maxSledCPUs; cpus++ {
 		for _, memRatio := range memRatios {
 			mem := cpus * memRatio
-			capacity := corev1.ResourceList{
+			resources := corev1.ResourceList{
 				corev1.ResourceCPU:    *resource.NewQuantity(int64(cpus), resource.DecimalSI),
 				corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", mem)),
 				corev1.ResourcePods:   *resource.NewQuantity(int64(110), resource.DecimalSI),
@@ -285,7 +484,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			if mem <= maxSledMemGiB {
 				instanceTypes = append(instanceTypes, &cloudprovider.InstanceType{
 					Name:     fmt.Sprintf("%d-%d", cpus, mem),
-					Capacity: capacity,
+					Capacity: resources,
 					Requirements: scheduling.Requirements{
 						corev1.LabelInstanceTypeStable: scheduling.NewRequirement(
 							corev1.LabelInstanceTypeStable,
@@ -309,8 +508,8 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 					},
 					Overhead: &cloudprovider.InstanceTypeOverhead{
 						KubeReserved: corev1.ResourceList{
-							corev1.ResourceCPU:    *resource.NewMilliQuantity(cpuReserved(capacity.Cpu().MilliValue()), resource.DecimalSI),
-							corev1.ResourceMemory: *resource.NewQuantity(memReserved(capacity.Memory().Value()), resource.BinarySI),
+							corev1.ResourceCPU:    *resource.NewMilliQuantity(cpuReserved(resources.Cpu().MilliValue()), resource.DecimalSI),
+							corev1.ResourceMemory: *resource.NewQuantity(memReserved(resources.Memory().Value()), resource.BinarySI),
 						},
 						SystemReserved: corev1.ResourceList{
 							corev1.ResourceCPU:    *resource.NewMilliQuantity(systemReservedMilliCPU, resource.DecimalSI),

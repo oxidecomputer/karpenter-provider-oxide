@@ -84,8 +84,8 @@ verify: release-check ## Run linters and vetting on codebase with no commit chec
 
 .PHONY: fix
 fix: golangci-lint ## Perform lint, fmt, and mod/sum file fixes
-	go fmt ./...
 	go mod tidy
+	go fmt ./...
 	cd tools/ && go mod tidy
 	$(GOLANGCI_LINT) run --fix
 
@@ -232,7 +232,7 @@ HELM_OPTS ?= --set settings.oxide.host=${OXIDE_HOST} \
 
 .PHONY: install-crds
 install-crds: generate ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(HELM) upgrade --install karpenter-crds charts/karpenter-crd
+	$(HELM) upgrade --install karpenter-crds charts/karpenter-crd --take-ownership --force-conflicts
 
 .PHONY: uninstall-crds
 uninstall-crds: ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.

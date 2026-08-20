@@ -104,6 +104,14 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses/status"]
     verbs: ["update", "patch"]
+  # OxideCapacity is the opposite: nobody authors it, the controller publishes it, so create is granted
+  # here and not to users. Delete is deliberately absent; the singleton is republished in place.
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidecapacities"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidecapacities/status"]
+    verbs: ["update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

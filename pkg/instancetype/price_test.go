@@ -36,8 +36,15 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 				continue
 			}
 			if otherPrice <= price {
-				t.Errorf("%d-%d price %v is not greater than %d-%d price %v (more CPU, same memory)",
-					other.Ncpus, other.MemInGiB, otherPrice, specs.Ncpus, specs.MemInGiB, price)
+				t.Errorf(
+					"%d-%d price %v is not greater than %d-%d price %v (more CPU, same memory)",
+					other.Ncpus,
+					other.MemInGiB,
+					otherPrice,
+					specs.Ncpus,
+					specs.MemInGiB,
+					price,
+				)
 			}
 		}
 		// Same CPU, more memory.
@@ -46,8 +53,15 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 				continue
 			}
 			if otherPrice <= price {
-				t.Errorf("%d-%d price %v is not greater than %d-%d price %v (same CPU, more memory)",
-					other.Ncpus, other.MemInGiB, otherPrice, specs.Ncpus, specs.MemInGiB, price)
+				t.Errorf(
+					"%d-%d price %v is not greater than %d-%d price %v (same CPU, more memory)",
+					other.Ncpus,
+					other.MemInGiB,
+					otherPrice,
+					specs.Ncpus,
+					specs.MemInGiB,
+					price,
+				)
 			}
 		}
 	}

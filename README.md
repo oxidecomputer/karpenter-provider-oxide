@@ -517,6 +517,194 @@ that resolves a single instance to its sled. It is fetched into a shared snapsho
 newly launched nodes are rate limited to a quarter of that period. Lowering `refreshPeriod` raises
 fleet API load proportionally.
 
+## Seeing What Is Unavailable
+
+Everything above — refused shapes, their backoffs, the rack's headroom, the silo's remaining quota —
+lives in the controller's memory. It is published two ways so that "why is nothing scaling up" is a
+question you can ask rather than a log you have to find.
+
+### The Capacity View
+
+`OxideCapacity` is a cluster-scoped, read-only object the controller publishes and nothing reads back.
+There is one, named `rack`:
+
+```sh
+kubectl get oxidecapacity rack
+```
+
+```
+NAME   UNAVAILABLE   LARGEST   INVENTORY   STORAGE   UPDATED
+rack   892           10-40     Fresh                 12s
+```
+
+`kubectl describe oxidecapacity rack` (or `-o yaml`) has the detail:
+
+```yaml
+status:
+  instanceTypes:
+    count: 1104
+    unavailableCount: 892
+    unavailableRangeCount: 3
+    unavailableRanges:
+      - range: ">12 vCPUs or >40 GiB"
+        maxNcpus: 12
+        maxMemoryGiB: 40
+        largestLaunchable: 10-40
+        reason: NoSledWithRoom
+      - range: ">=11 vCPUs and >=44 GiB"
+        fromNcpus: 11
+        fromMemoryGiB: 44
+        refusedInstanceType: 16-64
+        largestLaunchable: 10-40
+        reason: InsufficientCapacity
+        state: Backoff
+        consecutiveRefusals: 2
+        lastRefusal: "2026-08-19T16:07:10Z"
+        retryAfter: "2026-08-19T16:14:00Z"
+      - range: ">=64 vCPUs and >=128 GiB"
+        fromNcpus: 64
+        fromMemoryGiB: 128
+        refusedInstanceType: 64-128
+        reason: QuotaExceeded
+        state: HalfOpen
+        consecutiveRefusals: 1
+        lastRefusal: "2026-08-19T16:04:12Z"
+  inventory:
+    state: Fresh
+    observedAt: "2026-08-19T16:06:28Z"
+    largestFeasibleInstanceType: 10-40
+    sleds:
+      - id: 2b6f0a11-1a1f-4b1e-9b7d-1c1f2e3a4b5c
+        provisionable: true
+        freeCPUs: 12
+        freeMemoryGiB: 40
+        largestFeasibleInstanceType: 10-40
+      - id: f0a13b33-3c3f-4d3e-7b5d-3e3f4a5b6c7e
+        provisionable: false
+        freeCPUs: 0
+        freeMemoryGiB: 0
+  observedAt: "2026-08-19T16:07:10Z"
+  quota:
+    cpus: 16
+    memoryGiB: 64
+    storageGiB: 124
+  storage:
+    reason: InsufficientCapacity
+    message: 'unable to create boot disk karpenter-abc12: insufficient storage capacity'
+    consecutiveRefusals: 3
+    lastRefusal: "2026-08-19T16:07:04Z"
+```
+
+Reading it:
+
+- **`unavailableRanges` is a boundary, not a list.** Each entry covers many instance types, and
+  `unavailableCount` is what that boundary costs — one entry low in the catalog is hundreds of instance
+  types, which is why both numbers are published. Read each entry's `range`; the numbers beside it are
+  that sentence in a form a script can apply.
+- **The two reasons are bounded from opposite ends.** A refusal is bounded from below by `fromNcpus`
+  and `fromMemoryGiB`, and takes out every shape asking for at least that much of *both* — so
+  `>=11 vCPUs and >=44 GiB` takes `16-64` out and leaves `16-32` alone. Sled inventory is bounded from
+  above by `maxNcpus` and `maxMemoryGiB`, the headroom of a sled, and takes out every shape wanting more
+  of *either*, because a shape has to fit in both to be placed. One entry, both numbers.
+- **A range with `reason: NoSledWithRoom` came from sled inventory, not from a refusal.** Nothing was
+  attempted, so it names no shape, has no state and is waiting on nothing; it disappears when the rack
+  has room again rather than when a timer elapses. These are the ranges that explain an
+  `unavailableCount` in the hundreds on a cluster where nothing has ever been refused.
+- **A rack of like sleds publishes exactly one `NoSledWithRoom` entry.** More than one means the rack
+  has sleds with genuinely different headroom, and a shape is out only when it outgrows all of them,
+  since it only has to fit on one sled. A dimension the catalog cannot exceed is not a condition at all
+  and is spelled `any` in `range`, the same way a missing corner dimension is.
+- **`storage` is the answer to "no shape is unavailable and nothing is scaling up".** The boot disk is
+  created before the instance, so a launch refused for want of storage is refused on its own API call
+  and reported here instead of against a shape. That separation is the point: boot disk size comes from
+  the `OxideNodeClass`, and a disk's replicas are placed on three sleds chosen independently of wherever
+  the instance lands, so no shape was the constraint and no smaller one would have fared better. Nothing
+  is taken out of consideration for it, and it clears the moment a launch provisions a disk.
+- **`reason` is the provider's diagnosis, not the API's.** Oxide reports a full rack and an exhausted
+  quota identically; `QuotaExceeded` means the quota was checked and had no room for that shape.
+- **`state: Backoff` means not offered at all; `HalfOpen` means offered for a single trial launch.**
+  `retryAfter` is only present while a shape is still waiting: a half-open shape does not have one
+  because it is being offered right now. A half-open shape nothing launches is dropped from the list
+  entirely once its refusal history ages out, six hours after the last refusal.
+
+  Read `retryAfter` as a ceiling on the wait, not a forecast. Only the clock is predictable, and
+  everything else that moves a shape moves it sooner: a successful launch clears the shape on the spot,
+  and an instance of that shape terminating or the rack gaining room reopens a backed off shape ahead
+  of it. A refusal is the one event that pushes it out, by restarting a longer backoff.
+- **`inventory` holds everything read off the rack**, including the freshness of the reading itself, so
+  the numbers and how much they are worth cannot be read apart. `inventory.state` is `Disabled`,
+  `Unknown` (enabled but never read, almost always a token without fleet access), `Stale` (ignored, so
+  shapes are ruled out only by refusals) or `Fresh`. Only `Fresh` lets the rack rule a shape out: a
+  stale reading is still reported here, but produces no `NoSledWithRoom` ranges.
+- **`quota` is not under `inventory`.** Inventory is what the rack physically has room for; quota is
+  what the silo is administratively allowed to ask for, and either can bind while the other has plenty.
+- **A sled that accepts no placements reports zero headroom**, whatever is actually free on it, because
+  that is what it has to offer.
+- **`observedAt` is the liveness signal.** It is refreshed whenever anything changes and at least every
+  five minutes regardless, so a timestamp that has stopped moving means the controller has stopped
+  publishing, not that nothing is happening.
+
+The view is deliberately not durable. After a restart it reports no refusal history, because there is
+none: an empty view offers every shape, which costs a refused launch, whereas a view restored from disk
+could suppress shapes on evidence nobody can check anymore. Deleting the object is harmless; it is
+republished within seconds.
+
+Writes are skipped when nothing has changed, so a rack refusing launches steadily does not turn into a
+stream of writes to etcd. It is published unconditionally, whether or not inventory and quota awareness
+are enabled — a view that vanished when they were turned off would be missing exactly when someone is
+trying to work out why nothing is scaling.
+
+> The `OxideCapacity` CRD ships in the `karpenter-crd` chart. If the controller is upgraded first, it
+> logs the missing CRD once, reports capacity through metrics only, and starts publishing as soon as
+> the CRD chart catches up. Provisioning is unaffected either way.
+>
+> While `v1alpha1` is still moving, a release that reshapes the status can leave an object already in
+> etcd that the new controller cannot decode, logged as a `Failed to watch` error naming the field that
+> changed. Pruning only happens on write, so the apiserver keeps serving the old shape and the
+> controller cannot overwrite what it cannot read. Delete it — `kubectl delete oxidecapacity rack` —
+> and it is republished in the current shape within seconds. Nothing is lost: the refusal history it
+> reports lives in the controller's memory, not in the object.
+
+### Metrics
+
+Published on the existing metrics endpoint, so the bundled `ServiceMonitor` picks them up.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `oxide_karpenter_capacity_ice_total` | counter | `reason` |
+| `oxide_karpenter_capacity_success_total` | counter | |
+| `oxide_karpenter_capacity_probe_total` | counter | `result` (`acquired`, `rejected`) |
+| `oxide_karpenter_capacity_reopen_total` | counter | `reason` (`timeout`, `capacity-released`, `inventory`) |
+| `oxide_karpenter_capacity_storage_refusal_total` | counter | `reason` |
+| `oxide_karpenter_capacity_storage_refusals_consecutive` | gauge | |
+| `oxide_karpenter_capacity_unavailable_shapes` | gauge | |
+| `oxide_karpenter_capacity_backoff_seconds` | gauge | `instance_type` |
+| `oxide_karpenter_capacity_consecutive_ices` | gauge | `instance_type` |
+| `oxide_karpenter_inventory_feasible_instances` | gauge | `instance_type` |
+| `oxide_karpenter_inventory_snapshot_age_seconds` | gauge | |
+| `oxide_karpenter_inventory_snapshot_fresh` | gauge | |
+| `oxide_karpenter_inventory_sled_free_cpus` | gauge | `sled` |
+| `oxide_karpenter_inventory_sled_free_memory_bytes` | gauge | `sled` |
+| `oxide_karpenter_inventory_largest_feasible_cpus` | gauge | |
+| `oxide_karpenter_inventory_largest_feasible_memory_bytes` | gauge | |
+
+Cardinality is bounded on purpose. The provider offers close to two thousand shapes, so the
+`instance_type` series exist only for shapes that are currently unavailable and are cleared when a
+shape comes back; `sled` series are bounded by the rack. Nothing is labeled per node, NodeClaim or pod.
+
+Three are worth alerting on. `oxide_karpenter_capacity_ice_total` rising steadily is a rack that needs
+attention rather than a provider that needs tuning. `oxide_karpenter_inventory_snapshot_age_seconds`
+growing past twice `settings.inventory.refreshPeriod` means the reading has stopped being believed, so
+shapes are being ruled out by refused launches alone. And
+`oxide_karpenter_capacity_storage_refusals_consecutive` above zero is the case no shape-labeled series
+can show: launches failing on the boot disk, with every shape still on offer because none of them was
+the problem.
+
+`oxide_karpenter_inventory_feasible_instances` is the one that explains the interesting disagreements: a
+zero next to a shape on a backoff says the rack agrees there is no room, and a non-zero says the refusal
+came from something the reading cannot see, which is usually control-plane reservations the system API
+does not expose.
+
 ## Contributing
 
 ### Tooling

@@ -9,6 +9,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
+	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/nodeclass"
 	utilizationcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/utilization"
@@ -66,6 +67,14 @@ const defaultQuotaRefreshPeriod = time.Minute
 // per sled, and what it observes (which sled an instance is on, and that sled's state and policy)
 // changes on the timescale of migrations and hardware maintenance, so minutes is the right order.
 const defaultInventoryRefreshPeriod = 5 * time.Minute
+
+// capacityPublishPeriod is how often the capacity view is rendered.
+//
+// It is not a refresh: everything it reports is already in memory, so this only decides how quickly a
+// change shows up in the object and the metrics. Writes are skipped when nothing has changed, so a
+// short period costs a render rather than API traffic, and being able to watch a backoff count down is
+// worth more than the render costs.
+const capacityPublishPeriod = 15 * time.Second
 
 // defaultInventoryRepairTolerationDuration is how long a node is left on a sled that is going out of
 // service before Karpenter replaces it.
@@ -133,13 +142,21 @@ func run() error {
 		quotas = utilization.NewProvider(ox, quotaCfg.refreshPeriod/4)
 	}
 
+	// Built here rather than inside the cloud provider because two things need it: the cloud provider
+	// decides launches with it, and the capacity controller publishes what it currently believes.
+	//
+	// Both dependencies are passed as interfaces, so a nil provider has to be dropped rather than handed
+	// over: a typed nil inside a non-nil interface would satisfy the nil check and then panic.
+	instanceTypes := instancetype.NewProvider(
+		quotaProvider(quotas),
+		inventoryProvider(sledProvider),
+	)
+
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
 		ox,
 		project,
-		// Both are passed as interfaces, so a nil provider has to be dropped rather than handed over: a
-		// typed nil inside a non-nil interface would satisfy the nil check and then panic.
-		instancetype.NewProvider(quotaProvider(quotas), inventoryProvider(sledProvider)),
+		instanceTypes,
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
 	)
@@ -164,6 +181,14 @@ func run() error {
 			karpcore.InstanceTypeStore,
 		),
 		nodeclass.NewController(karpcore.GetClient(), karpcore.GetAPIReader(), ox, bootstrappers),
+		// Registered unconditionally. The refusal history it reports is there whether or not inventory
+		// and quota awareness are, and a view that disappeared when they were switched off would be
+		// missing exactly when an operator is trying to work out why nothing is scaling.
+		capacitycontroller.NewController(
+			karpcore.GetClient(),
+			instanceTypes,
+			capacityPublishPeriod,
+		),
 	)
 
 	if inventoryCfg.enabled {

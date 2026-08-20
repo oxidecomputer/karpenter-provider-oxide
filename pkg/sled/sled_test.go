@@ -210,13 +210,42 @@ func TestCapacityBeforeAnyRefreshIsUnknown(t *testing.T) {
 	}
 }
 
-// A sled's own hardware totals are what it has to place instances with. Overstating the rack costs a
-// refused launch; understating it costs a shape nobody ever offers.
-func TestCapacityOfUsesTheSledHardwareTotals(t *testing.T) {
-	got := capacityOf(Placement{UsableHardwareThreads: 128, UsablePhysicalRam: 1024 * (1 << 30)})
+// Guest memory comes out of the VMM reservoir, not out of physical RAM, so a sled offers less memory
+// than it has. CPUs are the hardware totals unreduced, because that is what Omicron compares a
+// placement against: the control plane's zones reduce a sled's memory but not the threads it hands out.
+func TestCapacityOfDeratesMemoryButNotCPUs(t *testing.T) {
+	const oneTiB = 1024 * (1 << 30)
+	got := capacityOf(Placement{UsableHardwareThreads: 128, UsablePhysicalRam: oneTiB})
 
-	if got.CPUs != 128 || got.Memory != 1024*(1<<30) {
-		t.Errorf("capacityOf() = %+v, want the sled's own totals", got)
+	if got.CPUs != 128 {
+		t.Errorf("CPUs = %d, want the sled's hardware threads", got.CPUs)
+	}
+	if got.Memory >= oneTiB {
+		t.Errorf("memory = %d, want less than the sled's physical RAM of %d", got.Memory, oneTiB)
+	}
+	if inGiB := got.Memory / (1 << 30); inGiB != 890 {
+		t.Errorf("memory = %d GiB, want 87%% of a 1 TiB sled", inGiB)
+	}
+}
+
+// The estimate is allowed to be wrong, but only in the direction that costs a refused launch. Claiming
+// more memory than the sled physically has would be wrong in the direction nothing recovers from, and a
+// sled small enough to round oddly must not turn into a claim of room that is not there.
+func TestCapacityOfNeverExceedsPhysicalRAM(t *testing.T) {
+	for _, ram := range []uint64{0, 1, 99, 1 << 20, 512 * (1 << 30), 1024 * (1 << 30)} {
+		if got := capacityOf(Placement{UsablePhysicalRam: ram}).Memory; got > ram {
+			t.Errorf("a sled with %d bytes of RAM offers %d bytes of memory", ram, got)
+		}
+	}
+}
+
+// Bigger sleds offer more, which is what ranks the rack's sleds in the order an operator expects.
+func TestCapacityOfGrowsWithRAM(t *testing.T) {
+	half := capacityOf(Placement{UsablePhysicalRam: 512 * (1 << 30)}).Memory
+	whole := capacityOf(Placement{UsablePhysicalRam: 1024 * (1 << 30)}).Memory
+
+	if half == 0 || whole <= half {
+		t.Errorf("memory of %d and %d does not increase with physical RAM", half, whole)
 	}
 }
 
