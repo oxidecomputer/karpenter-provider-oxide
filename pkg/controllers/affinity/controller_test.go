@@ -10,6 +10,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -95,10 +96,7 @@ func TestReconcileClearsTheAnnotationWhenNothingIsDesired(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	claim := nodeClaim("aa:" + groupID)
 
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithObjects(nodeClass, claim).
-		Build()
+	kubeClient := clientFor(t, nodeClass, claim)
 
 	c := NewController(kubeClient, api.server(t))
 	if _, err := c.Reconcile(context.Background(), claim); err != nil {
@@ -132,10 +130,7 @@ func TestReconcileClearsTheAnnotationWhenTheGroupIsAlreadyGone(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	claim := nodeClaim("aa:" + groupID)
 
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithObjects(nodeClass, claim).
-		Build()
+	kubeClient := clientFor(t, nodeClass, claim)
 
 	c := NewController(kubeClient, api.server(t))
 	if _, err := c.Reconcile(context.Background(), claim); err != nil {
@@ -172,10 +167,7 @@ func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 	}
 	claim := nodeClaim("aa:" + groupID)
 
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithObjects(nodeClass, claim).
-		Build()
+	kubeClient := clientFor(t, nodeClass, claim)
 
 	c := NewController(kubeClient, api.server(t))
 	if _, err := c.Reconcile(context.Background(), claim); err != nil {
@@ -195,5 +187,118 @@ func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 	}
 	if got := updated.Annotations[v1alpha1.AnnotationAffinityGroups]; got != "aa:"+groupID {
 		t.Errorf("annotation = %q, want it untouched", got)
+	}
+}
+
+// node is the registered Node for the NodeClaim, carrying whatever copy of the record core's
+// registration controller assigned onto it.
+func node(groups string) *corev1.Node {
+	n := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Spec:       corev1.NodeSpec{ProviderID: "oxide://" + instanceID},
+	}
+	if groups != "" {
+		n.Annotations = map[string]string{v1alpha1.AnnotationAffinityGroups: groups}
+	}
+	return n
+}
+
+// clientFor builds a fake client with the spec.providerID index karpenter's operator registers on
+// Nodes, which is what NodeForNodeClaim looks a node up through.
+func clientFor(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(objects...).
+		WithIndex(&corev1.Node{}, "spec.providerID", func(o client.Object) []string {
+			return []string{o.(*corev1.Node).Spec.ProviderID}
+		}).
+		Build()
+}
+
+func nodeAnnotation(t *testing.T, kubeClient client.Client) (string, bool) {
+	t.Helper()
+	updated := &corev1.Node{}
+	if err := kubeClient.Get(
+		context.Background(),
+		client.ObjectKey{Name: "node-1"},
+		updated,
+	); err != nil {
+		t.Fatalf("unable to re-read the Node: %v", err)
+	}
+	value, ok := updated.Annotations[v1alpha1.AnnotationAffinityGroups]
+	return value, ok
+}
+
+// The Node carries a copy of the record because core assigns every NodeClaim annotation onto it at
+// registration and only ever adds. So clearing the NodeClaim has to clear the Node too, or the node
+// goes on asserting a membership it no longer has.
+func TestReconcileClearsTheAnnotationFromTheNodeToo(t *testing.T) {
+	api := &memberAPI{}
+	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	claim := nodeClaim("aa:" + groupID)
+
+	kubeClient := clientFor(t, nodeClass, claim, node("aa:"+groupID))
+
+	c := NewController(kubeClient, api.server(t))
+	if _, err := c.Reconcile(context.Background(), claim); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if value, ok := nodeAnnotation(t, kubeClient); ok {
+		t.Errorf("the node annotation is still present with value %q, want it removed", value)
+	}
+}
+
+// The state a cluster is left in by a build that cleared the NodeClaim and not the Node: nothing left
+// to remove, and a stale copy on the Node that only this controller will ever correct.
+func TestReconcileClearsAStaleNodeAnnotationWithNothingOnTheNodeClaim(t *testing.T) {
+	api := &memberAPI{}
+	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	claim := nodeClaim("")
+
+	kubeClient := clientFor(t, nodeClass, claim, node("aa:"+groupID))
+
+	c := NewController(kubeClient, api.server(t))
+	if _, err := c.Reconcile(context.Background(), claim); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if len(api.deletes) != 0 {
+		t.Errorf(
+			"member deletes = %v, want none: the NodeClaim recorded nothing to leave",
+			api.deletes,
+		)
+	}
+	if value, ok := nodeAnnotation(t, kubeClient); ok {
+		t.Errorf("the stale node annotation is still present with value %q, want it removed", value)
+	}
+}
+
+// A membership still wanted is left on both objects, and neither is patched.
+func TestReconcileLeavesTheNodeAloneWhenTheMembershipIsStillDesired(t *testing.T) {
+	api := &memberAPI{}
+	nodeClass := &v1alpha1.OxideNodeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Status: v1alpha1.OxideNodeClassStatus{
+			AffinityGroups: []v1alpha1.OxideAffinityGroup{{
+				ID:      groupID,
+				Type:    v1alpha1.AffinityGroupTypeAntiAffinity,
+				Managed: true,
+			}},
+		},
+	}
+	claim := nodeClaim("aa:" + groupID)
+
+	kubeClient := clientFor(t, nodeClass, claim, node("aa:"+groupID))
+
+	c := NewController(kubeClient, api.server(t))
+	if _, err := c.Reconcile(context.Background(), claim); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	value, ok := nodeAnnotation(t, kubeClient)
+	if !ok || value != "aa:"+groupID {
+		t.Errorf("node annotation = %q (present %v), want it untouched", value, ok)
 	}
 }

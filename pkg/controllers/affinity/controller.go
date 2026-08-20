@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
@@ -79,7 +80,10 @@ func (c *Controller) Reconcile(
 		nodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups],
 	)
 	if len(recorded) == 0 {
-		return reconcile.Result{}, nil
+		// Nothing left to remove, but the Node may still carry a copy of a record that has been:
+		// core assigns the NodeClaim's annotations onto the Node when it registers, and only ever
+		// adds to them. So the Node is reconciled even when the NodeClaim has nothing to say.
+		return reconcile.Result{}, c.recordOnNode(ctx, nodeClaim, "")
 	}
 	// The instance is what leaves the group, so a NodeClaim that has not launched has nothing to
 	// remove. It cannot have a recorded membership either, since the launch is what records one.
@@ -129,26 +133,86 @@ func (c *Controller) Reconcile(
 		return reconcile.Result{}, err
 	}
 
-	if len(remaining) != len(recorded) {
-		stored := nodeClaim.DeepCopy()
-		if len(remaining) == 0 {
-			// Removed rather than set to an empty string. The annotation's absence is what the drift
-			// comparison reads as "this node joined nothing", and an empty value would have to be
-			// parsed to mean the same thing everywhere it is read. Leaving the key behind also reads
-			// as a node that is still asserting something about groups when it is not.
-			delete(nodeClaim.Annotations, v1alpha1.AnnotationAffinityGroups)
-		} else {
-			nodeClaim.Annotations = lo.Assign(nodeClaim.Annotations, map[string]string{
-				v1alpha1.AnnotationAffinityGroups: v1alpha1.EncodeAffinityGroups(remaining),
-			})
-		}
-		if err := c.kubeClient.Patch(ctx, nodeClaim, client.MergeFrom(stored)); err != nil {
-			return reconcile.Result{}, client.IgnoreNotFound(
-				fmt.Errorf("unable to record the NodeClaim's group memberships, %w", err),
-			)
-		}
+	value := v1alpha1.EncodeAffinityGroups(remaining)
+	if err := c.record(ctx, nodeClaim, value); err != nil {
+		return reconcile.Result{}, client.IgnoreNotFound(
+			fmt.Errorf("unable to record the NodeClaim's group memberships, %w", err),
+		)
+	}
+	if err := c.recordOnNode(ctx, nodeClaim, value); err != nil {
+		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: resyncPeriod}, nil
+}
+
+// recordOnNode keeps the Node's copy of the record in step with the NodeClaim's.
+//
+// The Node has a copy because karpenter core's registration controller assigns every NodeClaim
+// annotation onto the Node, additively, once, when the node registers. So the launch's record
+// propagates there on its own, and nothing propagates its removal: left alone, a node goes on
+// asserting a membership it no longer has, indefinitely and where an operator is most likely to look.
+//
+// The NodeClaim remains the record of truth. Drift is decided against it, not against this, which is
+// why the Node's copy being briefly behind is not a correctness problem — only a stale one.
+func (c *Controller) recordOnNode(
+	ctx context.Context,
+	nodeClaim *karpv1.NodeClaim,
+	value string,
+) error {
+	node, err := nodeclaimutils.NodeForNodeClaim(ctx, c.kubeClient, nodeClaim)
+	if err != nil {
+		// A NodeClaim that has launched but whose node has not registered yet, or that briefly has
+		// two. Both resolve on their own, and there is nothing to correct until they do: the copy is
+		// made at registration, so a node that has not registered has nothing to correct.
+		if nodeclaimutils.IsNodeNotFoundError(err) || nodeclaimutils.IsDuplicateNodeError(err) {
+			return nil
+		}
+		return fmt.Errorf("unable to find the node for the NodeClaim: %w", err)
+	}
+	if err := c.record(ctx, node, value); err != nil {
+		if kerrors.IsConflict(err) {
+			// The node is patched by the kubelet and by karpenter's own lifecycle controllers, so
+			// losing a race here is routine and only means retrying.
+			return err
+		}
+		return client.IgnoreNotFound(
+			fmt.Errorf("unable to record the node's group memberships, %w", err),
+		)
+	}
+	return nil
+}
+
+// record writes value to an object's affinity groups annotation, removing the annotation entirely
+// when value is empty and patching nothing when it is already what it should be.
+//
+// Removed rather than set to an empty string, because the annotation's absence is what every reader
+// takes as "this node joined nothing"; an empty value would be a second encoding of the same thing,
+// and a key left behind reads as a node still asserting something about groups when it is not.
+func (c *Controller) record(ctx context.Context, obj client.Object, value string) error {
+	annotations := obj.GetAnnotations()
+	current, present := annotations[v1alpha1.AnnotationAffinityGroups]
+	switch {
+	case value == "" && !present:
+		return nil
+	case value != "" && current == value:
+		return nil
+	}
+
+	stored, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return fmt.Errorf("unable to copy a %T to patch it", obj)
+	}
+	updated := maps.Clone(annotations)
+	if updated == nil {
+		updated = map[string]string{}
+	}
+	if value == "" {
+		delete(updated, v1alpha1.AnnotationAffinityGroups)
+	} else {
+		updated[v1alpha1.AnnotationAffinityGroups] = value
+	}
+	obj.SetAnnotations(updated)
+	return c.kubeClient.Patch(ctx, obj, client.MergeFrom(stored))
 }
 
 // leave removes one instance from one group, on whichever endpoint the group's kind lives behind.
