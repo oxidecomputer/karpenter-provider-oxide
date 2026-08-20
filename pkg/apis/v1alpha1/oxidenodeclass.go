@@ -47,6 +47,48 @@ type OxideNodeClassSpec struct {
 	// IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from
 	// +optional
 	IPPoolSelector []IPPoolSelector `json:"ipPoolSelector,omitempty"`
+	// Affinity controls which Oxide affinity and anti-affinity groups launched instances join.
+	// +optional
+	Affinity *Affinity `json:"affinity,omitempty"`
+}
+
+// Affinity controls which Oxide affinity and anti-affinity groups launched instances join.
+//
+// Selected groups are referenced only: Karpenter adds its instances to them, removes its instances
+// from them, and never creates, updates or deletes the groups themselves.
+type Affinity struct {
+	// AntiAffinityGroupSelector selects existing anti-affinity groups that every launched instance
+	// joins.
+	//
+	// Excluded from the nodeclass hash because whether nodes are replaced when this changes is
+	// decided by comparing resolved groups, not by hashing the spec: a selector rewritten to name
+	// the group it already matched has changed nothing about where an instance sits. See IsDrifted.
+	// +optional
+	AntiAffinityGroupSelector []AffinityGroupSelector `json:"antiAffinityGroupSelector,omitempty" hash:"ignore"`
+}
+
+// AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.
+//
+// Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
+// the selectors, which validate at reconcile instead.
+type AffinityGroupSelector struct {
+	// ID is the exact group UUID.
+	// +optional
+	ID string `json:"id,omitempty"`
+	// Name is the name of a group. A name without a "*" must match exactly, ignoring case.
+	//
+	// A name containing "*" selects every group whose name matches, where each "*" stands for any
+	// run of characters including none. So "karpenter-*" selects both "karpenter-spread-a" and
+	// "karpenter-spread-b".
+	//
+	// Unlike an image selector, where a wildcard picks a single winner, every matching group is
+	// joined. A wildcard therefore makes the set of groups a function of the project's contents
+	// rather than of the nodeclass alone: a group created in the project whose name matches an
+	// existing selector joins the set, and because an instance can only join a group at launch,
+	// every node then drifts and is replaced so it can join. That is a fleet replacement triggered
+	// from outside Kubernetes.
+	// +optional
+	Name string `json:"name,omitempty"`
 }
 
 // Bootstrap kinds, one per supported bootstrap provider. The kind is derived from which

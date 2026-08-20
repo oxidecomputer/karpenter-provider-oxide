@@ -236,6 +236,10 @@ func (c *OxideCloudProvider) Create(
 			Memory:      oxide.ByteCount(instanceType.MemInGiB * GiB),
 			Ncpus:       oxide.InstanceCpuCount(instanceType.Ncpus),
 			UserData:    base64.StdEncoding.EncodeToString([]byte(userData)),
+			// Joined at create rather than afterwards because the start is what places the instance:
+			// a membership added after it would be recorded against a placement it did not influence.
+			// The create-time field is also free and atomic, which no separate call would be.
+			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
 			BootDisk: oxide.InstanceDiskAttachment{
 				Value: &oxide.InstanceDiskAttachmentCreate{
 					Name:        oxide.Name(name),
@@ -584,6 +588,21 @@ func (c *OxideCloudProvider) diagnoseRefusal(
 		"%s, so the launch was refused: %w",
 		quota.Explain(request, resource),
 		cause,
+	)
+}
+
+// antiAffinityGroups picks the anti-affinity groups out of a nodeclass's resolved set, as the IDs an
+// instance create joins them by.
+//
+// Addressed by ID rather than by name because the ID is the identity: a group deleted and recreated
+// under the same name between the reconcile that resolved it and this launch is a different group,
+// and asking for it by ID fails rather than silently joining the wrong one.
+func antiAffinityGroups(groups []v1alpha1.OxideAffinityGroup) []oxide.NameOrId {
+	return lo.FilterMap(
+		groups,
+		func(group v1alpha1.OxideAffinityGroup, _ int) (oxide.NameOrId, bool) {
+			return oxide.NameOrId(group.ID), group.Type == v1alpha1.AffinityGroupTypeAntiAffinity
+		},
 	)
 }
 

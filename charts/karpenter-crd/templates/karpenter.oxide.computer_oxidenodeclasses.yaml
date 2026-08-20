@@ -61,6 +61,46 @@ spec:
               OxideNodeClassSpec is the top level specification for the Oxide Karpenter Provider.
               This will contain configuration necessary to launch instances on Oxide.
             properties:
+              affinity:
+                description: Affinity controls which Oxide affinity and anti-affinity
+                  groups launched instances join.
+                properties:
+                  antiAffinityGroupSelector:
+                    description: |-
+                      AntiAffinityGroupSelector selects existing anti-affinity groups that every launched instance
+                      joins.
+
+                      Excluded from the nodeclass hash because whether nodes are replaced when this changes is
+                      decided by comparing resolved groups, not by hashing the spec: a selector rewritten to name
+                      the group it already matched has changed nothing about where an instance sits. See IsDrifted.
+                    items:
+                      description: |-
+                        AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.
+
+                        Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
+                        the selectors, which validate at reconcile instead.
+                      properties:
+                        id:
+                          description: ID is the exact group UUID.
+                          type: string
+                        name:
+                          description: |-
+                            Name is the name of a group. A name without a "*" must match exactly, ignoring case.
+
+                            A name containing "*" selects every group whose name matches, where each "*" stands for any
+                            run of characters including none. So "karpenter-*" selects both "karpenter-spread-a" and
+                            "karpenter-spread-b".
+
+                            Unlike an image selector, where a wildcard picks a single winner, every matching group is
+                            joined. A wildcard therefore makes the set of groups a function of the project's contents
+                            rather than of the nodeclass alone: a group created in the project whose name matches an
+                            existing selector joins the set, and because an instance can only join a group at launch,
+                            every node then drifts and is replaced so it can join. That is a fleet replacement triggered
+                            from outside Kubernetes.
+                          type: string
+                      type: object
+                    type: array
+                type: object
               bootDiskSize:
                 anyOf:
                 - type: integer
@@ -258,6 +298,41 @@ spec:
           status:
             description: OxideNodeClassStatus contains the resolved state of the OxideNodeClass
             properties:
+              affinityGroups:
+                description: |-
+                  AffinityGroups contain the resolved groups that every instance launched from this nodeclass
+                  joins. It is only published when every selector resolved, so a group that has gone missing
+                  holds the previous set rather than silently shrinking it.
+
+                  This list is the desired set: the single source of truth for what a launch joins, what drift
+                  compares against, and what memberships are allowed to persist.
+                items:
+                  description: OxideAffinityGroup is one resolved Oxide affinity or
+                    anti-affinity group.
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      description: |-
+                        Name is the group's name at the time it resolved. The ID is the identity: a group deleted and
+                        recreated under the same name is a different group that the running instances are not members
+                        of, and comparing IDs is what makes that visible.
+                      type: string
+                    policy:
+                      description: Policy is what the rack does when the group's constraint
+                        cannot be satisfied, allow or fail.
+                      type: string
+                    type:
+                      description: Type is Affinity or AntiAffinity, which is also
+                        which Oxide endpoint the group is reached on.
+                      type: string
+                  required:
+                  - id
+                  - name
+                  - policy
+                  - type
+                  type: object
+                type: array
               bootstrap:
                 description: Bootstrap contains resolved state that only applies to
                   a single bootstrap provider.

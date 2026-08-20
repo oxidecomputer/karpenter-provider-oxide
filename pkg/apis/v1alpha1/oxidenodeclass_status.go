@@ -20,6 +20,24 @@ const (
 	ConditionTypeClusterInfoAvailable = "ClusterInfoAvailable"
 )
 
+// ConditionTypeAffinityGroupsResolved reports whether every affinity group selector resolved. It is
+// only registered on a nodeclass that sets spec.affinity, so a nodeclass not using the feature is
+// never held un-Ready by it.
+const ConditionTypeAffinityGroupsResolved = "AffinityGroupsResolved"
+
+// Reasons recorded on ConditionTypeAffinityGroupsResolved.
+const (
+	// ConditionReasonAffinityGroupNotFound is a selector, wildcard included, that matched nothing.
+	ConditionReasonAffinityGroupNotFound = "AffinityGroupNotFound"
+)
+
+// Group kinds reported on OxideAffinityGroup.Type. The two are separate collections in the Oxide
+// API, reached by different endpoints, so a resolved group has to carry which one it came from.
+const (
+	AffinityGroupTypeAffinity     = "Affinity"
+	AffinityGroupTypeAntiAffinity = "AntiAffinity"
+)
+
 // OxideNodeClassStatus contains the resolved state of the OxideNodeClass
 type OxideNodeClassStatus struct {
 	// Server is the user-defined or system discovered endpoint that nodes will use to join the cluster.
@@ -47,6 +65,14 @@ type OxideNodeClassStatus struct {
 	// IPPools contain selected IP Pools for ephemeral IP attachment
 	// +optional
 	IPPools []OxideIPPool `json:"ipPools"`
+	// AffinityGroups contain the resolved groups that every instance launched from this nodeclass
+	// joins. It is only published when every selector resolved, so a group that has gone missing
+	// holds the previous set rather than silently shrinking it.
+	//
+	// This list is the desired set: the single source of truth for what a launch joins, what drift
+	// compares against, and what memberships are allowed to persist.
+	// +optional
+	AffinityGroups []OxideAffinityGroup `json:"affinityGroups,omitempty"`
 	// Bootstrap contains resolved state that only applies to a single bootstrap provider.
 	// +optional
 	Bootstrap *BootstrapStatus `json:"bootstrap,omitempty"`
@@ -96,6 +122,19 @@ type OxideSSHKey struct {
 	Name string `json:"name"`
 }
 
+// OxideAffinityGroup is one resolved Oxide affinity or anti-affinity group.
+type OxideAffinityGroup struct {
+	ID string `json:"id"`
+	// Name is the group's name at the time it resolved. The ID is the identity: a group deleted and
+	// recreated under the same name is a different group that the running instances are not members
+	// of, and comparing IDs is what makes that visible.
+	Name string `json:"name"`
+	// Type is Affinity or AntiAffinity, which is also which Oxide endpoint the group is reached on.
+	Type string `json:"type"`
+	// Policy is what the rack does when the group's constraint cannot be satisfied, allow or fail.
+	Policy string `json:"policy"`
+}
+
 type OxideIPPool struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -118,6 +157,9 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		}
 	case BootstrapKindKubeadm:
 		conds = append(conds, ConditionTypeClusterInfoAvailable)
+	}
+	if in.Spec.Affinity != nil {
+		conds = append(conds, ConditionTypeAffinityGroupsResolved)
 	}
 	return status.NewReadyConditions(conds...).For(in)
 }

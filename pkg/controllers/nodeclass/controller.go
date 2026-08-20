@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
+	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -39,8 +40,11 @@ type Controller struct {
 	// reader is the manager's uncached reader, used for the one-off lookups that would otherwise
 	// make controller-runtime list and watch an entire resource type cluster-wide just to read a
 	// single object by name.
-	reader        client.Reader
-	oxideClient   *oxide.Client
+	reader      client.Reader
+	oxideClient *oxide.Client
+	// project is the Oxide project instances are launched into, which is what scopes the resources
+	// resolved by name rather than by ID.
+	project       string
 	bootstrappers bootstrap.Bootstrappers
 }
 
@@ -48,14 +52,25 @@ func NewController(
 	kubeClient client.Client,
 	reader client.Reader,
 	oxideClient *oxide.Client,
+	project string,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		reader:        reader,
 		oxideClient:   oxideClient,
+		project:       project,
 		bootstrappers: bootstrappers,
 	}
+}
+
+// projectFor returns the project a lookup should be scoped by. A project is what makes a name
+// unambiguous, but the API rejects one passed alongside an ID, which is unambiguous already.
+func (c *Controller) projectFor(ref string) oxide.NameOrId {
+	if _, err := uuid.Parse(ref); err == nil {
+		return ""
+	}
+	return oxide.NameOrId(c.project)
 }
 
 func (c *Controller) Name() string {
@@ -126,6 +141,29 @@ func (c *Controller) Reconcile(
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve IP Pools: %w", err)
 	}
 	nodeClass.Status.IPPools = ipPools
+
+	affinity, err := c.resolveAffinityGroups(ctx, nodeClass)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("unable to retrieve affinity groups: %w", err)
+	}
+	switch {
+	case nodeClass.Spec.Affinity == nil:
+		// Nothing is desired, so nothing is published. The condition is not registered for this
+		// nodeclass either, so there is none to set.
+		nodeClass.Status.AffinityGroups = nil
+	case affinity.resolved():
+		nodeClass.Status.AffinityGroups = affinity.groups
+		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeAffinityGroupsResolved)
+	default:
+		// Status.AffinityGroups is deliberately left as it was. It governs which memberships are
+		// allowed to persist, so replacing it with an incomplete set would evict memberships across
+		// the fleet on the strength of a resolution that failed.
+		nodeClass.StatusConditions().SetFalse(
+			v1alpha1.ConditionTypeAffinityGroupsResolved,
+			affinity.reason,
+			affinity.message,
+		)
+	}
 
 	// Ready is not set here. It is recomputed from the dependent conditions every time one of them
 	// is set, so asserting it after the fact would just overwrite a false the dependents earned.

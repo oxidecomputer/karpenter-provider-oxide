@@ -180,7 +180,13 @@ func run() error {
 			clusterState,
 			karpcore.InstanceTypeStore,
 		),
-		nodeclass.NewController(karpcore.GetClient(), karpcore.GetAPIReader(), ox, bootstrappers),
+		nodeclass.NewController(
+			karpcore.GetClient(),
+			karpcore.GetAPIReader(),
+			ox,
+			project,
+			bootstrappers,
+		),
 		// Registered unconditionally. The refusal history it reports is there whether or not inventory
 		// and quota awareness are, and a view that disappeared when they were switched off would be
 		// missing exactly when an operator is trying to work out why nothing is scaling.
