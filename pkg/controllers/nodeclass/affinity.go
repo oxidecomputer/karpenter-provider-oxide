@@ -301,7 +301,8 @@ func (c *Controller) collectManagedGroups(
 }
 
 // managedGroupIDs is the set of managed group IDs in a resolved desired set, which is what
-// collection keeps.
+// collection keeps. Only the managed ones: a selected group Karpenter does not own is never deleted,
+// so it is never a candidate for collection either.
 func managedGroupIDs(groups []v1alpha1.OxideAffinityGroup) sets.Set[string] {
 	ids := sets.New[string]()
 	for _, group := range groups {
@@ -332,7 +333,7 @@ func managedGroupName(nodeClass *v1alpha1.OxideNodeClass) (string, error) {
 	name := fmt.Sprintf(
 		"%s-%s-%s",
 		nodeClass.Name,
-		managedGroupTypeCode(managed.Type),
+		v1alpha1.AffinityGroupTypeCode(managed.Type),
 		managedGroupPolicyCode(managed.Policy),
 	)
 	if err := validOxideName(name); err != nil {
@@ -357,14 +358,6 @@ func managedGroupDescription(nodeClass *v1alpha1.OxideNodeClass) string {
 		nodeClass.Name,
 		nodeClass.UID,
 	)
-}
-
-// managedGroupTypeCode is the group kind as it appears in a managed group's name.
-func managedGroupTypeCode(groupType string) string {
-	if groupType == v1alpha1.AffinityGroupTypeAffinity {
-		return "af"
-	}
-	return "aa"
 }
 
 // managedGroupPolicyCode is the policy as it appears in a managed group's name. An unset policy is

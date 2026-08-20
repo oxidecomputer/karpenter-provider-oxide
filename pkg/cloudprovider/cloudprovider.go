@@ -19,7 +19,9 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -357,6 +359,17 @@ func (c *OxideCloudProvider) Create(
 	if err != nil {
 		return nil, err
 	}
+	// Recorded so that a group added to the desired set after this launch is visible as drift, and so
+	// that a group removed from it can still be left. The desired set alone cannot answer either
+	// question: it says what an instance should be in, not what this one actually joined.
+	if len(nodeClass.Status.AffinityGroups) > 0 {
+		if resolvedNodeClaim.Annotations == nil {
+			resolvedNodeClaim.Annotations = map[string]string{}
+		}
+		resolvedNodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
+			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
+		)
+	}
 
 	return resolvedNodeClaim, nil
 }
@@ -511,12 +524,52 @@ func (c *OxideCloudProvider) GetInstanceTypes(
 	return c.instanceTypeProvider.InstanceTypes(), nil
 }
 
+// DriftReasonAffinityGroup is reported when a node is not in a group its nodeclass now says every
+// instance should be in. Replacing it is the only way it can join, since a group is joined at launch.
+const DriftReasonAffinityGroup cloudprovider.DriftReason = "AffinityGroup"
+
 // IsDrifted returns whether a NodeClaim has drifted from the provisioning requirements
 // it is tied to.
+//
+// Affinity groups are compared as resolved group IDs rather than through the nodeclass hash, because
+// the two directions are not symmetric and a hash cannot tell them apart. A group being added has to
+// replace nodes, since an instance can only join a group at launch, where its placement is decided. A
+// group being removed must not, since the instance is simply taken out of the group in place. A hash
+// sees both as an edit; a set difference sees only the additions.
+//
+// Resolved rather than declared for the same reason: a selector rewritten to name the group it
+// already matched has changed nothing about where the instance sits, and must not replace it.
 func (c *OxideCloudProvider) IsDrifted(
-	context.Context,
-	*karpcorev1.NodeClaim,
+	ctx context.Context,
+	nodeClaim *karpcorev1.NodeClaim,
 ) (cloudprovider.DriftReason, error) {
+	nodeClass := &v1alpha1.OxideNodeClass{}
+	if err := c.kubeClient.Get(
+		ctx,
+		client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name},
+		nodeClass,
+	); err != nil {
+		// A nodeclass that is gone says nothing about where its nodes should sit, and the nodes are
+		// about to be torn down with it in any case.
+		if kerrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
+	}
+
+	// Additions only. A missing annotation therefore needs no special case: it is the empty set, and
+	// the empty set drifts exactly when something is desired, which is what makes a node launched
+	// before the feature existed drift once groups are configured and not before.
+	desired := v1alpha1.AffinityGroupIDs(nodeClass.Status.AffinityGroups)
+	recorded := sets.New[string]()
+	for _, ref := range v1alpha1.ParseAffinityGroups(
+		nodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups],
+	) {
+		recorded.Insert(ref.ID)
+	}
+	if desired.Difference(recorded).Len() > 0 {
+		return DriftReasonAffinityGroup, nil
+	}
 	return "", nil
 }
 

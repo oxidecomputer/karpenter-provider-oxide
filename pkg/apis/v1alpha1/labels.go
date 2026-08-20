@@ -109,6 +109,14 @@ var (
 		AnnotationSledObservedAt,
 	}
 
+	// AnnotationAffinityGroups is the set of Oxide groups the instance joined at launch, as
+	// "<aa|af>:<uuid>" entries, sorted and comma-separated.
+	//
+	// It is the record drift is decided against, and the only handle on a membership once the group
+	// has left the nodeclass's desired set: by then the nodeclass no longer says which kind of group
+	// it was, so the type prefix is carried here to address the right endpoint to leave it on.
+	AnnotationAffinityGroups = apis.Group + "/affinity-groups"
+
 	AnnotationOxideNodeClassHash             = apis.Group + "/oxidenodeclass-hash"
 	AnnotationClusterNameTaggedCompatability = apis.CompatibilityGroup + "/cluster-name-tagged"
 	AnnotationOxideNodeClassHashVersion      = apis.Group + "/oxidenodeclass-hash-version"

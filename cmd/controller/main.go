@@ -9,6 +9,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
+	affinitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/affinity"
 	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/nodeclass"
@@ -195,6 +196,9 @@ func run() error {
 			instanceTypes,
 			capacityPublishPeriod,
 		),
+		// Registered unconditionally, and inert on a NodeClaim with no recorded group memberships,
+		// which is every one of them until a nodeclass opts into spec.affinity.
+		affinitycontroller.NewController(karpcore.GetClient(), ox),
 	)
 
 	if inventoryCfg.enabled {
