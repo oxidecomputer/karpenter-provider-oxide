@@ -18,6 +18,10 @@
 //   - Starting the instance is the placement decision: this is where a sled is chosen and reserved,
 //     and where a rack with no room for the shape refuses.
 //
+// The gap between the create and the start is also the only place an affinity group membership can be
+// added: the API has no create-time field for one, and after the start the placement it was supposed
+// to shape has already been made.
+//
 // The alternative the API offers is one create that provisions the disk and starts the instance
 // together. It is rejected here for two separate reasons. A create that provisions the disk too
 // refuses a launch the same way whether the rack ran out of storage or the sleds ran out of CPU and
@@ -97,6 +101,15 @@ var (
 	ErrInsufficientStorage = errors.New("insufficient storage capacity")
 )
 
+// Options is the per-launch configuration a create cannot carry in the Oxide API's own create shape.
+// It is a parameter rather than a field on Provider because every value in it belongs to one launch.
+type Options struct {
+	// AffinityGroups are the affinity groups, by ID, the instance joins between the create and the
+	// start. Anti-affinity groups do not appear here: they have a create-time field, which is free,
+	// atomic, and already in place before the start makes the placement decision.
+	AffinityGroups []string
+}
+
 // Released is the rack capacity an instance gave back when it was torn down.
 type Released struct {
 	Ncpus  int
@@ -154,6 +167,7 @@ func NewProvider(
 func (p *Provider) Create(
 	ctx context.Context,
 	params oxide.InstanceCreateParams,
+	opts Options,
 ) (*oxide.Instance, error) {
 	if params.Body == nil || params.Body.Name == "" {
 		return nil, errors.New("instance create requires a body with a name")
@@ -198,11 +212,22 @@ func (p *Provider) Create(
 		case errors.Is(err, oxide.ErrObjectAlreadyExists):
 			// An adopted instance is already started, or has been started by the adoption, so it has
 			// had its placement decided and does not go through the start below again.
-			return p.adopt(ctx, name, bootDiskName)
+			return p.adopt(ctx, name, bootDiskName, opts)
 		default:
 			p.abandonDisk(ctx, bootDiskName, err)
 			return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 		}
+	}
+
+	// Affinity groups are joined between the create and the start because the start is what places
+	// the instance. The Oxide API has no create-time field for them the way it does for
+	// anti-affinity, so a membership added after the start would be recorded against a placement it
+	// did not influence.
+	if err := p.joinAffinityGroups(ctx, created.Id, opts.AffinityGroups); err != nil {
+		// The same path a failed start takes: nothing else comes back for this instance, so it would
+		// otherwise hold rack capacity, its boot disk and its name indefinitely.
+		p.abandon(ctx, created.Id, bootDiskName, err)
+		return nil, err
 	}
 
 	started, err := p.start(ctx, created.Id)
@@ -222,7 +247,7 @@ func (p *Provider) Create(
 // The Oxide API only accepts a delete once an instance has fully stopped, so this stops the
 // instance, waits for the run state to settle, deletes the instance, and then deletes the disks it
 // was attached to. Only disks outlive the instance: its network interfaces, ephemeral external IPs
-// and anti-affinity group memberships are all released by the instance delete itself.
+// and affinity and anti-affinity group memberships are all released by the instance delete itself.
 //
 // The provider's onRelease is called once the API has confirmed the instance itself is gone, which
 // is before the disks are dealt with: the CPU and memory are back on the sled at that point, and a
@@ -497,7 +522,11 @@ func (p *Provider) abandonDisk(ctx context.Context, name string, cause error) {
 // placement decision a fresh launch makes and fails the same way. An instance in any other
 // non-running state is not adoptable, and is torn down so the next attempt creates it from scratch.
 // The instance is addressed by name because a create that failed never reported an ID.
-func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide.Instance, error) {
+func (p *Provider) adopt(
+	ctx context.Context,
+	name, bootDiskName string,
+	opts Options,
+) (*oxide.Instance, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
 
 	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
@@ -526,6 +555,12 @@ func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide
 		return instance, nil
 
 	case oxide.InstanceStateStopped:
+		// Re-issued rather than assumed: an earlier attempt may have died between the create and the
+		// joins. A membership already in place comes back as a conflict, which counts as success.
+		if err := p.joinAffinityGroups(ctx, instance.Id, opts.AffinityGroups); err != nil {
+			p.abandon(ctx, instance.Id, bootDiskName, err)
+			return nil, err
+		}
 		started, err := p.start(ctx, instance.Id)
 		if err != nil {
 			// Whatever the reason, this instance is not going to run, and its user-data holds a join
@@ -549,6 +584,32 @@ func (p *Provider) adopt(ctx context.Context, name, bootDiskName string) (*oxide
 		}
 		return nil, fmt.Errorf("%w, so it was terminated", abandonErr)
 	}
+}
+
+// joinAffinityGroups adds an instance to every affinity group a launch asks for, before it is
+// started.
+//
+// This exists only because affinity groups have no create-time field the way anti-affinity groups do.
+// It has to run before the start, which is the call that chooses a sled, or the membership records a
+// preference against a placement that was made without it.
+//
+// A membership already in place is success: an earlier attempt at this launch may have added it
+// before dying, and this call is asking for a state, not for a transition.
+func (p *Provider) joinAffinityGroups(ctx context.Context, id string, groups []string) error {
+	for _, group := range groups {
+		if _, err := p.ox.ExperimentalAffinityGroupMemberInstanceAdd(
+			ctx,
+			oxide.AffinityGroupMemberInstanceAddParams{
+				AffinityGroup: oxide.NameOrId(group),
+				Instance:      oxide.NameOrId(id),
+			},
+		); err != nil && !errors.Is(err, oxide.ErrObjectAlreadyExists) {
+			return fmt.Errorf(
+				"unable to add instance %s to affinity group %s, %w", id, group, err,
+			)
+		}
+	}
+	return nil
 }
 
 // start places a stopped instance on a sled, and is the call a launch turns on.

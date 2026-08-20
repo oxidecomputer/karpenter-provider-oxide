@@ -27,9 +27,13 @@ spec:
   subnetSelector:
     - project: brandon
       vpcName: default
-  # Which Oxide anti-affinity groups launched instances join. Selected groups are referenced only;
-  # the managed group is the one Karpenter creates and deletes itself.
+  # Which Oxide affinity and anti-affinity groups launched instances join. Selected groups are
+  # referenced only; the managed group is the one Karpenter creates and deletes itself.
   # affinity:
+  #   # Affinity groups are an experimental Oxide API. They have no create-time field, so they are
+  #   # joined between the instance create and the start, which is what places the instance.
+  #   affinityGroupSelector:
+  #     - name: gpu-colocate
   #   antiAffinityGroupSelector:
   #     - name: control-plane-spread
   #     # A "*" matches any run of characters, and every matching group is joined, so a group created

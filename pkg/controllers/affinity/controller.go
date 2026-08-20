@@ -153,6 +153,21 @@ func (c *Controller) leave(
 	instanceID string,
 ) error {
 	switch ref.Type {
+	case v1alpha1.AffinityGroupTypeAffinity:
+		err := c.ox.ExperimentalAffinityGroupMemberInstanceDelete(
+			ctx,
+			oxide.AffinityGroupMemberInstanceDeleteParams{
+				AffinityGroup: oxide.NameOrId(ref.ID),
+				Instance:      oxide.NameOrId(instanceID),
+			},
+		)
+		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
+			return fmt.Errorf(
+				"unable to remove instance %s from affinity group %s, %w",
+				instanceID, ref.ID, err,
+			)
+		}
+		return nil
 	case v1alpha1.AffinityGroupTypeAntiAffinity:
 		err := c.ox.AntiAffinityGroupMemberInstanceDelete(
 			ctx,

@@ -126,6 +126,16 @@ type launchAPI struct {
 	// attachedBootDisk is the name the instance create was asked to attach, and is empty if it was
 	// asked to create the boot disk instead.
 	attachedBootDisk string
+	// antiAffinityRequested is the anti-affinity groups the instance create asked to join, which the
+	// API takes at create time.
+	antiAffinityRequested []oxide.NameOrId
+	// affinityJoins are the affinity groups joined by their own call, in the order they were asked
+	// for, and joinsAfterStart counts the ones that arrived after the placement had been made.
+	affinityJoins   []string
+	joinsAfterStart int
+	// affinityJoinError is an Oxide error code to refuse an affinity group join with. Empty means
+	// every join succeeds.
+	affinityJoinError string
 }
 
 func (f *launchAPI) server(t *testing.T) *oxide.Client {
@@ -195,6 +205,7 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 				f.attachedBootDisk = string(attach.Name)
 			}
 			f.startRequested = body.Start
+			f.antiAffinityRequested = body.AntiAffinityGroups
 			if f.instanceCreateError != "" {
 				apiError(t, w, http.StatusInsufficientStorage, f.instanceCreateError)
 				return
@@ -203,6 +214,24 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 			f.instance = runningInstance()
 			f.instance.RunState = oxide.InstanceStateStopped
 			writeJSON(t, w, http.StatusCreated, f.instance)
+
+		// Affinity groups have no create-time field, so they are joined by their own call. It has to
+		// land before the start, which is where the placement the membership shapes is made.
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "affinity-groups/"):
+			group := strings.TrimPrefix(path, "affinity-groups/")
+			group = group[:strings.Index(group, "/")]
+			f.affinityJoins = append(f.affinityJoins, group)
+			if f.starts > 0 {
+				f.joinsAfterStart++
+			}
+			if f.affinityJoinError != "" {
+				apiError(t, w, http.StatusBadRequest, f.affinityJoinError)
+				return
+			}
+			writeJSON(t, w, http.StatusCreated, map[string]any{
+				"type":  "instance",
+				"value": map[string]string{"id": "instance", "name": "karpenter-node"},
+			})
 
 		// The placement decision, and so the call a rack with no room refuses.
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
@@ -286,7 +315,7 @@ func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	instance, err := p.Create(context.Background(), launchParams())
+	instance, err := p.Create(context.Background(), launchParams(), Options{})
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -311,7 +340,7 @@ func TestCreateReportsACapacityRefusalFromTheStart(t *testing.T) {
 	api := &launchAPI{startError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams())
+	_, err := p.Create(context.Background(), launchParams(), Options{})
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("error is %v, want insufficient capacity", err)
 	}
@@ -334,7 +363,7 @@ func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	instance, err := p.Create(context.Background(), launchParams())
+	instance, err := p.Create(context.Background(), launchParams(), Options{})
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -354,7 +383,7 @@ func TestCreateProvisionsTheBootDiskBeforeTheInstance(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	if _, err := p.Create(context.Background(), launchParams()); err != nil {
+	if _, err := p.Create(context.Background(), launchParams(), Options{}); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 
@@ -380,7 +409,7 @@ func TestCreateReportsAStorageRefusalSeparately(t *testing.T) {
 	api := &launchAPI{diskCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams())
+	_, err := p.Create(context.Background(), launchParams(), Options{})
 	if !errors.Is(err, ErrInsufficientStorage) {
 		t.Fatalf("create returned %v, want it to wrap %v", err, ErrInsufficientStorage)
 	}
@@ -404,7 +433,7 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	api := &launchAPI{instanceCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams())
+	_, err := p.Create(context.Background(), launchParams(), Options{})
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("create returned %v, want it to wrap %v", err, ErrInsufficientCapacity)
 	}
@@ -435,7 +464,7 @@ func TestCreateAdoptsABootDiskLeftBehind(t *testing.T) {
 	}
 	p := NewProvider(api.server(t), "project", nil)
 
-	if _, err := p.Create(context.Background(), launchParams()); err != nil {
+	if _, err := p.Create(context.Background(), launchParams(), Options{}); err != nil {
 		t.Fatalf("create failed with a boot disk left over from an earlier attempt: %v", err)
 	}
 	if len(api.diskDeletes) != 0 {
@@ -543,5 +572,94 @@ func TestDeleteWorksWithoutAReleaseCallback(t *testing.T) {
 	}
 	if api.deletes != 1 {
 		t.Errorf("the instance was deleted %d times, want 1", api.deletes)
+	}
+}
+
+// Affinity group memberships are added between the create and the start, because the start is what
+// chooses a sled. A membership added after it would be recorded against a placement it did not
+// influence, which is a preference silently not honoured rather than one the rack refused.
+func TestCreateJoinsAffinityGroupsBeforeTheStart(t *testing.T) {
+	api := &launchAPI{}
+	p := NewProvider(api.server(t), "project", nil)
+
+	if _, err := p.Create(
+		context.Background(),
+		launchParams(),
+		Options{AffinityGroups: []string{"group-a", "group-b"}},
+	); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if len(api.affinityJoins) != 2 {
+		t.Fatalf("joined %v, want both groups", api.affinityJoins)
+	}
+	if api.joinsAfterStart != 0 {
+		t.Errorf("%d joins landed after the start, want none", api.joinsAfterStart)
+	}
+	if api.starts != 1 {
+		t.Errorf("starts = %d, want 1", api.starts)
+	}
+}
+
+// A membership an earlier attempt at this launch already added is not a failure: this call is asking
+// for a state, not for a transition.
+func TestCreateTreatsAnExistingAffinityMembershipAsSuccess(t *testing.T) {
+	api := &launchAPI{affinityJoinError: "ObjectAlreadyExists"}
+	p := NewProvider(api.server(t), "project", nil)
+
+	if _, err := p.Create(
+		context.Background(),
+		launchParams(),
+		Options{AffinityGroups: []string{"group-a"}},
+	); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if api.starts != 1 {
+		t.Errorf("starts = %d, want the launch to have gone on to the start", api.starts)
+	}
+}
+
+// A join that fails ends the launch, and takes the instance and its boot disk with it. Nothing else
+// comes back for them: the caller is being told the launch failed and will never reference either
+// again.
+func TestCreateAbandonsTheInstanceWhenAnAffinityJoinFails(t *testing.T) {
+	api := &launchAPI{affinityJoinError: "Internal"}
+	p := NewProvider(api.server(t), "project", nil)
+
+	if _, err := p.Create(
+		context.Background(),
+		launchParams(),
+		Options{AffinityGroups: []string{"group-a"}},
+	); err == nil {
+		t.Fatal("Create() error = nil, want the launch to have failed")
+	}
+	if api.starts != 0 {
+		t.Errorf("starts = %d, want the launch to have stopped before the placement", api.starts)
+	}
+	if api.instance != nil {
+		t.Error("the instance was left behind after a launch that failed")
+	}
+	if len(api.diskDeletes) == 0 {
+		t.Error("the boot disk was left behind after a launch that failed")
+	}
+}
+
+// Anti-affinity groups take the opposite route: the API has a create-time field for them, which is
+// free, atomic, and already in place before the start makes the placement decision.
+func TestCreatePassesAntiAffinityGroupsToTheCreate(t *testing.T) {
+	api := &launchAPI{}
+	p := NewProvider(api.server(t), "project", nil)
+
+	params := launchParams()
+	params.Body.AntiAffinityGroups = []oxide.NameOrId{"spread-a"}
+	if _, err := p.Create(context.Background(), params, Options{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if len(api.antiAffinityRequested) != 1 || api.antiAffinityRequested[0] != "spread-a" {
+		t.Errorf("the create asked for %v, want [spread-a]", api.antiAffinityRequested)
+	}
+	if len(api.affinityJoins) != 0 {
+		t.Errorf("joined %v by a separate call, want none", api.affinityJoins)
 	}
 }

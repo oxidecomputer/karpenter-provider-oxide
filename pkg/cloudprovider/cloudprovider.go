@@ -294,6 +294,10 @@ func (c *OxideCloudProvider) Create(
 				},
 			),
 		},
+	}, instance.Options{
+		// Joined between the create and the start rather than at create time, because the Oxide API
+		// has no create-time field for affinity groups the way it does for anti-affinity ones.
+		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
 	})
 	if err != nil {
 		// Karpenter deletes the NodeClaim immediately on an insufficient capacity error and
@@ -332,6 +336,12 @@ func (c *OxideCloudProvider) Create(
 			//
 			// Storage is left out of the question. The boot disk already exists by the time the instance
 			// create runs, so its storage was accounted for and whatever refused this launch was not it.
+			//
+			// Not yet told apart from a launch refused because a policy: fail group could not be
+			// satisfied, which is a different thing entirely: it says nothing about the instance type,
+			// so recording it below takes this shape and everything larger out of consideration for no
+			// reason. Distinguishing them needs the status code and error body the rack answers such a
+			// refusal with, which is not yet known. Defaulting policy to allow keeps the hazard opt-in.
 			reason, diagnosis := c.diagnoseRefusal(
 				utilization.Request{CPUs: request.CPUs, Memory: request.Memory},
 				err,
@@ -655,6 +665,18 @@ func antiAffinityGroups(groups []v1alpha1.OxideAffinityGroup) []oxide.NameOrId {
 		groups,
 		func(group v1alpha1.OxideAffinityGroup, _ int) (oxide.NameOrId, bool) {
 			return oxide.NameOrId(group.ID), group.Type == v1alpha1.AffinityGroupTypeAntiAffinity
+		},
+	)
+}
+
+// affinityGroups picks the affinity groups out of a nodeclass's resolved set, as the IDs a launch
+// joins them by between the create and the start. Addressed by ID for the same reason
+// antiAffinityGroups is.
+func affinityGroups(groups []v1alpha1.OxideAffinityGroup) []string {
+	return lo.FilterMap(
+		groups,
+		func(group v1alpha1.OxideAffinityGroup, _ int) (string, bool) {
+			return group.ID, group.Type == v1alpha1.AffinityGroupTypeAffinity
 		},
 	)
 }

@@ -65,6 +65,39 @@ spec:
                 description: Affinity controls which Oxide affinity and anti-affinity
                   groups launched instances join.
                 properties:
+                  affinityGroupSelector:
+                    description: |-
+                      AffinityGroupSelector selects existing affinity groups that every launched instance joins.
+                      Affinity groups are an experimental Oxide API.
+
+                      Excluded from the nodeclass hash for the same reason AntiAffinityGroupSelector is.
+                    items:
+                      description: |-
+                        AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.
+
+                        Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
+                        the selectors, which validate at reconcile instead.
+                      properties:
+                        id:
+                          description: ID is the exact group UUID.
+                          type: string
+                        name:
+                          description: |-
+                            Name is the name of a group. A name without a "*" must match exactly, ignoring case.
+
+                            A name containing "*" selects every group whose name matches, where each "*" stands for any
+                            run of characters including none. So "karpenter-*" selects both "karpenter-spread-a" and
+                            "karpenter-spread-b".
+
+                            Unlike an image selector, where a wildcard picks a single winner, every matching group is
+                            joined. A wildcard therefore makes the set of groups a function of the project's contents
+                            rather than of the nodeclass alone: a group created in the project whose name matches an
+                            existing selector joins the set, and because an instance can only join a group at launch,
+                            every node then drifts and is replaced so it can join. That is a fleet replacement triggered
+                            from outside Kubernetes.
+                          type: string
+                      type: object
+                    type: array
                   antiAffinityGroupSelector:
                     description: |-
                       AntiAffinityGroupSelector selects existing anti-affinity groups that every launched instance
@@ -125,10 +158,10 @@ spec:
                         type: string
                       type:
                         description: |-
-                          Type is whether the managed group co-locates instances on a sled or spreads them across
-                          sleds. Only AntiAffinity is accepted: Oxide's affinity groups are an experimental API that
-                          launched instances cannot yet be joined to.
+                          Type is whether the managed group co-locates instances on a sled (Affinity) or spreads them
+                          across sleds (AntiAffinity). Affinity groups are an experimental Oxide API.
                         enum:
+                        - Affinity
                         - AntiAffinity
                         type: string
                     required:

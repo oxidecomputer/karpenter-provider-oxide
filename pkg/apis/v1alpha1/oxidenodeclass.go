@@ -57,6 +57,13 @@ type OxideNodeClassSpec struct {
 // Selected groups are referenced only: Karpenter adds its instances to them, removes its instances
 // from them, and never creates, updates or deletes the groups themselves.
 type Affinity struct {
+	// AffinityGroupSelector selects existing affinity groups that every launched instance joins.
+	// Affinity groups are an experimental Oxide API.
+	//
+	// Excluded from the nodeclass hash for the same reason AntiAffinityGroupSelector is.
+	// +optional
+	AffinityGroupSelector []AffinityGroupSelector `json:"affinityGroupSelector,omitempty" hash:"ignore"`
+
 	// AntiAffinityGroupSelector selects existing anti-affinity groups that every launched instance
 	// joins.
 	//
@@ -86,10 +93,9 @@ type Affinity struct {
 // different group: the Oxide API cannot patch a group's policy or its kind, so a successor has to
 // be creatable while the predecessor still exists, which is why the name encodes both.
 type ManagedAffinityGroup struct {
-	// Type is whether the managed group co-locates instances on a sled or spreads them across
-	// sleds. Only AntiAffinity is accepted: Oxide's affinity groups are an experimental API that
-	// launched instances cannot yet be joined to.
-	// +kubebuilder:validation:Enum=AntiAffinity
+	// Type is whether the managed group co-locates instances on a sled (Affinity) or spreads them
+	// across sleds (AntiAffinity). Affinity groups are an experimental Oxide API.
+	// +kubebuilder:validation:Enum=Affinity;AntiAffinity
 	Type string `json:"type"`
 	// Policy is what the rack does when the request cannot be satisfied. Allow places the instance
 	// anyway; fail refuses the launch, which is a hazard worth opting into rather than defaulting
