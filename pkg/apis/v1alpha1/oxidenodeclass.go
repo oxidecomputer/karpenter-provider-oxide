@@ -316,7 +316,7 @@ func (in *OxideNodeClass) Hash(caBundle *string) string {
 // OxideNodeClassList contains a list of OxideNodeClass
 // +kubebuilder:object:root=true
 type OxideNodeClassList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `                 json:",inline"`
+	metav1.ListMeta `                 json:"metadata,omitempty"`
 	Items           []OxideNodeClass `json:"items"`
 }

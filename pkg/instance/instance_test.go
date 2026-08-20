@@ -138,6 +138,69 @@ type launchAPI struct {
 	affinityJoinError string
 }
 
+// serveDisks answers the boot disk routes, and reports whether it handled the request. Split out from
+// the handler below so that neither is a switch big enough to be hard to read.
+func (f *launchAPI) serveDisks(
+	t *testing.T,
+	w http.ResponseWriter,
+	r *http.Request,
+	path string,
+) bool {
+	t.Helper()
+	if path != "disks" && !strings.HasPrefix(path, "disks/") {
+		return false
+	}
+	switch {
+	case r.Method == http.MethodPost && path == "disks":
+		f.diskCreates++
+		if f.diskCreateError != "" {
+			apiError(t, w, http.StatusInsufficientStorage, f.diskCreateError)
+			return true
+		}
+		var body oxide.DiskCreate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("unable to decode the disk create: %v", err)
+		}
+		name := string(body.Name)
+		if _, taken := f.disks[name]; taken {
+			apiError(t, w, http.StatusBadRequest, "ObjectAlreadyExists")
+			return true
+		}
+		disk := &oxide.Disk{
+			Id:    fmt.Sprintf("d15c0000-0000-4000-8000-%012d", f.diskCreates),
+			Name:  body.Name,
+			Size:  body.Size,
+			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		}
+		f.disks[name] = disk
+		f.disks[disk.Id] = disk
+		writeJSON(t, w, http.StatusCreated, disk)
+
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "disks/"):
+		disk, ok := f.disks[strings.TrimPrefix(path, "disks/")]
+		if !ok {
+			notFound(t, w)
+			return true
+		}
+		writeJSON(t, w, http.StatusOK, disk)
+
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
+		ref := strings.TrimPrefix(path, "disks/")
+		f.diskDeletes = append(f.diskDeletes, ref)
+		disk, ok := f.disks[ref]
+		if !ok {
+			notFound(t, w)
+			return true
+		}
+		delete(f.disks, string(disk.Name))
+		delete(f.disks, disk.Id)
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		return false
+	}
+	return true
+}
+
 func (f *launchAPI) server(t *testing.T) *oxide.Client {
 	t.Helper()
 
@@ -149,52 +212,11 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+		if f.serveDisks(t, w, r, path) {
+			return
+		}
+
 		switch {
-		case r.Method == http.MethodPost && path == "disks":
-			f.diskCreates++
-			if f.diskCreateError != "" {
-				apiError(t, w, http.StatusInsufficientStorage, f.diskCreateError)
-				return
-			}
-			var body oxide.DiskCreate
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("unable to decode the disk create: %v", err)
-			}
-			name := string(body.Name)
-			if _, taken := f.disks[name]; taken {
-				apiError(t, w, http.StatusBadRequest, "ObjectAlreadyExists")
-				return
-			}
-			disk := &oxide.Disk{
-				Id:    fmt.Sprintf("d15c0000-0000-4000-8000-%012d", f.diskCreates),
-				Name:  body.Name,
-				Size:  body.Size,
-				State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
-			}
-			f.disks[name] = disk
-			f.disks[disk.Id] = disk
-			writeJSON(t, w, http.StatusCreated, disk)
-
-		case r.Method == http.MethodGet && strings.HasPrefix(path, "disks/"):
-			disk, ok := f.disks[strings.TrimPrefix(path, "disks/")]
-			if !ok {
-				notFound(t, w)
-				return
-			}
-			writeJSON(t, w, http.StatusOK, disk)
-
-		case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
-			ref := strings.TrimPrefix(path, "disks/")
-			f.diskDeletes = append(f.diskDeletes, ref)
-			disk, ok := f.disks[ref]
-			if !ok {
-				notFound(t, w)
-				return
-			}
-			delete(f.disks, string(disk.Name))
-			delete(f.disks, disk.Id)
-			w.WriteHeader(http.StatusNoContent)
-
 		case r.Method == http.MethodPost && path == "instances":
 			f.instanceCreates++
 			var body oxide.InstanceCreate

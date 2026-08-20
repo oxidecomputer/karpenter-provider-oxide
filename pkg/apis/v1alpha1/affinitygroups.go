@@ -66,7 +66,7 @@ func EncodeAffinityGroups(refs []AffinityGroupRef) string {
 // provider, so a malformed one says nothing worth acting on.
 func ParseAffinityGroups(value string) []AffinityGroupRef {
 	var refs []AffinityGroupRef
-	for _, entry := range strings.Split(value, ",") {
+	for entry := range strings.SplitSeq(value, ",") {
 		code, id, ok := strings.Cut(strings.TrimSpace(entry), ":")
 		if !ok || id == "" {
 			continue

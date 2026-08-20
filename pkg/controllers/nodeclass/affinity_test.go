@@ -8,6 +8,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// defaultNodeClass is the nodeclass name most of these cases share, so that what varies between
+// them is only the managed group configuration.
+const defaultNodeClass = "default"
+
 func TestManagedGroupName(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -18,13 +22,13 @@ func TestManagedGroupName(t *testing.T) {
 	}{
 		{
 			name:          "an allow-policy anti-affinity group",
-			nodeClassName: "default",
+			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity", Policy: "allow"},
 			want:          "default-aa-a",
 		},
 		{
 			name:          "the policy is encoded, so a change to it names a different group",
-			nodeClassName: "default",
+			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity", Policy: "fail"},
 			want:          "default-aa-f",
 		},
@@ -36,7 +40,7 @@ func TestManagedGroupName(t *testing.T) {
 		},
 		{
 			name:          "an unset policy names the group the API would have defaulted to",
-			nodeClassName: "default",
+			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
 			want:          "default-aa-a",
 		},
@@ -88,7 +92,7 @@ func TestManagedGroupName(t *testing.T) {
 func TestManagedGroupDescription(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "default",
+			Name: defaultNodeClass,
 			UID:  "444f4178-6bee-45f7-a654-c6ecafd4bb9e",
 		},
 	}

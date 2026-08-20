@@ -73,6 +73,11 @@ func (c *Controller) groupAPIFor(kind string) groupAPI {
 	return c.antiAffinityAPI()
 }
 
+// The two adapters below are deliberately near-identical. The affinity and anti-affinity halves of
+// the API share no Go type at all, so the resemblance cannot be factored out any further than the
+// groupAPI indirection above already does.
+//
+//nolint:dupl // see above
 func (c *Controller) antiAffinityAPI() groupAPI {
 	return groupAPI{
 		kind: v1alpha1.AffinityGroupTypeAntiAffinity,
@@ -157,6 +162,8 @@ func (c *Controller) antiAffinityAPI() groupAPI {
 
 // affinityAPI is the experimental half. Every affinity-group method the SDK offers carries the
 // Experimental prefix; anti-affinity does not.
+//
+//nolint:dupl // see antiAffinityAPI
 func (c *Controller) affinityAPI() groupAPI {
 	return groupAPI{
 		kind: v1alpha1.AffinityGroupTypeAffinity,
@@ -537,7 +544,8 @@ func managedGroupName(nodeClass *v1alpha1.OxideNodeClass) (string, error) {
 	if err := validOxideName(name); err != nil {
 		return "", fmt.Errorf(
 			"the managed group name %q derived from the nodeclass name is not a legal Oxide name: %w",
-			name, err,
+			name,
+			err,
 		)
 	}
 	return name, nil
