@@ -131,9 +131,17 @@ func (c *Controller) Reconcile(
 
 	if len(remaining) != len(recorded) {
 		stored := nodeClaim.DeepCopy()
-		nodeClaim.Annotations = lo.Assign(nodeClaim.Annotations, map[string]string{
-			v1alpha1.AnnotationAffinityGroups: v1alpha1.EncodeAffinityGroups(remaining),
-		})
+		if len(remaining) == 0 {
+			// Removed rather than set to an empty string. The annotation's absence is what the drift
+			// comparison reads as "this node joined nothing", and an empty value would have to be
+			// parsed to mean the same thing everywhere it is read. Leaving the key behind also reads
+			// as a node that is still asserting something about groups when it is not.
+			delete(nodeClaim.Annotations, v1alpha1.AnnotationAffinityGroups)
+		} else {
+			nodeClaim.Annotations = lo.Assign(nodeClaim.Annotations, map[string]string{
+				v1alpha1.AnnotationAffinityGroups: v1alpha1.EncodeAffinityGroups(remaining),
+			})
+		}
 		if err := c.kubeClient.Patch(ctx, nodeClaim, client.MergeFrom(stored)); err != nil {
 			return reconcile.Result{}, client.IgnoreNotFound(
 				fmt.Errorf("unable to record the NodeClaim's group memberships, %w", err),

@@ -4,7 +4,9 @@
 # Makefile and goreleaser always agree on one value.
 VERSION ?= $(shell git describe --tags --always | sed -e 's/^v//')
 
-# Image URL to use all building/pushing image targets
+# Image URL to use for make apply
+MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter
+# Image URL to use to build and push image targets for releases
 IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter
 HELM_OCI_REPO ?= ghcr.io/oxidecomputer/helm-charts
 IMAGE_TAG ?= dev
@@ -173,6 +175,10 @@ IMAGE_REF_FILE := $(shell echo "$${TMPDIR:-/tmp}")/karpenter-oxide-image-ref
 build: generate ## Builds a container image using ko and pushes to $KO_DOCKER_REPO
 	$(WITH_GOFLAGS) KO_DOCKER_REPO="$(KO_DOCKER_REPO)" $(KO) build --bare ./cmd/controller | tee $(IMAGE_REF_FILE)
 
+.PHONY: build-dev
+build-dev: generate ## Builds a container image using ko and pushes to $MY_IMAGE_REPO
+	$(WITH_GOFLAGS) KO_DOCKER_REPO="$(MY_IMAGE_REPO)" $(KO) build --bare ./cmd/controller | tee $(IMAGE_REF_FILE)
+
 .PHONY: binary
 binary: ## Build the Karpenter controller binary using go build
 	go build $(GOFLAGS) -o $(BINARY_FILENAME) ./cmd/controller/...
@@ -180,11 +186,10 @@ binary: ## Build the Karpenter controller binary using go build
 .PHONY: run
 run: ## Run the controller against your local cluster with the latest CRDs. Requires OXIDE_HOST, OXIDE_TOKEN and OXIDE_PROJECT.
 	$(KUBECTL) apply -f ./pkg/apis/crds/
-	OXIDE_HOST=${OXIDE_HOST} \
+		OXIDE_HOST=${OXIDE_HOST} \
 		OXIDE_TOKEN=${OXIDE_TOKEN} \
 		OXIDE_PROJECT=${OXIDE_PROJECT} \
 		SYSTEM_NAMESPACE=$(KARPENTER_NAMESPACE) \
-		KUBERNETES_MIN_VERSION="1.19.0-0" \
 		DISABLE_LEADER_ELECTION=true \
 		FEATURE_GATES="NodeOverlay=true,StaticCapacity=true,NodeRepair=true" \
 		OXIDE_INVENTORY_ENABLED="true" \
@@ -262,7 +267,7 @@ helm-apply:
 		--wait
 
 .PHONY: apply
-apply: install-crds build helm-apply ## Build/push the image with ko and deploy that exact digest to the current kube context.
+apply: install-crds build-dev helm-apply ## Build/push the image with ko and deploy that exact digest to the current kube context.
 
 .PHONY: undeploy
 undeploy: ## Undeploy the controller from the K8s cluster specified in ~/.kube/config.
