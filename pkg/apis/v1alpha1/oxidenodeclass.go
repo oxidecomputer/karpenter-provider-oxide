@@ -65,6 +65,40 @@ type Affinity struct {
 	// the group it already matched has changed nothing about where an instance sits. See IsDrifted.
 	// +optional
 	AntiAffinityGroupSelector []AffinityGroupSelector `json:"antiAffinityGroupSelector,omitempty" hash:"ignore"`
+
+	// Managed asks Karpenter to own one group for this nodeclass that every launched instance joins.
+	// It is created when the nodeclass is reconciled and deleted when the nodeclass is. Its name is
+	// derived from the nodeclass name and from the fields below, so that changing either produces a
+	// new group rather than an edit the Oxide API cannot make.
+	//
+	// Excluded from the nodeclass hash for the same reason the selectors are: whether nodes are
+	// replaced when this changes is decided by comparing resolved groups, not by hashing the spec.
+	// A hash cannot tell a group being added from one being removed, and only the first replaces
+	// nodes. See IsDrifted.
+	// +optional
+	Managed *ManagedAffinityGroup `json:"managed,omitempty" hash:"ignore"`
+}
+
+// ManagedAffinityGroup is the single group Karpenter owns end to end for a nodeclass.
+//
+// Being a single pointer with a Type enum is what structurally enforces one managed group per
+// nodeclass, with no CEL needed. Both its fields are mutable, and changing either creates a
+// different group: the Oxide API cannot patch a group's policy or its kind, so a successor has to
+// be creatable while the predecessor still exists, which is why the name encodes both.
+type ManagedAffinityGroup struct {
+	// Type is whether the managed group co-locates instances on a sled or spreads them across
+	// sleds. Only AntiAffinity is accepted: Oxide's affinity groups are an experimental API that
+	// launched instances cannot yet be joined to.
+	// +kubebuilder:validation:Enum=AntiAffinity
+	Type string `json:"type"`
+	// Policy is what the rack does when the request cannot be satisfied. Allow places the instance
+	// anyway; fail refuses the launch, which is a hazard worth opting into rather than defaulting
+	// to, since a refusal for want of a satisfiable placement is not a refusal any smaller instance
+	// shape would avoid.
+	// +kubebuilder:validation:Enum=allow;fail
+	// +kubebuilder:default=allow
+	// +optional
+	Policy string `json:"policy,omitempty"`
 }
 
 // AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.

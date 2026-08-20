@@ -21,6 +21,7 @@ import (
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -34,6 +35,11 @@ var kubeletArgsAlways = []string{"cloud-provider=external"}
 // first is launched; the rest are there to make a wildcard version selector auditable without
 // growing the object unboundedly when a selector matches a large image list.
 const maxStatusImages = 3
+
+// groupCollectionRequeue is how long a nodeclass waits before re-checking a managed affinity group
+// that is not empty yet. Emptying one is a fleet replacement, which is paced by disruption budgets,
+// so this only has to be short relative to a node's lifetime rather than to a node's replacement.
+const groupCollectionRequeue = time.Minute
 
 type Controller struct {
 	kubeClient client.Client
@@ -82,6 +88,23 @@ func (c *Controller) Reconcile(
 	nodeClass *v1alpha1.OxideNodeClass,
 ) (reconcile.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
+
+	if !nodeClass.DeletionTimestamp.IsZero() {
+		return c.finalize(ctx, nodeClass)
+	}
+	// Added before anything is created, so that a delete landing immediately after this reconcile
+	// cannot leave behind a group with nothing left to clean it up. It goes on every nodeclass rather
+	// than only on those configuring a managed group, because whether one owns a group is a fact
+	// about the project rather than about the current spec: a managed group that has just been unset
+	// still has to be collected.
+	if !controllerutil.ContainsFinalizer(nodeClass, v1alpha1.TerminationFinalizer) {
+		stored := nodeClass.DeepCopy()
+		controllerutil.AddFinalizer(nodeClass, v1alpha1.TerminationFinalizer)
+		if err := c.kubeClient.Patch(ctx, nodeClass, client.MergeFrom(stored)); err != nil {
+			return reconcile.Result{}, client.IgnoreNotFound(err)
+		}
+	}
+
 	stored := nodeClass.DeepCopy()
 
 	bootstrapper, err := c.bootstrappers.For(nodeClass)
@@ -177,7 +200,58 @@ func (c *Controller) Reconcile(
 			return reconcile.Result{}, client.IgnoreNotFound(err)
 		}
 	}
+
+	// Deliberately after the status patch. A launch that read the status a moment before a group was
+	// deleted would try to join a group that is gone, so the desired set is published first and only
+	// then is anything outside it torn down.
+	held, err := c.collectManagedGroups(
+		ctx,
+		nodeClass,
+		managedGroupIDs(nodeClass.Status.AffinityGroups),
+	)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
+	}
+	if held {
+		// A group waiting on its members to be replaced away. Nothing here can hurry that along, but
+		// checking back sooner than the resync is what makes a superseded group disappear promptly
+		// once the last node has left it, rather than half an hour later.
+		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
+	}
 	return reconcile.Result{RequeueAfter: 30 * time.Minute}, nil
+}
+
+// finalize removes every group this nodeclass owns before letting the nodeclass itself go, so that a
+// managed group cannot outlive the object that describes it.
+//
+// It collects regardless of what the spec still says, because a nodeclass being deleted wants none of
+// its groups. A group that still has members is not deleted, so this holds the finalizer until the
+// nodes have gone, which is the only thing that empties it.
+func (c *Controller) finalize(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+) (reconcile.Result, error) {
+	if !controllerutil.ContainsFinalizer(nodeClass, v1alpha1.TerminationFinalizer) {
+		return reconcile.Result{}, nil
+	}
+
+	held, err := c.collectManagedGroups(ctx, nodeClass, nil)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
+	}
+	if held {
+		log.FromContext(ctx).V(1).Info(
+			"waiting for the nodeclass's managed affinity groups to empty before deleting them",
+		)
+		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
+	}
+
+	stored := nodeClass.DeepCopy()
+	controllerutil.RemoveFinalizer(nodeClass, v1alpha1.TerminationFinalizer)
+	if err := c.kubeClient.Patch(ctx, nodeClass, client.MergeFrom(stored)); err != nil {
+		return reconcile.Result{}, client.IgnoreNotFound(err)
+	}
+	return reconcile.Result{}, nil
 }
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {

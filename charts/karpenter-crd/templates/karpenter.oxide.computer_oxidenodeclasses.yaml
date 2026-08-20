@@ -100,6 +100,40 @@ spec:
                           type: string
                       type: object
                     type: array
+                  managed:
+                    description: |-
+                      Managed asks Karpenter to own one group for this nodeclass that every launched instance joins.
+                      It is created when the nodeclass is reconciled and deleted when the nodeclass is. Its name is
+                      derived from the nodeclass name and from the fields below, so that changing either produces a
+                      new group rather than an edit the Oxide API cannot make.
+
+                      Excluded from the nodeclass hash for the same reason the selectors are: whether nodes are
+                      replaced when this changes is decided by comparing resolved groups, not by hashing the spec.
+                      A hash cannot tell a group being added from one being removed, and only the first replaces
+                      nodes. See IsDrifted.
+                    properties:
+                      policy:
+                        default: allow
+                        description: |-
+                          Policy is what the rack does when the request cannot be satisfied. Allow places the instance
+                          anyway; fail refuses the launch, which is a hazard worth opting into rather than defaulting
+                          to, since a refusal for want of a satisfiable placement is not a refusal any smaller instance
+                          shape would avoid.
+                        enum:
+                        - allow
+                        - fail
+                        type: string
+                      type:
+                        description: |-
+                          Type is whether the managed group co-locates instances on a sled or spreads them across
+                          sleds. Only AntiAffinity is accepted: Oxide's affinity groups are an experimental API that
+                          launched instances cannot yet be joined to.
+                        enum:
+                        - AntiAffinity
+                        type: string
+                    required:
+                    - type
+                    type: object
                 type: object
               bootDiskSize:
                 anyOf:
@@ -312,6 +346,11 @@ spec:
                   properties:
                     id:
                       type: string
+                    managed:
+                      description: |-
+                        Managed marks the one group Karpenter owns for this nodeclass, and so the only one it will
+                        ever delete.
+                      type: boolean
                     name:
                       description: |-
                         Name is the group's name at the time it resolved. The ID is the identity: a group deleted and
@@ -328,6 +367,7 @@ spec:
                       type: string
                   required:
                   - id
+                  - managed
                   - name
                   - policy
                   - type

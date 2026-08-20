@@ -29,6 +29,14 @@ const ConditionTypeAffinityGroupsResolved = "AffinityGroupsResolved"
 const (
 	// ConditionReasonAffinityGroupNotFound is a selector, wildcard included, that matched nothing.
 	ConditionReasonAffinityGroupNotFound = "AffinityGroupNotFound"
+	// ConditionReasonInvalidGroupName is a nodeclass name that cannot produce a legal Oxide name for
+	// the managed group. Reported rather than truncated, because a truncated name silently collides
+	// with every other nodeclass that shares its first 58 characters.
+	ConditionReasonInvalidGroupName = "InvalidGroupName"
+	// ConditionReasonGroupNotOwned is a group already carrying the managed group's name without
+	// carrying its ownership marker. It is never adopted: silently taking ownership of a hand-made
+	// group means silently deleting it later.
+	ConditionReasonGroupNotOwned = "GroupNotOwned"
 )
 
 // Group kinds reported on OxideAffinityGroup.Type. The two are separate collections in the Oxide
@@ -133,6 +141,9 @@ type OxideAffinityGroup struct {
 	Type string `json:"type"`
 	// Policy is what the rack does when the group's constraint cannot be satisfied, allow or fail.
 	Policy string `json:"policy"`
+	// Managed marks the one group Karpenter owns for this nodeclass, and so the only one it will
+	// ever delete.
+	Managed bool `json:"managed"`
 }
 
 type OxideIPPool struct {

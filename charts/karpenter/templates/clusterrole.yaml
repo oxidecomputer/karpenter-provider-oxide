@@ -96,11 +96,15 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # OxideNodeClass is cluster-scoped. The controller only ever reads the spec and writes status, so
-  # it is deliberately not granted create or delete on the resource users author.
+  # OxideNodeClass is cluster-scoped. The controller reads the spec, writes status, and owns a
+  # finalizer that holds the object until the Oxide affinity groups it created have been deleted, so
+  # it is deliberately granted patch but not create or delete on the resource users author.
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidenodeclasses/finalizers"]
+    verbs: ["update"]
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses/status"]
     verbs: ["update", "patch"]
