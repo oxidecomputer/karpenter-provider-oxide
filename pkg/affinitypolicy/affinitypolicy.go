@@ -21,6 +21,11 @@
 // and shapes with no bearing on the group -- but under an unsatisfiable fail policy that is simply
 // true: no instance of that nodeclass can launch until something frees a sled.
 //
+// Because it is blunt, and because the attribution below is a guess, it takes two consecutive
+// refusals to engage. The first only starts a clock; the retries through it are what distinguish a
+// launch that raced a node being deleted from a policy that genuinely cannot be satisfied. See
+// gateThreshold.
+//
 // TODO: the Oxide API does not currently distinguish a fail-policy refusal from a genuine capacity
 // refusal. Both arrive as InsufficientCapacity with no error code or body that separates them, so a
 // launch is attributed here on the basis that the nodeclass had a fail-policy group in its desired
@@ -53,6 +58,21 @@ const (
 	// to be gained by not noticing that for half an hour. The cost of a short cap is one launch per
 	// interval per nodeclass, which is what the interval is chosen to bound.
 	maxBackoff = 5 * time.Minute
+	// gateThreshold is how many consecutive refusals it takes before the nodeclass is actually held
+	// out of provisioning. Refusals below it are counted and timed but gate nothing.
+	//
+	// One refusal is not enough, because the Oxide API does not say whether a fail policy is what
+	// refused the launch (see Attributable) and holding a nodeclass out of provisioning on a guess is
+	// the one consequence here worth being slow about. It is also not enough on its own terms: a
+	// single refusal can be a race rather than a condition, where a node was being deleted as the
+	// launch was placed and the sled it frees would have satisfied the policy a moment later.
+	//
+	// So the first refusal opens a window that gates nothing. The provisioner keeps retrying through
+	// it, which is exactly what settles the question: a racing refusal is answered by a launch that
+	// succeeds, which clears the history and never un-Readies anything, while a real condition refuses
+	// again and gates from the second window on. The cost is one window of retries, bounded by
+	// baseBackoff.
+	gateThreshold = 2
 	// jitterFraction is the range of the delay added on top of each backoff, as a fraction of it.
 	jitterFraction = 0.2
 	// historyTTL is how long a nodeclass's refusal history outlives its last refusal. History is what
@@ -147,12 +167,17 @@ func Attributable(groups []v1alpha1.OxideAffinityGroup) bool {
 const policyFail = "fail"
 
 // RecordRefusal notes that a launch for this nodeclass was refused while a fail-policy group was in
-// its desired set, and returns how long the nodeclass should stop launching for.
+// its desired set. It returns the window this refusal opened and whether that window holds the
+// nodeclass out of provisioning, which the first one does not. See gateThreshold.
 //
-// A refusal arriving while the nodeclass is already backing off does not lengthen the wait. Karpenter
-// provisions in bursts, so one unsatisfiable policy produces a handful of refusals within a second of
-// each other, and counting each of them would jump straight to the cap on the first incident.
-func (t *Tracker) RecordRefusal(ctx context.Context, nodeClass, message string) time.Duration {
+// A refusal arriving inside an open window neither lengthens it nor counts. Karpenter provisions in
+// bursts, so one unsatisfiable policy produces a handful of refusals within a second of each other,
+// and counting each of them would jump straight to the cap on the first incident -- and would defeat
+// the point of the threshold, since a single burst would satisfy it on its own.
+func (t *Tracker) RecordRefusal(
+	ctx context.Context,
+	nodeClass, message string,
+) (window time.Duration, gated bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -166,21 +191,34 @@ func (t *Tracker) RecordRefusal(ctx context.Context, nodeClass, message string) 
 	current.message = message
 
 	if ok && now.Before(current.until) {
-		// Already backing off. This launch was in flight before the window opened.
-		return current.until.Sub(now)
+		// Inside the open window. This launch was in flight before the window opened, or is one of the
+		// retries the window exists to absorb.
+		return current.until.Sub(now), current.consecutive >= gateThreshold
 	}
 
 	current.consecutive++
-	backoff := t.backoffFor(current.consecutive)
-	current.until = now.Add(backoff)
+	window = t.backoffFor(current.consecutive)
+	current.until = now.Add(window)
+	gated = current.consecutive >= gateThreshold
 
-	log.FromContext(ctx).Info(
-		"a fail-policy affinity group could not be satisfied, backing the nodeclass off",
-		"nodeclass", nodeClass,
-		"consecutive", current.consecutive,
-		"backoff", backoff.String(),
-	)
-	return backoff
+	if gated {
+		log.FromContext(ctx).Info(
+			"a fail-policy affinity group could not be satisfied again, holding the nodeclass out of provisioning",
+			"nodeclass", nodeClass,
+			"consecutive", current.consecutive,
+			"backoff", window.String(),
+		)
+	} else {
+		// Not an error and not yet a verdict. Logged so that a launch refused this way is visible
+		// even when it turns out to have been a race and nothing further happens.
+		log.FromContext(ctx).V(1).Info(
+			"a fail-policy affinity group could not be satisfied, retrying before holding the nodeclass out of provisioning",
+			"nodeclass", nodeClass,
+			"consecutive", current.consecutive,
+			"retrying-for", window.String(),
+		)
+	}
+	return window, gated
 }
 
 // RecordSuccess forgets a nodeclass's refusal history. A launch that placed is the only proof the
@@ -199,11 +237,13 @@ func (t *Tracker) RecordSuccess(ctx context.Context, nodeClass string) {
 	)
 }
 
-// State returns the nodeclass's back-off if it is still running, and reports whether it is.
+// State returns the nodeclass's back-off if it is currently holding the nodeclass out of
+// provisioning, and reports whether it is.
 //
-// History outliving the back-off is deliberately not reported: it is what makes the next wait longer,
-// not a reason to keep the nodeclass un-Ready. A nodeclass whose wait has elapsed is Ready again and
-// one launch probes the policy.
+// Two things are deliberately not reported. A single refusal, because one is not yet a verdict and
+// the retries through its window are what decide whether it was a race; and history outliving a
+// window, because that is what makes the next wait longer rather than a reason to keep the nodeclass
+// un-Ready. In both cases the nodeclass is Ready and a launch is free to probe the policy.
 func (t *Tracker) State(nodeClass string) (State, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -219,7 +259,7 @@ func (t *Tracker) State(nodeClass string) (State, bool) {
 		delete(t.entries, nodeClass)
 		return State{}, false
 	}
-	if !now.Before(current.until) {
+	if current.consecutive < gateThreshold || !now.Before(current.until) {
 		return State{}, false
 	}
 	return State{
