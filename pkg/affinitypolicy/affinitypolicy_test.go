@@ -62,12 +62,12 @@ func TestRecordRefusalBacksOffExponentially(t *testing.T) {
 	ctx := context.Background()
 
 	for i, want := range []time.Duration{
-		3 * time.Minute,
-		6 * time.Minute,
-		12 * time.Minute,
-		24 * time.Minute,
-		30 * time.Minute, // capped
-		30 * time.Minute,
+		30 * time.Second,
+		time.Minute,
+		2 * time.Minute,
+		4 * time.Minute,
+		5 * time.Minute, // capped
+		5 * time.Minute,
 	} {
 		if got := tracker.RecordRefusal(ctx, "default", "refused"); got != want {
 			t.Errorf("refusal %d backed off %s, want %s", i+1, got, want)
@@ -85,8 +85,8 @@ func TestRecordRefusalDoesNotLengthenAnOpenWindow(t *testing.T) {
 	ctx := context.Background()
 
 	first := tracker.RecordRefusal(ctx, "default", "refused")
-	if first != 3*time.Minute {
-		t.Fatalf("first backoff = %s, want 3m", first)
+	if first != 30*time.Second {
+		t.Fatalf("first backoff = %s, want 30s", first)
 	}
 	now = now.Add(time.Second)
 	for range 5 {
@@ -97,8 +97,8 @@ func TestRecordRefusalDoesNotLengthenAnOpenWindow(t *testing.T) {
 
 	// The window elapses and the next refusal is the second, not the seventh.
 	now = now.Add(first)
-	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != 6*time.Minute {
-		t.Errorf("backoff after the window = %s, want 6m", got)
+	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != time.Minute {
+		t.Errorf("backoff after the window = %s, want 1m", got)
 	}
 }
 
@@ -129,8 +129,8 @@ func TestStateReportsTheBackoffOnlyWhileItRuns(t *testing.T) {
 		t.Error("still backing off after the wait elapsed")
 	}
 	// The history survives, which is what makes the next wait longer rather than resetting to base.
-	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != 6*time.Minute {
-		t.Errorf("backoff after an elapsed wait = %s, want 6m: history should survive", got)
+	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != time.Minute {
+		t.Errorf("backoff after an elapsed wait = %s, want 1m: history should survive", got)
 	}
 }
 
@@ -147,7 +147,7 @@ func TestRecordSuccessClearsTheHistory(t *testing.T) {
 	if _, backingOff := tracker.State("default"); backingOff {
 		t.Error("still backing off after a launch succeeded")
 	}
-	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != 3*time.Minute {
+	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != baseBackoff {
 		t.Errorf("backoff after a success = %s, want the base wait", got)
 	}
 }
@@ -163,7 +163,7 @@ func TestHistoryAgesOut(t *testing.T) {
 	if _, backingOff := tracker.State("default"); backingOff {
 		t.Error("a refusal from beyond the history TTL is still backing off")
 	}
-	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != 3*time.Minute {
+	if got := tracker.RecordRefusal(ctx, "default", "refused"); got != baseBackoff {
 		t.Errorf("backoff after the history aged out = %s, want the base wait", got)
 	}
 }

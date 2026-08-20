@@ -40,20 +40,30 @@ import (
 )
 
 const (
-	// baseBackoff is the first wait, and every wait after it doubles. Matched to pkg/instancetype's
-	// shape breaker: what makes an unsatisfiable policy satisfiable again is a node going away, which
-	// happens on the same timescale as a rack gaining room.
-	baseBackoff = 3 * time.Minute
-	// maxBackoff caps the wait. A policy that has been unsatisfiable five times running will not
-	// become satisfiable promptly, but a node may be deleted at any moment, so this keeps probing at a
-	// rate that costs one launch rather than giving up on the nodeclass.
-	maxBackoff = 30 * time.Minute
+	// baseBackoff is the first wait, and every wait after it doubles.
+	//
+	// Deliberately shorter than pkg/instancetype's, because what this waits on is a different and much
+	// more dynamic thing. A shape becomes launchable again when the rack gains room, which is a slow
+	// event; a fail policy becomes satisfiable again the moment any one of the nodeclass's own
+	// instances goes away, which happens on every scale-down, consolidation and node replacement. So
+	// the first retry is quick, when a freed sled is most likely.
+	baseBackoff = 30 * time.Second
+	// maxBackoff caps the wait, and is low for the same reason. A policy that has been unsatisfiable
+	// five times running still becomes satisfiable the instant a node is deleted, and there is nothing
+	// to be gained by not noticing that for half an hour. The cost of a short cap is one launch per
+	// interval per nodeclass, which is what the interval is chosen to bound.
+	maxBackoff = 5 * time.Minute
 	// jitterFraction is the range of the delay added on top of each backoff, as a fraction of it.
 	jitterFraction = 0.2
 	// historyTTL is how long a nodeclass's refusal history outlives its last refusal. History is what
 	// makes the backoff grow, so forgetting it too eagerly turns a persistently unsatisfiable policy
-	// back into a three minute retry loop.
-	historyTTL = 6 * time.Hour
+	// back into a thirty second retry loop.
+	//
+	// Scaled to the cap rather than to the shape breaker's: the whole schedule runs its course in
+	// under eight minutes, so an hour is already several incidents' worth of memory, and remembering
+	// longer would make a single refusal today wait the full cap on the strength of a blip this
+	// morning.
+	historyTTL = time.Hour
 )
 
 // Tracker records which nodeclasses have had a launch refused while a fail-policy group was in their
