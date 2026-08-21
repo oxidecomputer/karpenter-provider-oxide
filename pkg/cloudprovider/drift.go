@@ -8,7 +8,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/samber/lo"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -69,13 +68,6 @@ func (c *OxideCloudProvider) IsDrifted(
 			return reason, nil
 		}
 	}
-	for _, drifted := range []func(*karpcorev1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason{
-		affinityGroupDrift,
-	} {
-		if reason := drifted(nodeClaim, nodeClass); reason != "" {
-			return reason, nil
-		}
-	}
 	return "", nil
 }
 
@@ -103,28 +95,4 @@ func nodeClassDrift(
 		return ""
 	}
 	return lo.Ternary(nodeClassHash != nodeClaimHash, providers.DriftReasonNodeClass, "")
-}
-
-// affinityGroupDrift reports the groups the nodeclass wants that this instance is not in.
-//
-// Additions only. A missing annotation therefore needs no special case: it is the empty set, and the
-// empty set drifts exactly when something is desired, which is what makes a node launched before the
-// feature existed drift once groups are configured and not before. A group leaving the desired set is
-// not drift, because the affinity controller removes the membership in place.
-func affinityGroupDrift(
-	nodeClaim *karpcorev1.NodeClaim,
-	nodeClass *v1alpha1.OxideNodeClass,
-) cloudprovider.DriftReason {
-	desired := v1alpha1.AffinityGroupIDs(nodeClass.Status.AffinityGroups)
-	recorded := sets.New[string]()
-	for _, ref := range v1alpha1.ParseAffinityGroups(
-		nodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups],
-	) {
-		recorded.Insert(ref.ID)
-	}
-	return lo.Ternary(
-		desired.Difference(recorded).Len() > 0,
-		providers.DriftReasonAffinityGroup,
-		"",
-	)
 }

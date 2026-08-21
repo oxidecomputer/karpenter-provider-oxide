@@ -17,6 +17,10 @@ const version = v1alpha1.OxideNodeClassHashVersion
 
 // hashNodeClass is a nodeclass with something in the hashed part of its spec, so that a stamp is
 // distinguishable from the hash of an empty spec.
+// defaultNodeClass is the nodeclass name these cases share, so that what varies between them is only
+// the configuration being hashed.
+const defaultNodeClass = "default"
+
 func hashNodeClass(annotations map[string]string) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultNodeClass, Annotations: annotations},

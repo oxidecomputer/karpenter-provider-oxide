@@ -6,15 +6,14 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
-	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
-	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -47,11 +46,7 @@ type Controller struct {
 	// reader is the manager's uncached reader, used for the one-off lookups that would otherwise
 	// make controller-runtime list and watch an entire resource type cluster-wide just to read a
 	// single object by name.
-	reader      client.Reader
-	oxideClient *oxide.Client
-	// project is the Oxide project instances are launched into, which is what scopes the resources
-	// resolved by name rather than by ID.
-	project string
+	reader client.Reader
 	// images resolves and caches what the nodeclass's image selectors match. Held as the provider
 	// rather than called as a function so that the cache is shared across every nodeclass.
 	images *image.Provider
@@ -61,6 +56,9 @@ type Controller struct {
 	sshKeys *sshkey.Provider
 	// ipPools resolves the pools each launched instance takes an ephemeral external address from.
 	ipPools *ippool.Provider
+	// affinityGroups resolves the groups every launched instance joins, and owns the one group this
+	// nodeclass may have Karpenter create for it.
+	affinityGroups *affinitygroup.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -70,36 +68,25 @@ type Controller struct {
 func NewController(
 	kubeClient client.Client,
 	reader client.Reader,
-	oxideClient *oxide.Client,
-	project string,
 	images *image.Provider,
 	subnets *subnet.Provider,
 	sshKeys *sshkey.Provider,
 	ipPools *ippool.Provider,
+	affinityGroups *affinitygroup.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
 	return &Controller{
 		kubeClient:     kubeClient,
 		reader:         reader,
-		oxideClient:    oxideClient,
-		project:        project,
 		images:         images,
 		subnets:        subnets,
 		sshKeys:        sshKeys,
 		ipPools:        ipPools,
+		affinityGroups: affinityGroups,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
-}
-
-// projectFor returns the project a lookup should be scoped by. A project is what makes a name
-// unambiguous, but the API rejects one passed alongside an ID, which is unambiguous already.
-func (c *Controller) projectFor(ref string) oxide.NameOrId {
-	if _, err := uuid.Parse(ref); err == nil {
-		return ""
-	}
-	return oxide.NameOrId(c.project)
 }
 
 func (c *Controller) Name() string {
@@ -192,17 +179,18 @@ func (c *Controller) Reconcile(
 	logStale(ctx, "ippool", ipPools.Stale, ipPools.Age)
 	nodeClass.Status.IPPools = ipPools.Resolved
 
-	affinity, err := c.resolveAffinityGroups(ctx, nodeClass)
+	affinity, err := c.affinityGroups.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve affinity groups: %w", err)
 	}
+	logStale(ctx, "affinitygroup", affinity.Stale, affinity.Age)
 	switch {
 	case nodeClass.Spec.Affinity == nil:
 		// Nothing is desired, so nothing is published. The condition is not registered for this
 		// nodeclass either, so there is none to set.
 		nodeClass.Status.AffinityGroups = nil
-	case affinity.resolved():
-		nodeClass.Status.AffinityGroups = affinity.groups
+	case affinity.Complete():
+		nodeClass.Status.AffinityGroups = affinity.Resolved
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeAffinityGroupsResolved)
 	default:
 		// Status.AffinityGroups is deliberately left as it was. It governs which memberships are
@@ -210,8 +198,8 @@ func (c *Controller) Reconcile(
 		// the fleet on the strength of a resolution that failed.
 		nodeClass.StatusConditions().SetFalse(
 			v1alpha1.ConditionTypeAffinityGroupsResolved,
-			affinity.reason,
-			affinity.message,
+			affinity.Reason,
+			affinity.Message,
 		)
 	}
 
@@ -251,10 +239,10 @@ func (c *Controller) Reconcile(
 	// Deliberately after the status patch. A launch that read the status a moment before a group was
 	// deleted would try to join a group that is gone, so the desired set is published first and only
 	// then is anything outside it torn down.
-	held, err := c.collectManagedGroups(
+	held, err := c.affinityGroups.Collect(
 		ctx,
 		nodeClass,
-		managedGroupIDs(nodeClass.Status.AffinityGroups),
+		affinitygroup.ManagedIDs(nodeClass.Status.AffinityGroups),
 	)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
@@ -288,7 +276,7 @@ func (c *Controller) finalize(
 		return reconcile.Result{}, nil
 	}
 
-	held, err := c.collectManagedGroups(ctx, nodeClass, nil)
+	held, err := c.affinityGroups.Collect(ctx, nodeClass, nil)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
 	}

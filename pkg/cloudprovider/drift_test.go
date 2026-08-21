@@ -6,6 +6,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
@@ -39,6 +40,7 @@ func testDrifters() []providers.Drifter {
 		subnet.NewProvider(nil, 0),
 		sshkey.NewProvider(nil, 0),
 		ippool.NewProvider(nil, 0),
+		affinitygroup.NewProvider(nil, "", 0),
 	}
 }
 
