@@ -39,6 +39,11 @@
 // with no room for the shape. Asking for the start explicitly costs one more round trip and gets a
 // synchronous, unambiguous answer, which is worth considerably more.
 //
+// It sits under pkg/providers with the resolving providers so that everything talking to the Oxide
+// API about one resource is one directory, and nothing else about it is shared with them: a launch is
+// a write driven by a NodeClaim rather than a reading of a nodeclass's selectors, so there is nothing
+// here to cache and nothing here to drift.
+//
 // Nothing here waits for the guest to boot. Placement is what the launch has to establish, and the
 // start establishes it; whether the node then registers is Karpenter's to time out on, and it
 // already does.
