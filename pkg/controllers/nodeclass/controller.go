@@ -36,6 +36,16 @@ var kubeletArgsAlways = []string{"cloud-provider=external"}
 // growing the object unboundedly when a selector matches a large image list.
 const maxStatusImages = 3
 
+// resolveInterval is how often a nodeclass's selectors are re-evaluated.
+//
+// It is the poll interval as well as the resync: the reconcile is the only loop, so this is what
+// decides how soon a newly uploaded image a wildcard selector matches is launched. Five minutes is
+// affordable only because the providers cache -- image resolution re-resolves on every reconcile at
+// its own 5m TTL, while the other four are cache hits five reconciles out of six and cost no API
+// traffic at all. Before the providers existed this rate would have been a sixfold increase in
+// uncached Oxide API calls per nodeclass, including one VpcView per resolved subnet per pass.
+const resolveInterval = 5 * time.Minute
+
 // groupCollectionRequeue is how long a nodeclass waits before re-checking a managed affinity group
 // that is not empty yet. Emptying one is a fleet replacement, which is paced by disruption budgets,
 // so this only has to be short relative to a node's lifetime rather than to a node's replacement.
@@ -247,11 +257,11 @@ func (c *Controller) Reconcile(
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
 	}
-	requeue := 30 * time.Minute
+	requeue := resolveInterval
 	if held {
 		// A group waiting on its members to be replaced away. Nothing here can hurry that along, but
 		// checking back sooner than the resync is what makes a superseded group disappear promptly
-		// once the last node has left it, rather than half an hour later.
+		// once the last node has left it, rather than several minutes later.
 		requeue = groupCollectionRequeue
 	}
 	// Whichever comes first. The back-off expiring is the only thing that makes the nodeclass Ready
