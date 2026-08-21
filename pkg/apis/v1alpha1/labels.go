@@ -117,6 +117,25 @@ var (
 	// it was, so the type prefix is carried here to address the right endpoint to leave it on.
 	AnnotationAffinityGroups = apis.Group + "/affinity-groups"
 
+	// AnnotationSubnet is the ID of the subnet the instance's network interface was created in.
+	//
+	// One subnet, not the resolved set: a launch picks one of the selected subnets, so the set says
+	// what could have been used and only this says what was. Drift compares it back against the set,
+	// which is what makes a subnet leaving the set replace the nodes in it while a subnet joining the
+	// set replaces nothing.
+	AnnotationSubnet = apis.Group + "/subnet"
+
+	// AnnotationSSHKeys is the set of SSH key IDs copied to the instance at launch, sorted and
+	// comma-separated.
+	//
+	// Recorded by ID rather than by name because a key deleted and recreated under the same name
+	// carries different public key material, which is exactly the change worth replacing a node over.
+	AnnotationSSHKeys = apis.Group + "/ssh-keys"
+
+	// AnnotationIPPools is the set of IP pool IDs the instance's ephemeral external IPs were
+	// allocated from at launch, sorted and comma-separated. One IP is attached per resolved pool.
+	AnnotationIPPools = apis.Group + "/ip-pools"
+
 	AnnotationOxideNodeClassHash             = apis.Group + "/oxidenodeclass-hash"
 	AnnotationClusterNameTaggedCompatability = apis.CompatibilityGroup + "/cluster-name-tagged"
 	AnnotationOxideNodeClassHashVersion      = apis.Group + "/oxidenodeclass-hash-version"

@@ -20,9 +20,7 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -394,13 +392,31 @@ func (c *OxideCloudProvider) Create(
 	if err != nil {
 		return nil, err
 	}
+	// The launch record: what this instance was actually launched from, as opposed to what the
+	// nodeclass would launch from now. Drift is the difference between the two, and only this side of
+	// it can be recorded here -- the other side moves whenever the spec or the project does.
+	//
+	// The subnet is recorded singular because a launch picks one of the selected subnets: the resolved
+	// set says what could have been used, and only this says what was. The keys and pools are recorded
+	// as the whole set, since a launch uses all of them.
+	resolvedNodeClaim.Annotations = lo.Assign(resolvedNodeClaim.Annotations, map[string]string{
+		v1alpha1.AnnotationOxideNodeClassHash:        nodeClass.Hash(),
+		v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
+		v1alpha1.AnnotationSubnet:                    subnet.ID,
+		// Written even when empty, which is what tells a node launched with no keys apart from one
+		// launched before there was a record to keep. The first drifts when a key is added; the
+		// second cannot be compared at all and never drifts.
+		v1alpha1.AnnotationSSHKeys: v1alpha1.EncodeIDs(
+			v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys),
+		),
+		v1alpha1.AnnotationIPPools: v1alpha1.EncodeIDs(
+			v1alpha1.IPPoolIDs(nodeClass.Status.IPPools),
+		),
+	})
 	// Recorded so that a group added to the desired set after this launch is visible as drift, and so
 	// that a group removed from it can still be left. The desired set alone cannot answer either
 	// question: it says what an instance should be in, not what this one actually joined.
 	if len(nodeClass.Status.AffinityGroups) > 0 {
-		if resolvedNodeClaim.Annotations == nil {
-			resolvedNodeClaim.Annotations = map[string]string{}
-		}
 		resolvedNodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
 			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
 		)
@@ -557,55 +573,6 @@ func (c *OxideCloudProvider) GetInstanceTypes(
 	*karpcorev1.NodePool,
 ) ([]*cloudprovider.InstanceType, error) {
 	return c.instanceTypeProvider.InstanceTypes(), nil
-}
-
-// DriftReasonAffinityGroup is reported when a node is not in a group its nodeclass now says every
-// instance should be in. Replacing it is the only way it can join, since a group is joined at launch.
-const DriftReasonAffinityGroup cloudprovider.DriftReason = "AffinityGroup"
-
-// IsDrifted returns whether a NodeClaim has drifted from the provisioning requirements
-// it is tied to.
-//
-// Affinity groups are compared as resolved group IDs rather than through the nodeclass hash, because
-// the two directions are not symmetric and a hash cannot tell them apart. A group being added has to
-// replace nodes, since an instance can only join a group at launch, where its placement is decided. A
-// group being removed must not, since the instance is simply taken out of the group in place. A hash
-// sees both as an edit; a set difference sees only the additions.
-//
-// Resolved rather than declared for the same reason: a selector rewritten to name the group it
-// already matched has changed nothing about where the instance sits, and must not replace it.
-func (c *OxideCloudProvider) IsDrifted(
-	ctx context.Context,
-	nodeClaim *karpcorev1.NodeClaim,
-) (cloudprovider.DriftReason, error) {
-	nodeClass := &v1alpha1.OxideNodeClass{}
-	if err := c.kubeClient.Get(
-		ctx,
-		client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name},
-		nodeClass,
-	); err != nil {
-		// A nodeclass that is gone says nothing about where its nodes should sit, and the nodes are
-		// about to be torn down with it in any case.
-		if kerrors.IsNotFound(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
-	}
-
-	// Additions only. A missing annotation therefore needs no special case: it is the empty set, and
-	// the empty set drifts exactly when something is desired, which is what makes a node launched
-	// before the feature existed drift once groups are configured and not before.
-	desired := v1alpha1.AffinityGroupIDs(nodeClass.Status.AffinityGroups)
-	recorded := sets.New[string]()
-	for _, ref := range v1alpha1.ParseAffinityGroups(
-		nodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups],
-	) {
-		recorded.Insert(ref.ID)
-	}
-	if desired.Difference(recorded).Len() > 0 {
-		return DriftReasonAffinityGroup, nil
-	}
-	return "", nil
 }
 
 // noCandidatesError explains that every instance type the NodeClaim could have used is currently

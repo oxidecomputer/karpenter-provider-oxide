@@ -195,6 +195,10 @@ func run() error {
 			affinityPolicy,
 			bootstrappers,
 		),
+		// Separate from the reconciler above so that the hash a nodeclass publishes cannot be held
+		// back by a failure to reach the Oxide API. A launch records the hash it computed, so a stamp
+		// lagging the spec reads as every node launched in the meantime having drifted.
+		nodeclass.NewHashController(karpcore.GetClient()),
 		// Registered unconditionally. The refusal history it reports is there whether or not inventory
 		// and quota awareness are, and a view that disappeared when they were switched off would be
 		// missing exactly when an operator is trying to work out why nothing is scaling.

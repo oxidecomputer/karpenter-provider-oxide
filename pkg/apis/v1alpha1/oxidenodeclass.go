@@ -35,18 +35,34 @@ type OxideNodeClassSpec struct {
 	// ImageSelector is used to select an image to launch nodes with.
 	// If multiple images match then the most recently uploaded image is selected.
 	// Selectors are OR'd together, but terms within a selector are AND'd together
-	ImageSelector []ImageSelector `json:"imageSelector,omitempty"`
+	//
+	// Excluded from the nodeclass hash for the reason every selector is: what a selector matches is a
+	// function of the project as well as of the nodeclass, so drift is decided by comparing resolved
+	// state rather than by hashing the terms. A selector rewritten to name the image it already
+	// matched has changed nothing about the running nodes, and a new image uploaded into an unchanged
+	// wildcard has. See IsDrifted.
+	ImageSelector []ImageSelector `json:"imageSelector,omitempty" hash:"ignore"`
 	// BootDiskSize is the stoage capcity of the boot disk
-	BootDiskSize resource.Quantity `json:"bootDiskSize,omitempty"`
+	//
+	// Excluded from the reflected part of the nodeclass hash and folded in as a byte count instead:
+	// a resource.Quantity keeps its value in unexported fields and its formatting in an exported one,
+	// so reflection over it sees how the size was written rather than what it is. See Hash.
+	BootDiskSize resource.Quantity `json:"bootDiskSize,omitempty" hash:"ignore"`
 	// SubnetSelector is used to select subnets to launch nodes into.
 	// Multiple subnets can match. Node launches will use subnets with available IP space.
-	SubnetSelector []SubnetSelector `json:"subnetSelector,omitempty"`
+	//
+	// Excluded from the nodeclass hash for the same reason ImageSelector is.
+	SubnetSelector []SubnetSelector `json:"subnetSelector,omitempty" hash:"ignore"`
 	// SSHKeySelector is used to select SSH keys that will be copied to the node
+	//
+	// Excluded from the nodeclass hash for the same reason ImageSelector is.
 	// +optional
-	SSHKeySelector []SSHKeySelector `json:"sshKeySelector,omitempty"`
+	SSHKeySelector []SSHKeySelector `json:"sshKeySelector,omitempty" hash:"ignore"`
 	// IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from
+	//
+	// Excluded from the nodeclass hash for the same reason ImageSelector is.
 	// +optional
-	IPPoolSelector []IPPoolSelector `json:"ipPoolSelector,omitempty"`
+	IPPoolSelector []IPPoolSelector `json:"ipPoolSelector,omitempty" hash:"ignore"`
 	// Affinity controls which Oxide affinity and anti-affinity groups launched instances join.
 	// +optional
 	Affinity *Affinity `json:"affinity,omitempty"`
@@ -300,12 +316,33 @@ type OxideNodeClass struct {
 // 1. A field changes its default value for an existing field that is already hashed
 // 2. A field is added to the hash calculation with an already-set value
 // 3. A field is removed from the hash calculations
+//
+// Bumping it is what stops such a change from replacing every node in the cluster over a hash that
+// moved for reasons the nodeclass did not: a NodeClaim recorded at a different version is not
+// compared, and is instead re-stamped with the current hash. See pkg/controllers/nodeclass/hash.go.
 const OxideNodeClassHashVersion = "v0"
 
-func (in *OxideNodeClass) Hash(caBundle *string) string {
+// Hash is the fingerprint of everything about a nodeclass that is fixed into an instance at launch
+// and cannot be changed afterwards: its user data and environment, how it bootstraps, the args its
+// kubelet runs with, the size of its boot disk. A node whose hash no longer matches its nodeclass
+// has drifted, because the only way to give it the current configuration is to launch a new one.
+//
+// Deliberately not everything in the spec. The selector fields carry hash:"ignore" because what they
+// match depends on the project as much as on the nodeclass, so their drift is decided by comparing
+// resolved state instead -- otherwise a wildcard that quietly matched a newly uploaded image would
+// never drift, and a selector rewritten to name the resource it already matched always would.
+//
+// A secret referenced by an EnvVar is hashed as the reference, not as its contents. Rotating the
+// secret in place therefore replaces no nodes; the nodes that come after it pick the new value up.
+func (in *OxideNodeClass) Hash() string {
 	return fmt.Sprint(lo.Must(hashstructure.Hash([]any{
 		in.Spec,
-		lo.FromPtr(caBundle),
+		// The boot disk as a byte count, which is the only form of it that hashes stably. Its
+		// unexported value fields are invisible to reflection, so without this a resize would replace
+		// nothing and report nothing; its exported Format field is visible, so hashing the struct
+		// would instead make "1Gi" and "1G" -- and a quantity that has been through a round trip --
+		// look like different disks.
+		in.Spec.BootDiskSize.Value(),
 	}, hashstructure.FormatV2, &hashstructure.HashOptions{
 		SlicesAsSets:    true,
 		IgnoreZeroValue: true,

@@ -172,7 +172,12 @@ spec:
                 anyOf:
                 - type: integer
                 - type: string
-                description: BootDiskSize is the stoage capcity of the boot disk
+                description: |-
+                  BootDiskSize is the stoage capcity of the boot disk
+
+                  Excluded from the reflected part of the nodeclass hash and folded in as a byte count instead:
+                  a resource.Quantity keeps its value in unexported fields and its formatting in an exported one,
+                  so reflection over it sees how the size was written rather than what it is. See Hash.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
               bootstrap:
@@ -246,6 +251,12 @@ spec:
                   ImageSelector is used to select an image to launch nodes with.
                   If multiple images match then the most recently uploaded image is selected.
                   Selectors are OR'd together, but terms within a selector are AND'd together
+
+                  Excluded from the nodeclass hash for the reason every selector is: what a selector matches is a
+                  function of the project as well as of the nodeclass, so drift is decided by comparing resolved
+                  state rather than by hashing the terms. A selector rewritten to name the image it already
+                  matched has changed nothing about the running nodes, and a new image uploaded into an unchanged
+                  wildcard has. See IsDrifted.
                 items:
                   properties:
                     id:
@@ -287,8 +298,10 @@ spec:
                   type: object
                 type: array
               ipPoolSelector:
-                description: IPPoolSelector is used to select IP Pools to allocate
-                  ephemeral IPs from
+                description: |-
+                  IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from
+
+                  Excluded from the nodeclass hash for the same reason ImageSelector is.
                 items:
                   properties:
                     default:
@@ -320,8 +333,10 @@ spec:
                   while kubeadm joins on the kube-apiserver port (6443).
                 type: string
               sshKeySelector:
-                description: SSHKeySelector is used to select SSH keys that will be
-                  copied to the node
+                description: |-
+                  SSHKeySelector is used to select SSH keys that will be copied to the node
+
+                  Excluded from the nodeclass hash for the same reason ImageSelector is.
                 items:
                   properties:
                     id:
@@ -336,6 +351,8 @@ spec:
                 description: |-
                   SubnetSelector is used to select subnets to launch nodes into.
                   Multiple subnets can match. Node launches will use subnets with available IP space.
+
+                  Excluded from the nodeclass hash for the same reason ImageSelector is.
                 items:
                   properties:
                     id:

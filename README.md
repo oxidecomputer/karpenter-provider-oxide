@@ -276,6 +276,64 @@ spec:
 EOF
 ```
 
+## Drift
+
+An Oxide instance is configured once, at launch: its image, its interface's subnet, its SSH keys, its
+external addresses, its affinity groups and its user data are all fixed by the create call and cannot
+be revisited afterwards. So when a nodeclass no longer describes the nodes running from it, the only
+way to close the gap is to launch new ones. That is drift, and Karpenter paces the replacements with
+whatever [disruption budgets](https://karpenter.sh/docs/concepts/disruption/) the NodePool sets.
+
+Every `OxideNodeClass` parameter is covered, in one of two ways:
+
+| Changed                                                             | Drifts as      | Detected by                                       |
+| ------------------------------------------------------------------- | -------------- | ------------------------------------------------- |
+| `userData`, `env`, `server`, `kubeletArgs`, `bootstrap`, `bootDiskSize` | `NodeClassDrift` | a hash of the spec                             |
+| `imageSelector`, or a newer image matching an unchanged one          | `ImageDrift`   | `status.images[0]` vs. the node's image           |
+| `subnetSelector`                                                     | `SubnetDrift`  | `status.subnets` vs. the subnet the node launched in |
+| `sshKeySelector`                                                     | `SSHKeyDrift`  | `status.sshKeys` vs. the keys copied at launch    |
+| `ipPoolSelector`                                                     | `IPPoolDrift`  | `status.ipPools` vs. the pools the node's IPs came from |
+| `affinity`                                                           | `AffinityGroup` | `status.affinityGroups` vs. the groups the node joined |
+
+The split is not arbitrary. What the spec states outright can only change when someone edits the
+object, so a hash detects it with no API calls. What the spec merely *selects* cannot be hashed
+usefully: a selector's meaning depends on the project as much as on the nodeclass, so hashing the
+terms would both miss the change that matters most — a `version: 1.2.*` wildcard quietly matching a
+newly uploaded image — and report one that does not matter at all, a selector rewritten to name the
+image it already matched. Those are compared as resolved state instead, against a record each launch
+leaves on its NodeClaim.
+
+Nor are the comparisons all symmetric, because not every difference is one a node has to be replaced
+over:
+
+- A subnet **leaving** `subnetSelector` replaces the nodes in it; a subnet **joining** it replaces
+  nothing, since a launch picks one of the selected subnets and any of them is a valid place to be.
+- An affinity group **added** replaces nodes, since a group is joined at launch, where the rack
+  decides placement. A group **removed** does not: the membership is dropped from the running
+  instance in place.
+- SSH keys and IP pools are compared as whole sets in both directions. Nothing removes a key from a
+  running node or takes an address back, so launching again is the only way to make either match.
+
+A few deliberate non-events:
+
+- **A resolution that finds nothing is not drift.** An empty `status.images` or `status.subnets` is a
+  selector that matched nothing — reported on the nodeclass's conditions — not an instruction to take
+  every node down and replace it with one that cannot launch.
+- **A node launched before this provider recorded a launch record does not drift.** There is nothing
+  to compare it against, and inventing a comparison would mean an upgrade of Karpenter replacing a
+  fleet. Such nodes adopt the current hash on the first reconcile and are compared from then on.
+- **A Secret referenced from `env` is hashed as the reference, not as its contents.** Rotating it in
+  place replaces no nodes; the nodes launched after it pick the new value up.
+
+Why a node is being replaced is on the NodeClaim:
+
+```
+$ kubectl get nodeclaim -o custom-columns='NAME:.metadata.name,DRIFTED:.status.conditions[?(@.type=="Drifted")].reason'
+NAME            DRIFTED
+default-4mzqp   ImageDrift
+default-7xk2n   <none>
+```
+
 ## Silo Quota
 
 A silo has a quota — vCPUs, memory and storage it is entitled to — separate from whether the rack has
