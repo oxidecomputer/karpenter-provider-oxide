@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -24,6 +26,15 @@ const (
 	groupID   = "77777777-0000-4000-8000-000000000001"
 	groupIDB  = "77777777-0000-4000-8000-000000000002"
 )
+
+// testDrifters is the drifter set main.go wires, in the same order, since which reason wins when
+// several apply is that order. Constructed with no Oxide client because deciding drift never calls
+// the API: it compares the launch record against the nodeclass's published status.
+func testDrifters() []providers.Drifter {
+	return []providers.Drifter{
+		image.NewProvider(nil, 0),
+	}
+}
 
 // launched is a NodeClaim carrying the full launch record a current launch leaves behind, matching
 // the nodeclass built by resolved(). Each case then perturbs one side of one comparison, so what a
@@ -93,7 +104,7 @@ func TestIsDrifted(t *testing.T) {
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
 				nodeClass.Annotations[v1alpha1.AnnotationOxideNodeClassHash] = "changed"
 			},
-			want: DriftReasonNodeClass,
+			want: providers.DriftReasonNodeClass,
 		},
 		{
 			name: "a nodeclass that has not been stamped yet cannot be compared",
@@ -119,7 +130,7 @@ func TestIsDrifted(t *testing.T) {
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
 				nodeClass.Status.Images = []v1alpha1.OxideImage{{ID: imageIDB}, {ID: imageID}}
 			},
-			want: DriftReasonImage,
+			want: providers.DriftReasonImage,
 		},
 		{
 			name: "a runner-up image the node is not running is not drift",
@@ -138,7 +149,7 @@ func TestIsDrifted(t *testing.T) {
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
 				nodeClass.Status.Subnets = []v1alpha1.OxideSubnet{{ID: subnetIDB}}
 			},
-			want: DriftReasonSubnet,
+			want: providers.DriftReasonSubnet,
 		},
 		{
 			name: "a subnet joining the selected set is not, since any of them is a valid place to be",
@@ -172,21 +183,21 @@ func TestIsDrifted(t *testing.T) {
 					{ID: sshKeyIDB},
 				}
 			},
-			want: DriftReasonSSHKey,
+			want: providers.DriftReasonSSHKey,
 		},
 		{
 			name: "and an SSH key removed has to stop reaching it",
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
 				nodeClass.Status.SSHKeys = nil
 			},
-			want: DriftReasonSSHKey,
+			want: providers.DriftReasonSSHKey,
 		},
 		{
 			name: "a node launched with no keys is not the same as one with no record of them",
 			nodeClaim: func(nodeClaim *karpv1.NodeClaim) {
 				nodeClaim.Annotations[v1alpha1.AnnotationSSHKeys] = ""
 			},
-			want: DriftReasonSSHKey,
+			want: providers.DriftReasonSSHKey,
 		},
 		{
 			name: "a node with no record of its keys cannot be compared",
@@ -202,7 +213,7 @@ func TestIsDrifted(t *testing.T) {
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
 				nodeClass.Status.IPPools = nil
 			},
-			want: DriftReasonIPPool,
+			want: providers.DriftReasonIPPool,
 		},
 		{
 			name: "a group added to the desired set can only be joined by a new node",
@@ -215,7 +226,7 @@ func TestIsDrifted(t *testing.T) {
 					},
 				)
 			},
-			want: DriftReasonAffinityGroup,
+			want: providers.DriftReasonAffinityGroup,
 		},
 		{
 			name: "a group removed from it is left in place instead",
@@ -229,7 +240,7 @@ func TestIsDrifted(t *testing.T) {
 				nodeClass.Annotations[v1alpha1.AnnotationOxideNodeClassHash] = "changed"
 				nodeClass.Status.Images = []v1alpha1.OxideImage{{ID: imageIDB}}
 			},
-			want: DriftReasonNodeClass,
+			want: providers.DriftReasonNodeClass,
 		},
 	}
 
@@ -248,6 +259,7 @@ func TestIsDrifted(t *testing.T) {
 					WithScheme(scheme.Scheme).
 					WithObjects(nodeClass).
 					Build(),
+				drifters: testDrifters(),
 			}
 
 			got, err := c.IsDrifted(context.Background(), nodeClaim)
@@ -266,6 +278,7 @@ func TestIsDrifted(t *testing.T) {
 func TestIsDriftedWithoutANodeClass(t *testing.T) {
 	c := &OxideCloudProvider{
 		kubeClient: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		drifters:   testDrifters(),
 	}
 
 	got, err := c.IsDrifted(context.Background(), launched("hash-1"))

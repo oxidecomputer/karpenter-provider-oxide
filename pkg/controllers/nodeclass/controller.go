@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -13,13 +12,12 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -53,6 +51,9 @@ type Controller struct {
 	// project is the Oxide project instances are launched into, which is what scopes the resources
 	// resolved by name rather than by ID.
 	project string
+	// images resolves and caches what the nodeclass's image selectors match. Held as the provider
+	// rather than called as a function so that the cache is shared across every nodeclass.
+	images *image.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -64,6 +65,7 @@ func NewController(
 	reader client.Reader,
 	oxideClient *oxide.Client,
 	project string,
+	images *image.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
@@ -72,6 +74,7 @@ func NewController(
 		reader:         reader,
 		oxideClient:    oxideClient,
 		project:        project,
+		images:         images,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
@@ -137,18 +140,19 @@ func (c *Controller) Reconcile(
 		)
 	}
 
-	images, err := c.resolveImages(ctx, nodeClass.Spec.ImageSelector)
+	images, err := c.images.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve image: %w", err)
 	}
+	logStale(ctx, "image", images.Stale, images.Age)
 	// Only the first image is ever launched. The runners-up are still reported so that a wildcard
 	// selector can be understood from the nodeclass alone: what it matched, and why the winner won.
-	nodeClass.Status.Images = images[:min(len(images), maxStatusImages)]
-	if len(images) == 0 {
+	nodeClass.Status.Images = images.Resolved[:min(len(images.Resolved), maxStatusImages)]
+	if len(images.Resolved) == 0 {
 		nodeClass.StatusConditions().SetFalse(
 			v1alpha1.ConditionTypeImagesResolved,
 			"ImagesNotFound",
-			describeImageSelectors(nodeClass.Spec.ImageSelector),
+			image.DescribeSelectors(images.Unmatched),
 		)
 	} else {
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesResolved)
@@ -520,121 +524,18 @@ func (c *Controller) resolveSSHKeys(
 	return sshKeys, nil
 }
 
-// describeImageSelectors renders the image selectors back as the terms they were written with, so
-// the ImagesResolved condition can say what was looked for rather than only that nothing was found.
-func describeImageSelectors(selectors []v1alpha1.ImageSelector) string {
-	if len(selectors) == 0 {
-		return "no image selectors are configured"
+// logStale notes that a resolution was served from a reading nothing has been able to refresh.
+//
+// Quiet on purpose. A reading that has not meaningfully aged is still worth publishing, so this is
+// the whole of the response to a failure inside the staleness ceiling; past the ceiling the provider
+// returns the error instead and the reconcile fails loudly on its own.
+func logStale(ctx context.Context, resource string, stale bool, age time.Duration) {
+	if !stale {
+		return
 	}
-	described := lo.Map(selectors, func(selector v1alpha1.ImageSelector, _ int) string {
-		terms := []string{}
-		for _, term := range []struct{ key, value string }{
-			{"id", selector.ID},
-			{"name", selector.Name},
-			{"os", selector.OS},
-			{"version", selector.Version},
-			{"project", selector.Project},
-		} {
-			if term.value != "" {
-				terms = append(terms, fmt.Sprintf("%s=%s", term.key, term.value))
-			}
-		}
-		if len(terms) == 0 {
-			return "{}"
-		}
-		return "{" + strings.Join(terms, ",") + "}"
-	})
-	return "no images matched " + strings.Join(described, " or ")
-}
-
-func (c *Controller) resolveImages(
-	ctx context.Context,
-	imageSelectors []v1alpha1.ImageSelector,
-) ([]v1alpha1.OxideImage, error) {
-	var resolvedImages []oxide.Image
-	var listImageSelector []v1alpha1.ImageSelector
-	// Check for direct query images via name or ID
-	for _, imageSelector := range imageSelectors {
-		nameOrID := ""
-		project := imageSelector.Project
-		if imageSelector.ID != "" {
-			nameOrID = imageSelector.ID
-			// project cannot be used to query if ID is used
-			project = ""
-		} else if imageSelector.Name != "" && !strings.Contains(imageSelector.Name, "*") {
-			nameOrID = imageSelector.Name
-		} else {
-			// A wildcard name is not a name the API can look up, so it is resolved by listing and
-			// matching like the other non-exact terms.
-			listImageSelector = append(listImageSelector, imageSelector)
-			continue
-		}
-		image, err := c.oxideClient.ImageView(ctx, oxide.ImageViewParams{
-			Image:   oxide.NameOrId(nameOrID),
-			Project: oxide.NameOrId(project),
-		})
-		if err != nil {
-			if errors.Is(err, oxide.ErrObjectNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf(
-				"image %q from project %q: %w",
-				nameOrID,
-				imageSelector.Project,
-				err,
-			)
-		}
-		resolvedImages = append(resolvedImages, *image)
-	}
-
-	// No listImageSelector has an ID or an exact name, else it would have been looked up via a direct query (ImageView).
-	// To efficiently make API calls, we now group by project.
-	projectToSelectors := lo.GroupBy(
-		listImageSelector,
-		func(selector v1alpha1.ImageSelector) string { return selector.Project },
+	log.FromContext(ctx).V(1).Info(
+		"serving a resource resolution from a reading that could not be refreshed",
+		"resource", resource,
+		"age", age.Round(time.Second).String(),
 	)
-	for project, selectors := range projectToSelectors {
-		images, err := c.oxideClient.ImageListAllPages(ctx, oxide.ImageListParams{
-			Project: oxide.NameOrId(project),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list error from project %q", project)
-		}
-		for _, selector := range selectors {
-			for _, image := range images {
-				if selector.Name != "" && !resolver.MatchName(selector.Name, string(image.Name)) {
-					continue
-				}
-				if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
-					continue
-				}
-				if selector.Version != "" &&
-					!resolver.MatchVersion(selector.Version, image.Version) {
-					continue
-				}
-				resolvedImages = append(resolvedImages, image)
-			}
-		}
-	}
-	resolvedImages = lo.Uniq(resolvedImages)
-
-	// Sort by TimeCreate in descending order
-	// Secondary sort is on ID which is guaranteed to be unique
-	slices.SortStableFunc(resolvedImages, func(a, b oxide.Image) int {
-		if b.TimeCreated.Compare(*a.TimeCreated) == 0 {
-			return strings.Compare(b.Id, a.Id)
-		}
-		return b.TimeCreated.Compare(*a.TimeCreated)
-	})
-
-	return lo.Map(resolvedImages, func(image oxide.Image, _ int) v1alpha1.OxideImage {
-		return v1alpha1.OxideImage{
-			Project:     image.ProjectId,
-			ID:          image.Id,
-			Name:        string(image.Name),
-			OS:          image.Os,
-			Version:     image.Version,
-			TimeCreated: metav1.NewTime(*image.TimeCreated),
-		}
-	}), nil
 }

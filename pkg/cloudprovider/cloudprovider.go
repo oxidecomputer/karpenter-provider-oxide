@@ -16,6 +16,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -44,6 +45,10 @@ type OxideCloudProvider struct {
 	affinityPolicy *affinitypolicy.Tracker
 	bootstrappers  bootstrap.Bootstrappers
 	repairPolicies []cloudprovider.RepairPolicy
+	// drifters decide drift for one resolved resource each, in the order the nodeclass controller
+	// resolves them. Which reason wins when several apply is therefore this slice's order, so it is
+	// the caller's to fix rather than something assembled here.
+	drifters []providers.Drifter
 }
 
 func NewOxideCloudProvider(
@@ -54,6 +59,7 @@ func NewOxideCloudProvider(
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 	repairPolicies []cloudprovider.RepairPolicy,
+	drifters []providers.Drifter,
 ) *OxideCloudProvider {
 	return &OxideCloudProvider{
 		kubeClient: kubeClient,
@@ -79,6 +85,7 @@ func NewOxideCloudProvider(
 		affinityPolicy:       affinityPolicy,
 		bootstrappers:        bootstrappers,
 		repairPolicies:       repairPolicies,
+		drifters:             drifters,
 	}
 }
 

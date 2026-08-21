@@ -5,38 +5,13 @@ import (
 	"fmt"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/samber/lo"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
-)
-
-// Drift reasons, one per way a node can stop matching the nodeclass it came from. They are separate
-// because they are the text an operator reads on the NodeClaim to find out why a node is being
-// replaced, and "the nodeclass changed" is a poor answer when the nodeclass did not.
-const (
-	// DriftReasonNodeClass is a change to what a launch fixes into an instance and cannot revisit
-	// afterwards: user data, environment, bootstrap configuration, kubelet args, boot disk size.
-	// Detected by hash, since every one of those is declared on the spec and nothing outside
-	// Kubernetes can move it.
-	DriftReasonNodeClass cloudprovider.DriftReason = "NodeClassDrift"
-	// DriftReasonImage is a node running an image the nodeclass would no longer launch, whether
-	// because the selector changed or because a newer image matched the one it already had.
-	DriftReasonImage cloudprovider.DriftReason = "ImageDrift"
-	// DriftReasonSubnet is a node whose interface sits in a subnet the nodeclass no longer selects.
-	// An interface cannot be moved between subnets, so replacing the node is the only way out of one.
-	DriftReasonSubnet cloudprovider.DriftReason = "SubnetDrift"
-	// DriftReasonSSHKey is a node whose authorized keys are not the ones the nodeclass now selects.
-	// Keys are copied in at launch, so neither adding nor removing one reaches a running node.
-	DriftReasonSSHKey cloudprovider.DriftReason = "SSHKeyDrift"
-	// DriftReasonIPPool is a node whose ephemeral external addresses do not come from the pools the
-	// nodeclass now selects.
-	DriftReasonIPPool cloudprovider.DriftReason = "IPPoolDrift"
-	// DriftReasonAffinityGroup is reported when a node is not in a group its nodeclass now says every
-	// instance should be in. Replacing it is the only way it can join, since a group is joined at launch.
-	DriftReasonAffinityGroup cloudprovider.DriftReason = "AffinityGroup"
 )
 
 // IsDrifted returns whether a NodeClaim has drifted from the provisioning requirements it is tied to.
@@ -83,9 +58,18 @@ func (c *OxideCloudProvider) IsDrifted(
 
 	// Cheapest and broadest first, so a spec edit is reported as the spec edit it is rather than as
 	// whichever resolved field happens to be checked first.
+	if reason := nodeClassDrift(nodeClaim, nodeClass); reason != "" {
+		return reason, nil
+	}
+	// Then one resource at a time, in the order the nodeclass controller resolves them. Each
+	// provider owns the comparison for its own resource, because the direction of that comparison is
+	// a claim about what can be changed in place -- see the providers themselves.
+	for _, drifter := range c.drifters {
+		if reason := drifter.DriftReason(nodeClaim, nodeClass); reason != "" {
+			return reason, nil
+		}
+	}
 	for _, drifted := range []func(*karpcorev1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason{
-		nodeClassDrift,
-		imageDrift,
 		subnetDrift,
 		sshKeyDrift,
 		ipPoolDrift,
@@ -121,29 +105,7 @@ func nodeClassDrift(
 	if nodeClassHashVersion != nodeClaimHashVersion {
 		return ""
 	}
-	return lo.Ternary(nodeClassHash != nodeClaimHash, DriftReasonNodeClass, "")
-}
-
-// imageDrift compares the image the instance booted from against the one the nodeclass would launch
-// now, which is the first of the resolved images.
-//
-// Only the first: the runners-up are reported so a wildcard selector can be understood, not because a
-// node is entitled to any of them. Nodes are consequently rolled onto a newly uploaded image that a
-// wildcard matches, which is the point of writing a wildcard rather than pinning a version.
-//
-// An empty resolved list is not drift. It is a resolution that found nothing, already reported as
-// ImagesResolved being false, and replacing the fleet over it would take every node down to launch
-// replacements that cannot launch.
-func imageDrift(
-	nodeClaim *karpcorev1.NodeClaim,
-	nodeClass *v1alpha1.OxideNodeClass,
-) cloudprovider.DriftReason {
-	launched := nodeClaim.Status.ImageID
-	desired := lo.FirstOrEmpty(nodeClass.Status.Images).ID
-	if launched == "" || desired == "" {
-		return ""
-	}
-	return lo.Ternary(launched != desired, DriftReasonImage, "")
+	return lo.Ternary(nodeClassHash != nodeClaimHash, providers.DriftReasonNodeClass, "")
 }
 
 // subnetDrift asks whether the subnet the instance's interface was created in is still one the
@@ -165,7 +127,7 @@ func subnetDrift(
 	if desired.Len() == 0 {
 		return ""
 	}
-	return lo.Ternary(!desired.Has(recorded), DriftReasonSubnet, "")
+	return lo.Ternary(!desired.Has(recorded), providers.DriftReasonSubnet, "")
 }
 
 // sshKeyDrift compares the keys copied into the instance at launch against the keys the nodeclass
@@ -180,7 +142,7 @@ func sshKeyDrift(
 		return ""
 	}
 	desired := sets.New(v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys)...)
-	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), DriftReasonSSHKey, "")
+	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), providers.DriftReasonSSHKey, "")
 }
 
 // ipPoolDrift compares the pools the instance's external addresses were allocated from at launch
@@ -195,7 +157,7 @@ func ipPoolDrift(
 		return ""
 	}
 	desired := sets.New(v1alpha1.IPPoolIDs(nodeClass.Status.IPPools)...)
-	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), DriftReasonIPPool, "")
+	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), providers.DriftReasonIPPool, "")
 }
 
 // affinityGroupDrift reports the groups the nodeclass wants that this instance is not in.
@@ -215,5 +177,9 @@ func affinityGroupDrift(
 	) {
 		recorded.Insert(ref.ID)
 	}
-	return lo.Ternary(desired.Difference(recorded).Len() > 0, DriftReasonAffinityGroup, "")
+	return lo.Ternary(
+		desired.Difference(recorded).Len() > 0,
+		providers.DriftReasonAffinityGroup,
+		"",
+	)
 }
