@@ -9,6 +9,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -359,7 +360,7 @@ func (c *Controller) resolveGroups(
 	for _, selector := range wildcards {
 		matched := false
 		for _, group := range groups {
-			if !matchName(selector.Name, group.name) {
+			if !resolver.MatchName(selector.Name, group.name) {
 				continue
 			}
 			// Every match is joined rather than one winner being picked, because an instance can

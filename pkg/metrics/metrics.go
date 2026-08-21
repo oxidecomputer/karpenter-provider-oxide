@@ -38,6 +38,7 @@ const (
 
 	capacitySubsystem  = "capacity"
 	inventorySubsystem = "inventory"
+	providerSubsystem  = "provider"
 
 	// instanceTypeLabel is the shape a series is about, as an instance type name.
 	instanceTypeLabel = "instance_type"
@@ -47,6 +48,10 @@ const (
 	// sets defined by the caller, never free-form strings.
 	reasonLabel = "reason"
 	resultLabel = "result"
+	// providerLabel is which resource provider a series is about, as the provider's own name. One
+	// value per package under pkg/providers, so the set is fixed at compile time rather than by
+	// anything an operator writes.
+	providerLabel = "provider"
 )
 
 // Results of trying to reserve the single trial launch a reopened shape allows.
@@ -56,6 +61,15 @@ const (
 	// ProbeRejected is a launch turned away because another one is already testing the shape. It is
 	// not a capacity failure, and a burst of them means the interlock is doing its job.
 	ProbeRejected = "rejected"
+)
+
+// Outcomes of a provider resolving its selectors against the Oxide API.
+const (
+	// ResolutionSuccess is a resolution that reached the API and produced a reading.
+	ResolutionSuccess = "success"
+	// ResolutionError is a resolution that could not be made, whether or not a previous reading was
+	// served in its place.
+	ResolutionError = "error"
 )
 
 // Reasons a shape stops being out of consideration.
@@ -247,6 +261,60 @@ var (
 		Name:      "largest_feasible_memory_bytes",
 		Help:      "Memory in bytes of the largest instance shape the rack could place right now.",
 	})
+
+	// ProviderCacheHits counts resolutions served from a cached reading, which is the series that
+	// says whether the cache is doing anything: read against ProviderResolutions it is the share of
+	// reconciles that cost no Oxide API traffic at all.
+	ProviderCacheHits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: providerSubsystem,
+		Name:      "cache_hits_total",
+		Help:      "Number of resource resolutions served from a cached reading, without an Oxide API call.",
+	}, []string{providerLabel})
+
+	// ProviderResolutions counts resolutions that actually went to the API, by how they turned out.
+	ProviderResolutions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: providerSubsystem,
+		Name:      "resolutions_total",
+		Help: "Number of resource resolutions made against the Oxide API, " +
+			"by whether the resolution succeeded.",
+	}, []string{providerLabel, resultLabel})
+
+	// ProviderStaleServed counts failed resolutions absorbed by serving the previous reading.
+	//
+	// This is the early warning worth alerting on. A steady rate means nodeclass status is being
+	// republished from readings nobody can refresh, and it is what precedes the loud failure that
+	// arrives once a reading passes the staleness ceiling and the reconcile starts erroring.
+	ProviderStaleServed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: providerSubsystem,
+		Name:      "stale_served_total",
+		Help: "Number of failed resource resolutions served from a previous reading " +
+			"rather than returned as an error.",
+	}, []string{providerLabel})
+
+	// ProviderOldestEntryAge is the worst-case staleness of anything a provider is currently serving.
+	// Per provider rather than per cache key, because a key is a selector fingerprint and there is no
+	// bound on how many of those a cluster's nodeclasses produce.
+	ProviderOldestEntryAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: providerSubsystem,
+		Name:      "oldest_entry_age_seconds",
+		Help: "Age in seconds of the oldest reading a resource provider is currently holding. " +
+			"Zero when it holds none.",
+	}, []string{providerLabel})
+
+	// ProviderCacheEntries is how many readings a provider holds. A cache key is a fingerprint of the
+	// selectors that produced the reading, so this should track the number of distinct selector sets
+	// across the cluster's nodeclasses; a count that climbs without new nodeclasses means a
+	// fingerprint is being taken over something that changes every reconcile.
+	ProviderCacheEntries = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: providerSubsystem,
+		Name:      "cache_entries",
+		Help:      "Number of cached readings a resource provider currently holds.",
+	}, []string{providerLabel})
 )
 
 func init() {
@@ -269,6 +337,11 @@ func init() {
 		SledFreeMemoryBytes,
 		LargestFeasibleCPUs,
 		LargestFeasibleMemoryBytes,
+		ProviderCacheHits,
+		ProviderResolutions,
+		ProviderStaleServed,
+		ProviderOldestEntryAge,
+		ProviderCacheEntries,
 	)
 }
 

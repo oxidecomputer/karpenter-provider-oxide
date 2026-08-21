@@ -13,6 +13,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -601,13 +602,14 @@ func (c *Controller) resolveImages(
 		}
 		for _, selector := range selectors {
 			for _, image := range images {
-				if selector.Name != "" && !matchName(selector.Name, string(image.Name)) {
+				if selector.Name != "" && !resolver.MatchName(selector.Name, string(image.Name)) {
 					continue
 				}
 				if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
 					continue
 				}
-				if selector.Version != "" && !matchVersion(selector.Version, image.Version) {
+				if selector.Version != "" &&
+					!resolver.MatchVersion(selector.Version, image.Version) {
 					continue
 				}
 				resolvedImages = append(resolvedImages, image)

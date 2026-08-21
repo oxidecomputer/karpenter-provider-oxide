@@ -1,4 +1,4 @@
-package nodeclass
+package resolver
 
 import "testing"
 
@@ -61,8 +61,8 @@ func TestMatchVersion(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := matchVersion(tt.pattern, tt.version); got != tt.want {
-			t.Errorf("matchVersion(%q, %q) = %v, want %v", tt.pattern, tt.version, got, tt.want)
+		if got := MatchVersion(tt.pattern, tt.version); got != tt.want {
+			t.Errorf("MatchVersion(%q, %q) = %v, want %v", tt.pattern, tt.version, got, tt.want)
 		}
 	}
 }
@@ -104,8 +104,8 @@ func TestMatchName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := matchName(tt.pattern, tt.name); got != tt.want {
-			t.Errorf("matchName(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		if got := MatchName(tt.pattern, tt.name); got != tt.want {
+			t.Errorf("MatchName(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
 		}
 	}
 }
@@ -114,11 +114,11 @@ func TestMatchName(t *testing.T) {
 // image side does, and it must not be selected by a wildcard that expects real segments.
 func TestMatchVersionEmptyImageVersion(t *testing.T) {
 	for _, pattern := range []string{"*", "1.*", "1.2.3"} {
-		if matchVersion(pattern, "") {
-			t.Errorf("matchVersion(%q, \"\") = true, want false", pattern)
+		if MatchVersion(pattern, "") {
+			t.Errorf("MatchVersion(%q, \"\") = true, want false", pattern)
 		}
 	}
-	if !matchVersion("", "") {
-		t.Error(`matchVersion("", "") = false, want true`)
+	if !MatchVersion("", "") {
+		t.Error(`MatchVersion("", "") = false, want true`)
 	}
 }

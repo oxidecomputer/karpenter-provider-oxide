@@ -1,4 +1,4 @@
-package nodeclass
+package resolver
 
 import "strings"
 
@@ -7,7 +7,7 @@ import "strings"
 // ("1.2.3", "v1.2"), dates ("24.04 2026-05-09"), and bare numbers ("12").
 const versionSeparators = ".-_ \t"
 
-// matchVersion reports whether an image's version satisfies the version written in an
+// MatchVersion reports whether an image's version satisfies the version written in an
 // ImageSelector.
 //
 // A pattern without a "*" is compared literally, case-insensitively, exactly as it was before
@@ -22,7 +22,7 @@ const versionSeparators = ".-_ \t"
 //
 // Matching whole segments rather than raw characters is what keeps "1.2.*" from matching "1.20":
 // the wildcard cannot consume half of a segment.
-func matchVersion(pattern, version string) bool {
+func MatchVersion(pattern, version string) bool {
 	if !strings.Contains(pattern, "*") {
 		return strings.EqualFold(pattern, version)
 	}
@@ -57,7 +57,8 @@ func matchVersion(pattern, version string) bool {
 	return true
 }
 
-// matchName reports whether an image's name satisfies the name written in an ImageSelector.
+// MatchName reports whether a resource's name satisfies the name written in a selector. Both images
+// and affinity groups glob on names, which is why this lives here rather than in either.
 //
 // A pattern without a "*" is compared literally and case-insensitively, which is also the only form
 // that can be looked up directly by the Oxide API. A pattern containing "*" is a character-level
@@ -67,7 +68,7 @@ func matchVersion(pattern, version string) bool {
 // Unlike a version, a name is matched character by character rather than segment by segment: names
 // carry no ordering worth protecting, and prefix selection is the point, so "ubuntu*" should match
 // "ubuntu-2404" without the user having to know which separator the name uses.
-func matchName(pattern, name string) bool {
+func MatchName(pattern, name string) bool {
 	if !strings.Contains(pattern, "*") {
 		return strings.EqualFold(pattern, name)
 	}
