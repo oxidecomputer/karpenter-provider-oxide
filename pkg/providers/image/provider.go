@@ -2,9 +2,9 @@
 // decides whether a node running an older one has drifted.
 //
 // Resolution is cached because the selectors are re-evaluated on every reconcile and two nodeclasses
-// selecting the same images should not each list the project's images. The TTL is the shortest of
-// any provider: a wildcard selector exists so that a newly uploaded image is picked up without an
-// edit, so how quickly that happens is exactly what this cache's freshness decides.
+// selecting the same images should not each list the project's images. The cache does not decide how
+// soon a newly uploaded image is picked up -- its window is shorter than the resync, so every resync
+// lists again; see providers.CoalesceWindow.
 package image
 
 import (

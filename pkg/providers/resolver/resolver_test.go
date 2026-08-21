@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 )
 
 // clock is a hand-wound clock, so that the ceiling cases can be about how old a reading is rather
@@ -48,6 +50,10 @@ func (c *counter) resolve(context.Context) (string, error) {
 	return c.value, nil
 }
 
+// ttl is the coalescing window these tests measure against. Its own number, not
+// providers.CoalesceWindow, because what a cache does inside its window is the same whatever the
+// production window happens to be -- and deliberately not equal to it, so that a test asserting the
+// staleness ceiling cannot pass by accident on the two being the same length.
 const ttl = 5 * time.Minute
 
 func TestCacheServesAHitWithoutResolving(t *testing.T) {
@@ -185,10 +191,11 @@ func TestAFailedResolutionPastTheCeilingReturnsTheError(t *testing.T) {
 	}
 	resolver.err = errors.New("the API is unreachable")
 
-	// Three refreshes in a row that could not be made are absorbed; the reading is only over the
-	// ceiling once it is older than three TTLs.
-	for range staleMultiplier {
-		clk.advance(ttl)
+	// Three resyncs in a row that could not be made are absorbed; the reading is only over the
+	// ceiling once it is older than providers.StaleLimit. Advanced a resync at a time rather than a
+	// TTL at a time, because the ceiling is pinned to the resync and not to the coalescing window.
+	for range providers.StaleLimit / providers.ResolveInterval {
+		clk.advance(providers.ResolveInterval)
 		entry, err := cache.Get(context.Background(), "key", resolver.resolve)
 		if err != nil {
 			t.Fatalf(

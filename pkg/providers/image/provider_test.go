@@ -175,8 +175,8 @@ func TestResolveReportsTheSelectorsWhenNothingMatched(t *testing.T) {
 	}
 }
 
-// A second reconcile inside the TTL costs no API call at all, which is the whole reason the provider
-// exists rather than the reconcile calling the API directly.
+// Reconciles arriving inside the coalescing window cost one API call between them, which is the whole
+// reason the provider exists rather than the reconcile calling the API directly.
 func TestResolveServesACacheHit(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
@@ -194,8 +194,8 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// A reading past its TTL is made again, which is what a 5m image TTL buys: a newly uploaded image
-// matching a wildcard is launched within a reconcile.
+// A reading past the coalescing window is made again, which is what lets a newly uploaded image
+// matching a wildcard be picked up by the next resync rather than by an edit.
 func TestResolvePastTheTTLListsAgain(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},

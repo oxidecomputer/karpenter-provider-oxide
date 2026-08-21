@@ -148,20 +148,6 @@ settings:
     # -- How often the silo's quota is re-read. This is a single API call, and what it measures changes
     # whenever anything in the silo starts or stops.
     refreshPeriod: 1m
-  # -- Resource provider cache configuration. Each nodeclass's image, subnet, SSH key, IP pool and
-  # affinity group selectors are re-evaluated on every nodeclass reconcile; these decide how long a
-  # resolution is served before the Oxide API is asked again. Raising them lowers API load and
-  # lengthens how long a change in the project takes to show up on the nodeclass; a resolution that
-  # cannot be made is served from the last reading for three refreshes and then fails loudly.
-  providers:
-    # -- How long a resolution of a nodeclass's image selectors is served. This is what bounds how
-    # soon a newly uploaded image matching a wildcard selector is launched, so it defaults to the
-    # nodeclass reconcile interval: images are re-resolved on every pass.
-    imageTTL: 5m
-    # -- How long a resolution of the subnet, SSH key, IP pool and affinity group selectors is served.
-    # These are created by an operator rather than by a pipeline, so this is six times the reconcile
-    # interval and five reconciles out of six cost no Oxide API calls at all.
-    resourceTTL: 30m
   # -- Sled inventory configuration. Records which physical sled each node landed on, as labels and
   # annotations on the Node and NodeClaim, and uses the same rack reading to stop offering instance
   # types no sled has room for. Provisioning still works whether this is enabled, disabled, or

@@ -12,6 +12,8 @@
 package providers
 
 import (
+	"time"
+
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -53,3 +55,34 @@ const (
 type Drifter interface {
 	DriftReason(*karpv1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason
 }
+
+// The cadences every resource provider is timed against.
+//
+// There is one number here, and the other two are derived from it. Freshness is decided by how often
+// the nodeclass controller re-resolves, not by how long a cache holds a reading: a cache that
+// outlives the resync is not a cache, it is a second and longer poll interval that nothing names.
+// Keeping the derivation in one place is what stops the two from drifting apart again.
+const (
+	// ResolveInterval is how often a nodeclass's selectors are re-evaluated, and so the only thing
+	// that decides how soon a newly uploaded image, a new subnet, or a rotated SSH key is picked up.
+	// The nodeclass reconcile is the sole loop, so this is the poll interval and the resync both.
+	ResolveInterval = 5 * time.Minute
+
+	// CoalesceWindow is how long a provider serves a resolution before making it again.
+	//
+	// Deliberately a fraction of ResolveInterval rather than a multiple of it, because this is not a
+	// freshness knob: it exists to collapse the reads that arrive together -- several nodeclasses
+	// carrying the same selectors, and the extra reconcile a status patch's own watch event provokes
+	// -- into one Oxide API call. Every resync falls outside the window and refreshes, which is what
+	// makes ResolveInterval mean what it says.
+	CoalesceWindow = ResolveInterval / 5
+
+	// StaleLimit is how old the last good reading may be before a provider stops serving it and
+	// returns the refresh failure instead.
+	//
+	// Pinned to ResolveInterval rather than to CoalesceWindow: what it bounds is how many resyncs in
+	// a row may fail before a nodeclass is taken un-Ready, and that has nothing to do with how
+	// tightly concurrent reads are collapsed. Three resyncs reads as a real outage rather than as a
+	// blip, while a multiple of the coalescing window would give up inside a single resync.
+	StaleLimit = 3 * ResolveInterval
+)

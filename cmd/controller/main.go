@@ -9,6 +9,8 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/kubeadm"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
 	affinitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/affinity"
 	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
@@ -16,14 +18,12 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/nodeclass"
 	utilizationcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/utilization"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/kubeadm"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/sled"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -61,31 +61,7 @@ const (
 	// permissions beyond launching instances, so it defaults to on.
 	envQuotaEnabled       = "OXIDE_QUOTA_ENABLED"
 	envQuotaRefreshPeriod = "OXIDE_QUOTA_REFRESH_PERIOD"
-
-	// Resource provider cache configuration. One knob per cadence rather than one per provider,
-	// because what differs between the two is how fast the resource itself moves, and an operator who
-	// wants images picked up sooner wants that for images rather than for one image provider.
-	envImageTTL    = "OXIDE_IMAGE_TTL"
-	envResourceTTL = "OXIDE_RESOURCE_TTL"
 )
-
-// defaultImageTTL is how long a resolution of a nodeclass's image selectors is served before the
-// images are listed again.
-//
-// The shortest of the two, and equal to the nodeclass reconcile interval, so images are re-resolved
-// on every reconcile. That is the point of a wildcard selector: a newly uploaded image it matches
-// should be launched without anybody editing the nodeclass, and this is what bounds how long that
-// takes.
-const defaultImageTTL = 5 * time.Minute
-
-// defaultResourceTTL is how long a resolution of the subnet, SSH key, IP pool and affinity group
-// selectors is served.
-//
-// Six times the reconcile interval, so five reconciles out of six cost no Oxide API traffic at all.
-// These resources are created by an operator rather than by a pipeline, so a selector's meaning
-// changes on the timescale of someone changing the project deliberately, and a stale reading of one
-// costs nothing until the next launch reads it from status.
-const defaultResourceTTL = 30 * time.Minute
 
 // defaultQuotaRefreshPeriod is how often the silo's quota is re-read.
 //
@@ -192,15 +168,15 @@ func run() error {
 	// caches shared: two nodeclasses selecting the same images ask one question and get one answer.
 	// The nodeclass controller resolves through them and publishes the result to status; the cloud
 	// provider only asks them about drift, against the status the controller published.
-	providerTTLs, err := providerTTLsFromEnv()
-	if err != nil {
-		return err
-	}
-	images := image.NewProvider(ox, providerTTLs.image)
-	subnets := subnet.NewProvider(ox, providerTTLs.resource)
-	sshKeys := sshkey.NewProvider(ox, providerTTLs.resource)
-	ipPools := ippool.NewProvider(ox, providerTTLs.resource)
-	affinityGroups := affinitygroup.NewProvider(ox, project, providerTTLs.resource)
+	// All six get the same window, and it is not configurable. It is not a freshness knob -- freshness
+	// is providers.ResolveInterval, and every resync re-reads every resource -- so there is nothing
+	// here an operator would want to tune per resource, and a window longer than the resync would
+	// quietly turn back into the second, longer poll interval this replaced.
+	images := image.NewProvider(ox, providers.CoalesceWindow)
+	subnets := subnet.NewProvider(ox, providers.CoalesceWindow)
+	sshKeys := sshkey.NewProvider(ox, providers.CoalesceWindow)
+	ipPools := ippool.NewProvider(ox, providers.CoalesceWindow)
+	affinityGroups := affinitygroup.NewProvider(ox, project, providers.CoalesceWindow)
 
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
@@ -427,40 +403,4 @@ func (c inventoryConfig) repairPolicies() []karpcloudprovider.RepairPolicy {
 		ConditionStatus:    corev1.ConditionTrue,
 		TolerationDuration: c.repairTolerationDuration,
 	}}
-}
-
-// providerTTLs is how long each resource provider serves a resolution before making it again.
-type providerTTLs struct {
-	image    time.Duration
-	resource time.Duration
-}
-
-// providerTTLsFromEnv reads the cache freshness configuration.
-//
-// A malformed or non-positive duration is fatal, for the same reason the inventory refresh period is:
-// it is a static mistake in the operator's own configuration, and quietly substituting a default
-// would hide a nodeclass being refreshed on a cadence nobody asked for.
-func providerTTLsFromEnv() (providerTTLs, error) {
-	ttls := providerTTLs{image: defaultImageTTL, resource: defaultResourceTTL}
-	for _, field := range []struct {
-		name   string
-		target *time.Duration
-	}{
-		{envImageTTL, &ttls.image},
-		{envResourceTTL, &ttls.resource},
-	} {
-		raw := os.Getenv(field.name)
-		if raw == "" {
-			continue
-		}
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return providerTTLs{}, fmt.Errorf("%s is not a valid duration: %w", field.name, err)
-		}
-		if parsed <= 0 {
-			return providerTTLs{}, fmt.Errorf("%s must be positive, got %s", field.name, parsed)
-		}
-		*field.target = parsed
-	}
-	return ttls, nil
 }

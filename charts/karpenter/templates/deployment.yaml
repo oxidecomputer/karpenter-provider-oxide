@@ -132,13 +132,6 @@ spec:
               value: {{ .Values.settings.quota.enabled | quote }}
             - name: OXIDE_QUOTA_REFRESH_PERIOD
               value: {{ .Values.settings.quota.refreshPeriod | quote }}
-            # Resource provider cache freshness. Always set, since both have defaults in the
-            # controller that these match: the chart is where an operator changes them, not where
-            # they are turned on.
-            - name: OXIDE_IMAGE_TTL
-              value: {{ .Values.settings.providers.imageTTL | quote }}
-            - name: OXIDE_RESOURCE_TTL
-              value: {{ .Values.settings.providers.resourceTTL | quote }}
           {{- if .Values.settings.inventory.enabled }}
             # Sled inventory. Only set when enabled: absent means off, so a chart that never mentions
             # inventory cannot turn it on.

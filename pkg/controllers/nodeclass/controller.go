@@ -9,6 +9,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
@@ -39,12 +40,11 @@ const maxStatusImages = 3
 // resolveInterval is how often a nodeclass's selectors are re-evaluated.
 //
 // It is the poll interval as well as the resync: the reconcile is the only loop, so this is what
-// decides how soon a newly uploaded image a wildcard selector matches is launched. Five minutes is
-// affordable only because the providers cache -- image resolution re-resolves on every reconcile at
-// its own 5m TTL, while the other four are cache hits five reconciles out of six and cost no API
-// traffic at all. Before the providers existed this rate would have been a sixfold increase in
-// uncached Oxide API calls per nodeclass, including one VpcView per resolved subnet per pass.
-const resolveInterval = 5 * time.Minute
+// decides how soon a newly uploaded image a wildcard selector matches is launched, and equally how
+// soon a new subnet or a rotated SSH key is. Every resource is re-read on every pass -- the provider
+// caches coalesce the reads that arrive together rather than holding a reading across a resync, so
+// there is no resource whose real freshness is longer than this number says.
+const resolveInterval = providers.ResolveInterval
 
 // groupCollectionRequeue is how long a nodeclass waits before re-checking a managed affinity group
 // that is not empty yet. Emptying one is a fleet replacement, which is paced by disruption budgets,

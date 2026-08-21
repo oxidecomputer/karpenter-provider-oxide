@@ -7,6 +7,14 @@
 // metrics that describe all three are here, once, so that the providers look alike and a change to
 // how freshness works is a change to one file.
 //
+// The TTL here is a coalescing window, not a freshness knob. Freshness belongs to the nodeclass
+// resync -- see providers.ResolveInterval -- and the window is a fraction of it, so every resync
+// falls outside the window and re-reads. What the window buys is that the reads arriving together
+// cost one API call: several nodeclasses carrying the same selectors, and the extra reconcile a
+// status patch's own watch event provokes. How long a failed refresh is absorbed is a separate
+// question with a separate answer, providers.StaleLimit, because it is about outages rather than
+// about concurrency.
+//
 // The cache holds post-selector-evaluation results only. An entry's value is the resolved status
 // slice a nodeclass publishes, never a raw API listing: the key is a fingerprint of the selectors,
 // so an edited selector is a different key and the world is re-read whenever the question changes.
@@ -22,17 +30,9 @@ import (
 
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/samber/lo"
 )
-
-// staleMultiplier is how many consecutive failed refreshes a cache absorbs before it stops serving
-// the last good reading and returns the failure instead.
-//
-// Derived from the TTL rather than fixed in wall clock, because the two cadences here differ by six
-// times over: at three refreshes it reads as "three refreshes in a row could not be made" for both,
-// whereas any single wall-clock number would be either shorter than one provider's own refresh
-// interval or far longer than the other's.
-const staleMultiplier = 3
 
 // entryTTLIdle is how long an unread entry is kept. An entry not read for this long belongs to
 // selectors nothing is asking about any more -- almost always a deleted nodeclass -- so dropping it
@@ -87,7 +87,8 @@ type Cache[T any] struct {
 	records map[string]*record[T]
 }
 
-// NewCache returns a cache that treats a reading older than ttl as needing a refresh.
+// NewCache returns a cache that coalesces reads of one key arriving within ttl of each other into a
+// single resolution. Callers pass providers.CoalesceWindow; a test passes whatever it is measuring.
 func NewCache[T any](name string, ttl time.Duration) *Cache[T] {
 	return NewCacheWithClock[T](name, ttl, time.Now)
 }
@@ -103,22 +104,13 @@ func NewCacheWithClock[T any](name string, ttl time.Duration, now func() time.Ti
 	}
 }
 
-// Name is the provider this cache belongs to.
-func (c *Cache[T]) Name() string { return c.name }
-
-// TTL is how old a reading may be before it is refreshed.
-func (c *Cache[T]) TTL() time.Duration { return c.ttl }
-
-// staleLimit is how old the last good reading may be before a failed refresh stops being absorbed.
-func (c *Cache[T]) staleLimit() time.Duration { return staleMultiplier * c.ttl }
-
 // Get returns the cached resolution for key, calling resolve when the entry is missing or older than
 // the TTL. Concurrent Gets for the same key collapse into one resolve.
 //
 // A failed resolve is absorbed while a previous reading is still worth believing: that reading is
 // returned with Stale set, its age, and a nil error, so a transient API failure does not take a
 // nodeclass un-Ready over a reading that has not meaningfully aged. Once the reading is older than
-// the staleness ceiling the failure is returned instead, and the caller's existing error path
+// providers.StaleLimit the failure is returned instead, and the caller's existing error path
 // surfaces it -- which for the nodeclass controller means failing the reconcile, backing off, and
 // leaving status exactly as it was. A failed resolve with nothing cached always returns the error.
 func (c *Cache[T]) Get(
@@ -158,7 +150,9 @@ func (c *Cache[T]) Get(
 		return Entry[T]{}, err
 	}
 	age := now.Sub(rec.takenAt)
-	if age > c.staleLimit() {
+	// providers.StaleLimit rather than anything derived from the coalescing window: what is being
+	// bounded is how many resyncs in a row may fail, which is not this cache's business to scale.
+	if age > providers.StaleLimit {
 		// Serving indefinitely would make a revoked token look exactly like a healthy cluster, so
 		// past the ceiling the cache stops absorbing and says how long it has been failing.
 		c.publishGauges()
