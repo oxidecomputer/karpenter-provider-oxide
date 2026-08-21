@@ -2,7 +2,6 @@ package nodeclass
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -54,6 +54,8 @@ type Controller struct {
 	// images resolves and caches what the nodeclass's image selectors match. Held as the provider
 	// rather than called as a function so that the cache is shared across every nodeclass.
 	images *image.Provider
+	// subnets likewise, with the VPC name lookup a launch needs folded in behind it.
+	subnets *subnet.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -66,6 +68,7 @@ func NewController(
 	oxideClient *oxide.Client,
 	project string,
 	images *image.Provider,
+	subnets *subnet.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
@@ -75,6 +78,7 @@ func NewController(
 		oxideClient:    oxideClient,
 		project:        project,
 		images:         images,
+		subnets:        subnets,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
@@ -158,11 +162,12 @@ func (c *Controller) Reconcile(
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesResolved)
 	}
 
-	subnets, err := c.resolveSubnets(ctx, nodeClass.Spec.SubnetSelector)
+	subnets, err := c.subnets.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve subnets: %w", err)
 	}
-	nodeClass.Status.Subnets = subnets
+	logStale(ctx, "subnet", subnets.Stale, subnets.Age)
+	nodeClass.Status.Subnets = subnets.Resolved
 
 	sshKeys, err := c.resolveSSHKeys(ctx, nodeClass.Spec.SSHKeySelector)
 	if err != nil {
@@ -402,105 +407,6 @@ func (c *Controller) resolveIPPools(
 			Default:   *ipPool.IsDefault,
 		}
 	}), nil
-}
-
-func (c *Controller) resolveSubnets(
-	ctx context.Context,
-	subnetSelectors []v1alpha1.SubnetSelector,
-) ([]v1alpha1.OxideSubnet, error) {
-	var resolvedSubnets []oxide.VpcSubnet
-	vpcIDToName := map[string]string{}
-	for _, subnetSelector := range subnetSelectors {
-		nameOrID := ""
-		project := subnetSelector.Project
-		vpcNameOrID := ""
-
-		if subnetSelector.VPCID != "" {
-			vpcNameOrID = subnetSelector.VPCID
-			// project cannot be used to query if ID is used
-			project = ""
-		} else if subnetSelector.VPCName != "" {
-			vpcNameOrID = subnetSelector.VPCName
-		}
-
-		if subnetSelector.ID != "" {
-			nameOrID = subnetSelector.ID
-			// project cannot be used to query if ID is used
-			project = ""
-		} else if subnetSelector.Name != "" {
-			nameOrID = subnetSelector.Name
-		}
-
-		if nameOrID != "" {
-			subnet, err := c.oxideClient.VpcSubnetView(ctx, oxide.VpcSubnetViewParams{
-				Subnet:  oxide.NameOrId(nameOrID),
-				Vpc:     oxide.NameOrId(vpcNameOrID),
-				Project: oxide.NameOrId(project),
-			})
-			if err != nil {
-				if errors.Is(err, oxide.ErrObjectNotFound) {
-					continue
-				}
-				return nil, fmt.Errorf(
-					"subnet %q from VPC %q and project %q: %w",
-					nameOrID,
-					vpcNameOrID,
-					project,
-					err,
-				)
-			}
-			resolvedSubnets = append(resolvedSubnets, *subnet)
-		} else if vpcNameOrID != "" { // Only VPC is passed
-			subnets, err := c.oxideClient.VpcSubnetListAllPages(ctx, oxide.VpcSubnetListParams{
-				Vpc:     oxide.NameOrId(vpcNameOrID),
-				Project: oxide.NameOrId(project),
-			})
-			if err != nil {
-				if errors.Is(err, oxide.ErrObjectNotFound) {
-					continue
-				}
-				return nil, fmt.Errorf(
-					"subnets from VPC %q and project %q: %w",
-					vpcNameOrID,
-					project,
-					err,
-				)
-			}
-			resolvedSubnets = append(resolvedSubnets, subnets...)
-		}
-
-		// Cache the VPC ID to Name mapping if a name is used in the selector since we need the VPC
-		// Name in the instance create to create a network interface.
-		// InstanceCreate#CreateNetworkInterface does not accept a VPC ID, only a Name.
-		if subnetSelector.VPCName != "" {
-			vpcIDToName[resolvedSubnets[len(resolvedSubnets)-1].VpcId] = subnetSelector.VPCName
-		}
-
-	}
-
-	var oxideSubnets []v1alpha1.OxideSubnet
-	for _, subnet := range lo.Uniq(resolvedSubnets) {
-		vpcName, ok := vpcIDToName[subnet.VpcId]
-		if !ok {
-			vpc, err := c.oxideClient.VpcView(ctx, oxide.VpcViewParams{
-				Vpc: oxide.NameOrId(subnet.VpcId),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("vpc information for subnet %q: %w", subnet.Id, err)
-			}
-			vpcName = string(vpc.Name)
-		}
-		oxideSubnets = append(oxideSubnets, v1alpha1.OxideSubnet{
-			ID:        subnet.Id,
-			Name:      string(subnet.Name),
-			VPCID:     subnet.VpcId,
-			VPCName:   vpcName,
-			IPv4Block: string(subnet.Ipv4Block),
-			IPv6Block: string(subnet.Ipv6Block),
-		})
-
-	}
-	return oxideSubnets, nil
 }
 
 func (c *Controller) resolveSSHKeys(

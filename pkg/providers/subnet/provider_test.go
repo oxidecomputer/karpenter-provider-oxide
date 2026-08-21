@@ -1,0 +1,263 @@
+package subnet
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/oxide.go/oxide"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
+)
+
+const (
+	vpcID     = "22222222-0000-4000-8000-000000000001"
+	subnetID  = "44444444-0000-4000-8000-000000000001"
+	subnetIDB = "44444444-0000-4000-8000-000000000002"
+)
+
+// fakeAPI is the Oxide subnet and VPC API, counting what was asked of it so that a cache hit can be
+// asserted as the absence of a call.
+type fakeAPI struct {
+	subnets  []oxide.VpcSubnet
+	lists    int
+	vpcViews int
+}
+
+func (f *fakeAPI) server(t *testing.T) *oxide.Client {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+		switch {
+		case r.Method == http.MethodGet && path == "vpc-subnets":
+			f.lists++
+			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.subnets})
+
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "vpcs/"):
+			f.vpcViews++
+			writeJSON(t, w, http.StatusOK, oxide.Vpc{Id: vpcID, Name: "prod"})
+
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	if err != nil {
+		t.Fatalf("unable to build a client against the fake API: %v", err)
+	}
+	return client
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("unable to encode the fake response: %v", err)
+	}
+}
+
+func fakeSubnets() []oxide.VpcSubnet {
+	created := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	return []oxide.VpcSubnet{
+		{Id: subnetID, Name: "web-a", VpcId: vpcID, TimeCreated: &created, TimeModified: &created},
+		{Id: subnetIDB, Name: "web-b", VpcId: vpcID, TimeCreated: &created, TimeModified: &created},
+	}
+}
+
+// byVPCID is a selector naming the VPC by ID, so that the VPC's name has to be recovered from the
+// API rather than being taken from the selector.
+func byVPCID() *v1alpha1.OxideNodeClass {
+	return &v1alpha1.OxideNodeClass{
+		Spec: v1alpha1.OxideNodeClassSpec{
+			SubnetSelector: []v1alpha1.SubnetSelector{{VPCID: vpcID}},
+		},
+	}
+}
+
+func TestResolveReturnsTheSubnetsWithTheirVPCName(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	provider := NewProvider(api.server(t), time.Hour)
+
+	got, err := provider.Resolve(context.Background(), byVPCID())
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(got.Resolved) != 2 {
+		t.Fatalf("Resolve() matched %d subnets, want 2", len(got.Resolved))
+	}
+	for _, resolved := range got.Resolved {
+		// A launch creates the interface against a VPC by name, so a subnet resolved without one
+		// would resolve into a nodeclass that cannot launch.
+		if resolved.VPCName != "prod" {
+			t.Errorf(
+				"Resolve() subnet %q VPC name = %q, want the VPC's name",
+				resolved.Name,
+				resolved.VPCName,
+			)
+		}
+	}
+}
+
+// A selector that names the VPC already knows the name, so nothing has to look it up.
+func TestASelectorNamingTheVPCNeedsNoLookup(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	provider := NewProvider(api.server(t), time.Hour)
+
+	class := &v1alpha1.OxideNodeClass{
+		Spec: v1alpha1.OxideNodeClassSpec{
+			SubnetSelector: []v1alpha1.SubnetSelector{{VPCName: "prod"}},
+		},
+	}
+	if _, err := provider.Resolve(context.Background(), class); err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if api.vpcViews != 0 {
+		t.Errorf(
+			"the VPC was viewed %d times, want none for a selector that named it",
+			api.vpcViews,
+		)
+	}
+}
+
+func TestResolveServesACacheHit(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	provider := NewProvider(api.server(t), time.Hour)
+	class := byVPCID()
+
+	for range 3 {
+		if _, err := provider.Resolve(context.Background(), class); err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+	}
+	if api.lists != 1 {
+		t.Errorf("the API was listed %d times across three resolutions, want 1", api.lists)
+	}
+}
+
+// The VPC name is cached by ID, so re-resolving the subnets does not re-read the VPC. This is the
+// call that used to be made once per resolved subnet per reconcile.
+func TestTheVPCNameIsLookedUpOncePerVPC(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	// A zero TTL on the resolution forces the subnets to be listed again every time, which is what
+	// makes this a claim about the VPC name cache rather than about the subnet one.
+	provider := NewProvider(api.server(t), 0)
+	provider.vpcName = newVPCNameCache(time.Hour)
+	class := byVPCID()
+
+	for range 3 {
+		if _, err := provider.Resolve(context.Background(), class); err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+	}
+	if api.lists != 3 {
+		t.Fatalf("the API was listed %d times, want one per resolution", api.lists)
+	}
+	if api.vpcViews != 1 {
+		t.Errorf(
+			"the VPC was viewed %d times across three resolutions of two subnets, want 1",
+			api.vpcViews,
+		)
+	}
+}
+
+// An edited selector is a different question, so it gets its own reading rather than the previous
+// answer. This is the whole of cache invalidation on a spec edit.
+func TestAnEditedSelectorResolvesAgain(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	provider := NewProvider(api.server(t), time.Hour)
+
+	for _, vpc := range []string{vpcID, "22222222-0000-4000-8000-000000000002"} {
+		class := byVPCID()
+		class.Spec.SubnetSelector[0].VPCID = vpc
+		if _, err := provider.Resolve(context.Background(), class); err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+	}
+	if api.lists != 2 {
+		t.Errorf("the API was listed %d times for two different selectors, want 2", api.lists)
+	}
+}
+
+func TestTwoNodeClassesShareOneReading(t *testing.T) {
+	api := &fakeAPI{subnets: fakeSubnets()}
+	provider := NewProvider(api.server(t), time.Hour)
+
+	first, second := byVPCID(), byVPCID()
+	second.ObjectMeta = metav1.ObjectMeta{Name: "another"}
+	for _, class := range []*v1alpha1.OxideNodeClass{first, second} {
+		if _, err := provider.Resolve(context.Background(), class); err != nil {
+			t.Fatalf("Resolve() error = %v", err)
+		}
+	}
+	if api.lists != 1 {
+		t.Errorf(
+			"the API was listed %d times for two nodeclasses selecting the same subnets, want 1",
+			api.lists,
+		)
+	}
+}
+
+func TestDriftReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		recorded string
+		desired  []v1alpha1.OxideSubnet
+		want     karpcloudprovider.DriftReason
+	}{
+		{
+			name:     "a node in a selected subnet has not drifted",
+			recorded: subnetID,
+			desired:  []v1alpha1.OxideSubnet{{ID: subnetID}},
+		},
+		{
+			// Membership, not equality: a launch picks one of the selected subnets, so every node is
+			// in a different subnet from some of its peers by design.
+			name:     "a subnet added to the set drifts nothing",
+			recorded: subnetID,
+			desired:  []v1alpha1.OxideSubnet{{ID: subnetID}, {ID: subnetIDB}},
+		},
+		{
+			name:     "a subnet leaving the set replaces the nodes in it",
+			recorded: subnetID,
+			desired:  []v1alpha1.OxideSubnet{{ID: subnetIDB}},
+			want:     providers.DriftReasonSubnet,
+		},
+		{
+			name:     "an empty resolved set is not drift",
+			recorded: subnetID,
+		},
+		{
+			name:    "nor is a NodeClaim that recorded no subnet",
+			desired: []v1alpha1.OxideSubnet{{ID: subnetIDB}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeClaim := &karpv1.NodeClaim{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+			}
+			if tt.recorded != "" {
+				nodeClaim.Annotations[v1alpha1.AnnotationSubnet] = tt.recorded
+			}
+			class := &v1alpha1.OxideNodeClass{
+				Status: v1alpha1.OxideNodeClassStatus{Subnets: tt.desired},
+			}
+			if got := (&Provider{}).DriftReason(nodeClaim, class); got != tt.want {
+				t.Errorf("DriftReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

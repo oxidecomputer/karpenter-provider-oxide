@@ -70,7 +70,6 @@ func (c *OxideCloudProvider) IsDrifted(
 		}
 	}
 	for _, drifted := range []func(*karpcorev1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason{
-		subnetDrift,
 		sshKeyDrift,
 		ipPoolDrift,
 		affinityGroupDrift,
@@ -106,28 +105,6 @@ func nodeClassDrift(
 		return ""
 	}
 	return lo.Ternary(nodeClassHash != nodeClaimHash, providers.DriftReasonNodeClass, "")
-}
-
-// subnetDrift asks whether the subnet the instance's interface was created in is still one the
-// nodeclass selects. Membership, not equality: a launch picks one of the selected subnets, so every
-// node is in a different subnet from some of its peers by design, and a subnet added to the set
-// leaves every existing node exactly as valid as it was.
-//
-// An empty resolved set is not drift, for the same reason an empty image list is not: it is a
-// resolution that found nothing rather than an instruction to move every node somewhere else.
-func subnetDrift(
-	nodeClaim *karpcorev1.NodeClaim,
-	nodeClass *v1alpha1.OxideNodeClass,
-) cloudprovider.DriftReason {
-	recorded, ok := nodeClaim.Annotations[v1alpha1.AnnotationSubnet]
-	if !ok || recorded == "" {
-		return ""
-	}
-	desired := v1alpha1.SubnetIDs(nodeClass.Status.Subnets)
-	if desired.Len() == 0 {
-		return ""
-	}
-	return lo.Ternary(!desired.Has(recorded), providers.DriftReasonSubnet, "")
 }
 
 // sshKeyDrift compares the keys copied into the instance at launch against the keys the nodeclass

@@ -19,6 +19,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/kubeadm"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/sled"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
@@ -193,6 +194,7 @@ func run() error {
 		return err
 	}
 	images := image.NewProvider(ox, providerTTLs.image)
+	subnets := subnet.NewProvider(ox, providerTTLs.resource)
 
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
@@ -204,7 +206,7 @@ func run() error {
 		inventoryCfg.repairPolicies(),
 		// In resolution order. Which reason wins when several apply is this order, and it is asserted
 		// by pkg/cloudprovider's tests.
-		[]providers.Drifter{images},
+		[]providers.Drifter{images, subnets},
 	)
 	overlayUndecoratedCloudProvider := metrics.Decorate(oxideCloudProivder)
 	cloudProvider := overlay.Decorate(
@@ -232,6 +234,7 @@ func run() error {
 			ox,
 			project,
 			images,
+			subnets,
 			affinityPolicy,
 			bootstrappers,
 		),
