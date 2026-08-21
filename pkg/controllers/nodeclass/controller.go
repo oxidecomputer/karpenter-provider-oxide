@@ -12,6 +12,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -56,6 +57,8 @@ type Controller struct {
 	images *image.Provider
 	// subnets likewise, with the VPC name lookup a launch needs folded in behind it.
 	subnets *subnet.Provider
+	// sshKeys resolves the keys copied into every instance the nodeclass launches.
+	sshKeys *sshkey.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -69,6 +72,7 @@ func NewController(
 	project string,
 	images *image.Provider,
 	subnets *subnet.Provider,
+	sshKeys *sshkey.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
@@ -79,6 +83,7 @@ func NewController(
 		project:        project,
 		images:         images,
 		subnets:        subnets,
+		sshKeys:        sshKeys,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
@@ -169,11 +174,12 @@ func (c *Controller) Reconcile(
 	logStale(ctx, "subnet", subnets.Stale, subnets.Age)
 	nodeClass.Status.Subnets = subnets.Resolved
 
-	sshKeys, err := c.resolveSSHKeys(ctx, nodeClass.Spec.SSHKeySelector)
+	sshKeys, err := c.sshKeys.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve SSH keys: %w", err)
 	}
-	nodeClass.Status.SSHKeys = sshKeys
+	logStale(ctx, "sshkey", sshKeys.Stale, sshKeys.Age)
+	nodeClass.Status.SSHKeys = sshKeys.Resolved
 
 	ipPools, err := c.resolveIPPools(ctx, nodeClass.Spec.IPPoolSelector)
 	if err != nil {
@@ -407,27 +413,6 @@ func (c *Controller) resolveIPPools(
 			Default:   *ipPool.IsDefault,
 		}
 	}), nil
-}
-
-func (c *Controller) resolveSSHKeys(
-	ctx context.Context,
-	sshKeySelectors []v1alpha1.SSHKeySelector,
-) ([]v1alpha1.OxideSSHKey, error) {
-	var sshKeys []v1alpha1.OxideSSHKey
-	for _, sshKeySelector := range sshKeySelectors {
-		nameOrID := lo.Ternary(sshKeySelector.ID != "", sshKeySelector.ID, sshKeySelector.Name)
-		sshKey, err := c.oxideClient.CurrentUserSshKeyView(ctx, oxide.CurrentUserSshKeyViewParams{
-			SshKey: oxide.NameOrId(nameOrID),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("ssh key %q: %w", nameOrID, err)
-		}
-		sshKeys = append(sshKeys, v1alpha1.OxideSSHKey{
-			ID:   sshKey.Id,
-			Name: string(sshKey.Name),
-		})
-	}
-	return sshKeys, nil
 }
 
 // logStale notes that a resolution was served from a reading nothing has been able to refresh.

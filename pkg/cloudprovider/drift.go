@@ -70,7 +70,6 @@ func (c *OxideCloudProvider) IsDrifted(
 		}
 	}
 	for _, drifted := range []func(*karpcorev1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason{
-		sshKeyDrift,
 		ipPoolDrift,
 		affinityGroupDrift,
 	} {
@@ -105,21 +104,6 @@ func nodeClassDrift(
 		return ""
 	}
 	return lo.Ternary(nodeClassHash != nodeClaimHash, providers.DriftReasonNodeClass, "")
-}
-
-// sshKeyDrift compares the keys copied into the instance at launch against the keys the nodeclass
-// selects now. Both directions count: a key added has to reach the node, and a key removed has to
-// stop reaching it, and a running instance offers no way to do either.
-func sshKeyDrift(
-	nodeClaim *karpcorev1.NodeClaim,
-	nodeClass *v1alpha1.OxideNodeClass,
-) cloudprovider.DriftReason {
-	recorded, ok := nodeClaim.Annotations[v1alpha1.AnnotationSSHKeys]
-	if !ok {
-		return ""
-	}
-	desired := sets.New(v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys)...)
-	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), providers.DriftReasonSSHKey, "")
 }
 
 // ipPoolDrift compares the pools the instance's external addresses were allocated from at launch
