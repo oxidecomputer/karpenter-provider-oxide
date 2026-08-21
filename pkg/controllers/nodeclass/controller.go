@@ -3,7 +3,6 @@ package nodeclass
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
@@ -12,6 +11,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -59,6 +59,8 @@ type Controller struct {
 	subnets *subnet.Provider
 	// sshKeys resolves the keys copied into every instance the nodeclass launches.
 	sshKeys *sshkey.Provider
+	// ipPools resolves the pools each launched instance takes an ephemeral external address from.
+	ipPools *ippool.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -73,6 +75,7 @@ func NewController(
 	images *image.Provider,
 	subnets *subnet.Provider,
 	sshKeys *sshkey.Provider,
+	ipPools *ippool.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
@@ -84,6 +87,7 @@ func NewController(
 		images:         images,
 		subnets:        subnets,
 		sshKeys:        sshKeys,
+		ipPools:        ipPools,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
@@ -181,11 +185,12 @@ func (c *Controller) Reconcile(
 	logStale(ctx, "sshkey", sshKeys.Stale, sshKeys.Age)
 	nodeClass.Status.SSHKeys = sshKeys.Resolved
 
-	ipPools, err := c.resolveIPPools(ctx, nodeClass.Spec.IPPoolSelector)
+	ipPools, err := c.ipPools.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve IP Pools: %w", err)
 	}
-	nodeClass.Status.IPPools = ipPools
+	logStale(ctx, "ippool", ipPools.Stale, ipPools.Age)
+	nodeClass.Status.IPPools = ipPools.Resolved
 
 	affinity, err := c.resolveAffinityGroups(ctx, nodeClass)
 	if err != nil {
@@ -353,70 +358,6 @@ func (c *Controller) resolveCluster(
 	return cluster, nil
 }
 
-func (c *Controller) resolveIPPools(
-	ctx context.Context,
-	ipPoolSelectors []v1alpha1.IPPoolSelector,
-) ([]v1alpha1.OxideIPPool, error) {
-	var listSelectors []v1alpha1.IPPoolSelector
-	var resolvedIPPools []oxide.SiloIpPool
-	for _, ipPoolSelector := range ipPoolSelectors {
-		nameOrID := ""
-		if ipPoolSelector.ID != "" {
-			nameOrID = ipPoolSelector.ID
-		} else if ipPoolSelector.Name != "" {
-			nameOrID = ipPoolSelector.Name
-		}
-		if nameOrID != "" {
-			ipPool, err := c.oxideClient.IpPoolView(ctx, oxide.IpPoolViewParams{
-				Pool: oxide.NameOrId(nameOrID),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("IP Pool %q: %w", nameOrID, err)
-			}
-			resolvedIPPools = append(resolvedIPPools, *ipPool)
-		} else {
-			listSelectors = append(listSelectors, ipPoolSelector)
-		}
-	}
-
-	var ipPools []oxide.SiloIpPool
-	if len(listSelectors) > 0 {
-		var err error
-		ipPools, err = c.oxideClient.IpPoolListAllPages(ctx, oxide.IpPoolListParams{})
-		if err != nil {
-			return nil, fmt.Errorf("list error: %w", err)
-		}
-	}
-
-	for _, ipPoolSelector := range listSelectors {
-		for _, ipPool := range ipPools {
-			if ipPoolSelector.Default && !*ipPool.IsDefault {
-				continue
-			}
-			if ipPoolSelector.IPVersion != "" &&
-				!strings.HasSuffix(ipPoolSelector.IPVersion, string(ipPool.IpVersion)) {
-				continue
-			}
-			resolvedIPPools = append(resolvedIPPools, ipPool)
-		}
-	}
-
-	resolvedIPPools = lo.UniqBy(
-		resolvedIPPools,
-		func(ipPool oxide.SiloIpPool) string { return ipPool.Id },
-	)
-	return lo.Map(resolvedIPPools, func(ipPool oxide.SiloIpPool, _ int) v1alpha1.OxideIPPool {
-		return v1alpha1.OxideIPPool{
-			ID:        ipPool.Id,
-			Name:      string(ipPool.Name),
-			IPVersion: string(ipPool.IpVersion),
-			Default:   *ipPool.IsDefault,
-		}
-	}), nil
-}
-
-// logStale notes that a resolution was served from a reading nothing has been able to refresh.
-//
 // Quiet on purpose. A reading that has not meaningfully aged is still worth publishing, so this is
 // the whole of the response to a failure inside the staleness ceiling; past the ceiling the provider
 // returns the error instead and the reconcile fails loudly on its own.

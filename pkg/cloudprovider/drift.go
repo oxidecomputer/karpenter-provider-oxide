@@ -70,7 +70,6 @@ func (c *OxideCloudProvider) IsDrifted(
 		}
 	}
 	for _, drifted := range []func(*karpcorev1.NodeClaim, *v1alpha1.OxideNodeClass) cloudprovider.DriftReason{
-		ipPoolDrift,
 		affinityGroupDrift,
 	} {
 		if reason := drifted(nodeClaim, nodeClass); reason != "" {
@@ -104,21 +103,6 @@ func nodeClassDrift(
 		return ""
 	}
 	return lo.Ternary(nodeClassHash != nodeClaimHash, providers.DriftReasonNodeClass, "")
-}
-
-// ipPoolDrift compares the pools the instance's external addresses were allocated from at launch
-// against the pools the nodeclass selects now. Both directions again: one ephemeral address is
-// attached per selected pool at launch, and nothing attaches or detaches one afterwards.
-func ipPoolDrift(
-	nodeClaim *karpcorev1.NodeClaim,
-	nodeClass *v1alpha1.OxideNodeClass,
-) cloudprovider.DriftReason {
-	recorded, ok := nodeClaim.Annotations[v1alpha1.AnnotationIPPools]
-	if !ok {
-		return ""
-	}
-	desired := sets.New(v1alpha1.IPPoolIDs(nodeClass.Status.IPPools)...)
-	return lo.Ternary(!v1alpha1.ParseIDs(recorded).Equal(desired), providers.DriftReasonIPPool, "")
 }
 
 // affinityGroupDrift reports the groups the nodeclass wants that this instance is not in.
