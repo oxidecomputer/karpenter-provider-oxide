@@ -110,10 +110,21 @@ func TestReducedCPUMemoryRatio(t *testing.T) {
 	for _, tt := range tests {
 		got := reducedCPUMemoryRatio(tt.cpus, tt.memGiB)
 		if got != tt.want {
-			t.Errorf("reducedCPUMemoryRatio(%d, %d) = %q, want %q", tt.cpus, tt.memGiB, got, tt.want)
+			t.Errorf(
+				"reducedCPUMemoryRatio(%d, %d) = %q, want %q",
+				tt.cpus,
+				tt.memGiB,
+				got,
+				tt.want,
+			)
 		}
 		if errs := content.IsLabelValue(got); len(errs) != 0 {
-			t.Errorf("reducedCPUMemoryRatio(%d, %d) is not a valid label: %v", tt.cpus, tt.memGiB, errs)
+			t.Errorf(
+				"reducedCPUMemoryRatio(%d, %d) is not a valid label: %v",
+				tt.cpus,
+				tt.memGiB,
+				errs,
+			)
 		}
 	}
 }
