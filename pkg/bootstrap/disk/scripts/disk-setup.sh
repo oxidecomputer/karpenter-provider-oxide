@@ -179,7 +179,9 @@ do_boot() {
   install -d -m 0755 "$RUN_DIR"
   rm -f "$ERRFILE"
 
-  command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=60 || true
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout=60 || true
+  fi
 
   for ((i = 0; i < n; i++)); do
     local dev="${d_dev[i]}"
