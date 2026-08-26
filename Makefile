@@ -55,24 +55,13 @@ generate: ## Generate deepcopy code and CRDs w/ controller-gen, vendor the karpe
 	cp $(KARPENTER_CORE_DIR)/pkg/apis/crds/* pkg/apis/crds
 	cp pkg/apis/crds/* $(CRD_CHART_DIR)/templates
 	$(HELM_DOCS) --chart-search-root charts
-	$(MAKE) docs-generate
-
-.PHONY: docs-generate
-docs-generate: ## Generate the AsciiDoc OxideNodeClass API reference from Go types and comments.
-	$(CRD_REF_DOCS) \
-		--source-path=./pkg/apis \
-		--config=docs/crd-ref-docs.yaml \
-		--renderer=asciidoctor \
-		--templates-dir=docs/templates/asciidoctor \
-		--output-path=docs/oxide-karpenter.adoc
-	perl -0pi -e 's/\n+\z/\n/' docs/oxide-karpenter.adoc
 
 .PHONY: docs
-docs: docs-generate ## Build the single-page documentation preview.
+docs: ## Build the single-page documentation preview.
 	hack/docs.sh build
 
 .PHONY: docs-serve
-docs-serve: docs-generate ## Serve the single-page documentation preview.
+docs-serve: ## Serve the single-page documentation preview.
 	hack/docs.sh serve
 
 .PHONY: verify
@@ -138,7 +127,6 @@ GO_LICENSES ?= $(GO_TOOL) go-licenses
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint-custom
 HELM ?= $(LOCALBIN)/helm
 HELM_DOCS ?= $(GO_TOOL) helm-docs
-CRD_REF_DOCS ?= $(GO_TOOL) crd-ref-docs
 
 .PHONY: tools
 tools: kubectl helm $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
