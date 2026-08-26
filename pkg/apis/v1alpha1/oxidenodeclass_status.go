@@ -54,6 +54,28 @@ const ConditionReasonAffinityPolicyUnsatisfiable = "AffinityPolicyUnsatisfiable"
 // what resolved, so the condition does not appear and disappear as the project changes underneath it.
 const ConditionTypeStorageResolved = "StorageResolved"
 
+// ConditionTypeEphemeralIPsResolved reports whether every ephemeral IP entry named a pool that
+// exists, and whether the entries are mutually valid. Registered only when the nodeclass declares
+// ephemeral IPs, for the reason ConditionTypeAffinityGroupsResolved is: a nodeclass with none has
+// nothing here to report and must not be held un-Ready by it.
+const ConditionTypeEphemeralIPsResolved = "EphemeralIPsResolved"
+
+// Reasons recorded on ConditionTypeEphemeralIPsResolved.
+const (
+	// ConditionReasonIPPoolNotFound is an ephemeral IP entry naming a pool that does not exist. Nodes
+	// would launch with fewer addresses than the nodeclass asked for, or none, so this holds the
+	// nodeclass un-Ready rather than letting the launch fail later against the Oxide API.
+	ConditionReasonIPPoolNotFound = "IPPoolNotFound"
+	// ConditionReasonIPVersionMismatch is an entry setting both ipVersion and pool where the pool
+	// allocates the other family. Reported rather than resolved in the pool's favour: which of the
+	// two the operator meant is not knowable from here.
+	ConditionReasonIPVersionMismatch = "IPVersionMismatch"
+	// ConditionReasonDuplicateIPVersion is two entries resolving to the same address family. Oxide
+	// allows at most one ephemeral address per version and refuses such a pair at launch, so this
+	// turns a provisioning-time 400 into something readable off the nodeclass.
+	ConditionReasonDuplicateIPVersion = "DuplicateIPVersion"
+)
+
 // Reasons recorded on ConditionTypeStorageResolved.
 const (
 	// ConditionReasonDiskSourceNotFound is a diskSet selector, wildcard included, that matched
@@ -116,9 +138,10 @@ type OxideNodeClassStatus struct {
 	// SSHKeys contain selected ssh keys to copy to launched nodes
 	// +optional
 	SSHKeys []OxideSSHKey `json:"sshKeys"`
-	// IPPools contain selected IP Pools for ephemeral IP attachment
+	// EphemeralIPs contain the resolved pool each launched instance takes an external address from,
+	// in the order spec.ephemeralIPs declares them.
 	// +optional
-	IPPools []OxideIPPool `json:"ipPools"`
+	EphemeralIPs []OxideEphemeralIP `json:"ephemeralIPs,omitempty"`
 	// AffinityGroups contain the resolved groups that every instance launched from this nodeclass
 	// joins. It is only published when every selector resolved, so a group that has gone missing
 	// holds the previous set rather than silently shrinking it.
@@ -273,11 +296,17 @@ type OxideAffinityGroup struct {
 	Managed bool `json:"managed"`
 }
 
-type OxideIPPool struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
+// OxideEphemeralIP is one resolved entry of spec.ephemeralIPs.
+type OxideEphemeralIP struct {
+	// IPVersion is the resolved address family, taken from the pool when the spec named one.
 	IPVersion string `json:"ipVersion"`
-	Default   bool   `json:"default"`
+	// PoolID and PoolName are empty when the entry takes the silo's default pool: the default is
+	// resolved by Nexus at launch, so naming a pool here would record a guess that a change of
+	// silo default would silently invalidate.
+	// +optional
+	PoolID string `json:"poolID,omitempty"`
+	// +optional
+	PoolName string `json:"poolName,omitempty"`
 }
 
 // StatusConditions registers the Ready condition along with the condition types owned by whichever
@@ -298,6 +327,9 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 	}
 	if in.Spec.Storage.NeedsSourceResolution() {
 		conds = append(conds, ConditionTypeStorageResolved)
+	}
+	if len(in.Spec.EphemeralIPs) > 0 {
+		conds = append(conds, ConditionTypeEphemeralIPsResolved)
 	}
 	if in.Spec.Affinity != nil {
 		conds = append(

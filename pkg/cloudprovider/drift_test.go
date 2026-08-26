@@ -28,6 +28,7 @@ const (
 	sshKeyID  = "55555555-0000-4000-8000-000000000001"
 	sshKeyIDB = "55555555-0000-4000-8000-000000000002"
 	ipPoolID  = "66666666-0000-4000-8000-000000000001"
+	ipPoolIDB = "66666666-0000-4000-8000-000000000002"
 	groupID   = "77777777-0000-4000-8000-000000000001"
 	groupIDB  = "77777777-0000-4000-8000-000000000002"
 )
@@ -57,7 +58,7 @@ func launched(hash string) *karpv1.NodeClaim {
 				v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
 				v1alpha1.AnnotationSubnet:                    subnetID,
 				v1alpha1.AnnotationSSHKeys:                   sshKeyID,
-				v1alpha1.AnnotationIPPools:                   ipPoolID,
+				v1alpha1.AnnotationEphemeralIPs:              "v4=192.0.2.10@" + ipPoolID,
 				v1alpha1.AnnotationAffinityGroups:            "aa:" + groupID,
 			},
 		},
@@ -90,7 +91,9 @@ func resolved(hash string) *v1alpha1.OxideNodeClass {
 			Images:  []v1alpha1.OxideImage{{ID: imageID}},
 			Subnets: []v1alpha1.OxideSubnet{{ID: subnetID}},
 			SSHKeys: []v1alpha1.OxideSSHKey{{ID: sshKeyID}},
-			IPPools: []v1alpha1.OxideIPPool{{ID: ipPoolID}},
+			EphemeralIPs: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4", PoolID: ipPoolID},
+			},
 			AffinityGroups: []v1alpha1.OxideAffinityGroup{
 				{ID: groupID, Type: v1alpha1.AffinityGroupTypeAntiAffinity},
 			},
@@ -218,11 +221,13 @@ func TestIsDrifted(t *testing.T) {
 			},
 		},
 		{
-			name: "an IP pool selection that no longer matches what was attached is drift",
+			name: "an ephemeral IP entry that no longer matches what was attached is drift",
 			nodeClass: func(nodeClass *v1alpha1.OxideNodeClass) {
-				nodeClass.Status.IPPools = nil
+				nodeClass.Status.EphemeralIPs = []v1alpha1.OxideEphemeralIP{
+					{IPVersion: "v4", PoolID: ipPoolIDB},
+				}
 			},
-			want: providers.DriftReasonIPPool,
+			want: providers.DriftReasonEphemeralIP,
 		},
 		{
 			name: "a group added to the desired set can only be joined by a new node",
@@ -314,7 +319,7 @@ func TestHashIgnoresSelectors(t *testing.T) {
 	nodeClass.Spec.ImageSelector = []v1alpha1.ImageSelector{{ID: imageID}}
 	nodeClass.Spec.SubnetSelector = []v1alpha1.SubnetSelector{{ID: subnetID}}
 	nodeClass.Spec.SSHKeySelector = []v1alpha1.SSHKeySelector{{ID: sshKeyID}}
-	nodeClass.Spec.IPPoolSelector = []v1alpha1.IPPoolSelector{{ID: ipPoolID}}
+	nodeClass.Spec.EphemeralIPs = []v1alpha1.EphemeralIP{{Pool: &v1alpha1.IPPoolRef{ID: ipPoolID}}}
 	if after := nodeClass.Hash(); after != before {
 		t.Errorf("Hash() = %q after rewriting selectors, want the unchanged %q", after, before)
 	}

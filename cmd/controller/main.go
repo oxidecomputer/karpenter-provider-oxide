@@ -94,6 +94,22 @@ const capacityPublishPeriod = 15 * time.Second
 // deliberate act and short enough to finish inside a maintenance window.
 const defaultInventoryRepairTolerationDuration = 30 * time.Minute
 
+// apiRequestTimeout bounds a single Oxide API request. The SDK's own default is ten minutes, which
+// is long enough that a request the control plane never answers reads as a hang rather than a
+// failure.
+//
+// Bounding it matters more here than the per-request cost suggests, because a launch that blocks
+// leaves its NodeClaim without a provider ID, and Karpenter treats a NodeClaim in that state as an
+// unsynced cluster: provisioning and disruption both stop cluster-wide until it resolves. A wedged
+// disk create is therefore not one failed launch but a scheduler that has stopped, so the timeout is
+// set well inside the time a launch is given to register rather than beyond it.
+//
+// Thirty seconds is above what these calls take when the rack is answering -- a launch's disk create
+// and instance create are seconds each -- so this fires on a control plane that has stopped
+// answering, not on a slow one. The call that trips it fails the launch, which Karpenter retries on
+// a fresh NodeClaim.
+const apiRequestTimeout = 30 * time.Second
+
 func run() error {
 	ctx, karpcore := karpentercore.NewOperator()
 
@@ -110,7 +126,11 @@ func run() error {
 		}
 	}
 
-	ox, err := oxide.NewClient(oxide.WithHost(host), oxide.WithToken(token))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(host),
+		oxide.WithToken(token),
+		oxide.WithTimeout(apiRequestTimeout),
+	)
 	if err != nil {
 		return err
 	}

@@ -397,12 +397,17 @@ be understood from the nodeclass alone. + |  | Optional: \{} +
 |===
 
 
-[id="{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ippoolselector"]
-==== IPPoolSelector
+[id="{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ephemeralip"]
+==== EphemeralIP
 
 
 
+EphemeralIP is one external address attached to an instance at launch.
 
+The two fields are the two ways Oxide's PoolSelector can name a pool, and at least one is
+required: ipVersion alone is PoolSelectorAuto, which takes the silo's default pool for that
+version; pool alone is PoolSelectorExplicit. Setting both is allowed and is checked for
+agreement when the nodeclass is reconciled, since only the resolved pool knows its version.
 
 
 
@@ -414,13 +419,39 @@ be understood from the nodeclass alone. + |  | Optional: \{} +
 [cols="20a,50a,15a,15a", options="header"]
 |===
 | Field | Description | Default | Validation
-| *`id`* __string__ | ID is the exact IP Pool ID + |  | Optional: \{} +
+| *`ipVersion`* __string__ | IPVersion is the address family this entry allocates. + |  | Enum: [v4 v6] +
+Optional: \{} +
 
-| *`name`* __string__ | Name is the exact name of an IP Pool + |  | Optional: \{} +
+| *`pool`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ippoolref[$$IPPoolRef$$]__ | Pool is the IP pool to allocate from. When unset the silo's default pool for ipVersion is +
+used. A pool is linked to a silo rather than owned by a project, so no project is named. + |  | Optional: \{} +
 
-| *`default`* __boolean__ | Default is the default IP Pool + |  | Optional: \{} +
+|===
 
-| *`ipVersion`* __string__ | IPVersion is either v4 or v6 + |  | Optional: \{} +
+
+
+
+[id="{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ippoolref"]
+==== IPPoolRef
+
+
+
+IPPoolRef identifies exactly one IP pool. Unlike the image and subnet selectors it is a
+reference rather than a selector: the number of ephemeral addresses an instance gets is fixed by
+the nodeclass, so a reference matching two pools is an error rather than two addresses.
+
+
+
+.Appears In:
+****
+- xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ephemeralip[$$EphemeralIP$$]
+****
+
+[cols="20a,50a,15a,15a", options="header"]
+|===
+| Field | Description | Default | Validation
+| *`id`* __string__ | ID is the exact IP pool UUID. + |  | Optional: \{} +
+
+| *`name`* __string__ | Name is the exact name of an IP pool. No wildcards: a reference resolves to one pool. + |  | Optional: \{} +
 
 |===
 
@@ -590,12 +621,12 @@ ever delete. + |  |
 |===
 
 
-[id="{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxideippool"]
-==== OxideIPPool
+[id="{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxideephemeralip"]
+==== OxideEphemeralIP
 
 
 
-
+OxideEphemeralIP is one resolved entry of spec.ephemeralIPs.
 
 
 
@@ -607,10 +638,13 @@ ever delete. + |  |
 [cols="20a,50a,15a,15a", options="header"]
 |===
 | Field | Description | Default | Validation
-| *`id`* __string__ |  |  | 
-| *`name`* __string__ |  |  | 
-| *`ipVersion`* __string__ |  |  | 
-| *`default`* __boolean__ |  |  | 
+| *`ipVersion`* __string__ | IPVersion is the resolved address family, taken from the pool when the spec named one. + |  | 
+| *`poolID`* __string__ | PoolID and PoolName are empty when the entry takes the silo's default pool: the default is +
+resolved by Nexus at launch, so naming a pool here would record a guess that a change of +
+silo default would silently invalidate. + |  | Optional: \{} +
+
+| *`poolName`* __string__ |  |  | Optional: \{} +
+
 |===
 
 
@@ -736,9 +770,16 @@ Excluded from the nodeclass hash for the same reason ImageSelector is. + |  |
 
 Excluded from the nodeclass hash for the same reason ImageSelector is. + |  | Optional: \{} +
 
-| *`ipPoolSelector`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ippoolselector[$$IPPoolSelector$$] array__ | IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from +
+| *`ephemeralIPs`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-ephemeralip[$$EphemeralIP$$] array__ | EphemeralIPs are the external addresses attached to every launched instance. An ephemeral +
+address is allocated when the instance is created and released when it is destroyed. +
 
-Excluded from the nodeclass hash for the same reason ImageSelector is. + |  | Optional: \{} +
+Oxide allows at most one ephemeral address per IP version, so at most two entries, and the +
+versions must differ. Unset means launched nodes get no external address. +
+
+Excluded from the nodeclass hash for the same reason ImageSelector is: what a pool reference +
+resolves to is a function of the silo as well as of the nodeclass, so drift is decided by +
+comparing resolved pools rather than by hashing the spec. + |  | MaxItems: 2 +
+Optional: \{} +
 
 | *`affinity`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-affinity[$$Affinity$$]__ | Affinity controls which Oxide affinity and anti-affinity groups launched instances join. + |  | Optional: \{} +
 
@@ -778,7 +819,8 @@ can be understood. The list is truncated, so it is not necessarily every match. 
 
 | *`sshKeys`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxidesshkey[$$OxideSSHKey$$] array__ | SSHKeys contain selected ssh keys to copy to launched nodes + |  | Optional: \{} +
 
-| *`ipPools`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxideippool[$$OxideIPPool$$] array__ | IPPools contain selected IP Pools for ephemeral IP attachment + |  | Optional: \{} +
+| *`ephemeralIPs`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxideephemeralip[$$OxideEphemeralIP$$] array__ | EphemeralIPs contain the resolved pool each launched instance takes an external address from, +
+in the order spec.ephemeralIPs declares them. + |  | Optional: \{} +
 
 | *`affinityGroups`* __xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxideaffinitygroup[$$OxideAffinityGroup$$] array__ | AffinityGroups contain the resolved groups that every instance launched from this nodeclass +
 joins. It is only published when every selector resolved, so a group that has gone missing +

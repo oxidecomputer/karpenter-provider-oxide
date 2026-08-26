@@ -65,7 +65,7 @@ type Controller struct {
 	subnets *subnet.Provider
 	// sshKeys resolves the keys copied into every instance the nodeclass launches.
 	sshKeys *sshkey.Provider
-	// ipPools resolves the pools each launched instance takes an ephemeral external address from.
+	// ipPools resolves the pool each of the nodeclass's ephemeral IP entries allocates from.
 	ipPools *ippool.Provider
 	// affinityGroups resolves the groups every launched instance joins, and owns the one group this
 	// nodeclass may have Karpenter create for it.
@@ -192,12 +192,29 @@ func (c *Controller) Reconcile(
 	logStale(ctx, "sshkey", sshKeys.Stale, sshKeys.Age)
 	nodeClass.Status.SSHKeys = sshKeys.Resolved
 
-	ipPools, err := c.ipPools.Resolve(ctx, nodeClass)
+	ephemeralIPs, err := c.ipPools.Resolve(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve IP Pools: %w", err)
 	}
-	logStale(ctx, "ippool", ipPools.Stale, ipPools.Age)
-	nodeClass.Status.IPPools = ipPools.Resolved
+	logStale(ctx, "ippool", ephemeralIPs.Stale, ephemeralIPs.Age)
+	switch {
+	case len(nodeClass.Spec.EphemeralIPs) == 0:
+		// Nothing is declared, so nothing is published. The condition is not registered for this
+		// nodeclass either, so there is none to set.
+		nodeClass.Status.EphemeralIPs = nil
+	case ephemeralIPs.Complete():
+		nodeClass.Status.EphemeralIPs = ephemeralIPs.Resolved
+		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeEphemeralIPsResolved)
+	default:
+		// Status.EphemeralIPs is deliberately left as it was, following the affinity groups: a launch
+		// reads it to decide what external addresses to ask for, so publishing a shrunken set over a
+		// resolution that failed would launch nodes with fewer addresses than the nodeclass asked for.
+		nodeClass.StatusConditions().SetFalse(
+			v1alpha1.ConditionTypeEphemeralIPsResolved,
+			ephemeralIPs.Reason,
+			ephemeralIPs.Message,
+		)
+	}
 
 	affinity, err := c.affinityGroups.Resolve(ctx, nodeClass)
 	if err != nil {

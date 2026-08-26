@@ -234,6 +234,55 @@ spec:
                       type: object
                   type: object
                 type: array
+              ephemeralIPs:
+                description: |-
+                  EphemeralIPs are the external addresses attached to every launched instance. An ephemeral
+                  address is allocated when the instance is created and released when it is destroyed.
+
+                  Oxide allows at most one ephemeral address per IP version, so at most two entries, and the
+                  versions must differ. Unset means launched nodes get no external address.
+
+                  Excluded from the nodeclass hash for the same reason ImageSelector is: what a pool reference
+                  resolves to is a function of the silo as well as of the nodeclass, so drift is decided by
+                  comparing resolved pools rather than by hashing the spec.
+                items:
+                  description: |-
+                    EphemeralIP is one external address attached to an instance at launch.
+
+                    The two fields are the two ways Oxide's PoolSelector can name a pool, and at least one is
+                    required: ipVersion alone is PoolSelectorAuto, which takes the silo's default pool for that
+                    version; pool alone is PoolSelectorExplicit. Setting both is allowed and is checked for
+                    agreement when the nodeclass is reconciled, since only the resolved pool knows its version.
+                  properties:
+                    ipVersion:
+                      description: IPVersion is the address family this entry allocates.
+                      enum:
+                      - v4
+                      - v6
+                      type: string
+                    pool:
+                      description: |-
+                        Pool is the IP pool to allocate from. When unset the silo's default pool for ipVersion is
+                        used. A pool is linked to a silo rather than owned by a project, so no project is named.
+                      properties:
+                        id:
+                          description: ID is the exact IP pool UUID.
+                          type: string
+                        name:
+                          description: 'Name is the exact name of an IP pool. No wildcards:
+                            a reference resolves to one pool.'
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of id or name must be set
+                        rule: '[has(self.id), has(self.name)].exists_one(x, x)'
+                  type: object
+                  x-kubernetes-validations:
+                  - message: an ephemeral IP needs an ipVersion, to take the silo's
+                      default pool for that version, or a pool to allocate from
+                    rule: has(self.ipVersion) || has(self.pool)
+                maxItems: 2
+                type: array
               imageSelector:
                 description: |-
                   ImageSelector is used to select an image to launch nodes with.
@@ -282,27 +331,6 @@ spec:
                         "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
 
                         When a wildcard matches several images the most recently uploaded one is launched.
-                      type: string
-                  type: object
-                type: array
-              ipPoolSelector:
-                description: |-
-                  IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from
-
-                  Excluded from the nodeclass hash for the same reason ImageSelector is.
-                items:
-                  properties:
-                    default:
-                      description: Default is the default IP Pool
-                      type: boolean
-                    id:
-                      description: ID is the exact IP Pool ID
-                      type: string
-                    ipVersion:
-                      description: IPVersion is either v4 or v6
-                      type: string
-                    name:
-                      description: Name is the exact name of an IP Pool
                       type: string
                   type: object
                 type: array
@@ -783,6 +811,29 @@ spec:
                   - type
                   type: object
                 type: array
+              ephemeralIPs:
+                description: |-
+                  EphemeralIPs contain the resolved pool each launched instance takes an external address from,
+                  in the order spec.ephemeralIPs declares them.
+                items:
+                  description: OxideEphemeralIP is one resolved entry of spec.ephemeralIPs.
+                  properties:
+                    ipVersion:
+                      description: IPVersion is the resolved address family, taken
+                        from the pool when the spec named one.
+                      type: string
+                    poolID:
+                      description: |-
+                        PoolID and PoolName are empty when the entry takes the silo's default pool: the default is
+                        resolved by Nexus at launch, so naming a pool here would record a guess that a change of
+                        silo default would silently invalidate.
+                      type: string
+                    poolName:
+                      type: string
+                  required:
+                  - ipVersion
+                  type: object
+                type: array
               images:
                 description: |-
                   Images contain selected images to use for the boot disk of launched nodes, most recently
@@ -817,25 +868,6 @@ spec:
                   - project
                   - timeCreated
                   - version
-                  type: object
-                type: array
-              ipPools:
-                description: IPPools contain selected IP Pools for ephemeral IP attachment
-                items:
-                  properties:
-                    default:
-                      type: boolean
-                    id:
-                      type: string
-                    ipVersion:
-                      type: string
-                    name:
-                      type: string
-                  required:
-                  - default
-                  - id
-                  - ipVersion
-                  - name
                   type: object
                 type: array
               kubeletArgs:

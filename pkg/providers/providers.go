@@ -45,9 +45,9 @@ const (
 	// DriftReasonSSHKey is a node whose authorized keys are not the ones the nodeclass now selects.
 	// Keys are copied in at launch, so neither adding nor removing one reaches a running node.
 	DriftReasonSSHKey cloudprovider.DriftReason = "SSHKeyDrift"
-	// DriftReasonIPPool is a node whose ephemeral external addresses do not come from the pools the
-	// nodeclass now selects.
-	DriftReasonIPPool cloudprovider.DriftReason = "IPPoolDrift"
+	// DriftReasonEphemeralIP is a node whose ephemeral external addresses do not come from the pools
+	// the nodeclass now declares.
+	DriftReasonEphemeralIP cloudprovider.DriftReason = "EphemeralIPDrift"
 	// DriftReasonAffinityGroup is reported when a node is not in a group its nodeclass now says every
 	// instance should be in. Replacing it is the only way it can join, since a group is joined at launch.
 	DriftReasonAffinityGroup cloudprovider.DriftReason = "AffinityGroup"

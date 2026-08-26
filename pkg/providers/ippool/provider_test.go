@@ -22,8 +22,8 @@ const (
 	ipPoolIDB = "66666666-0000-4000-8000-000000000002"
 )
 
-// fakeAPI is the Oxide IP pool API, counting the calls so that a cache hit can be asserted as the
-// absence of one.
+// fakeAPI is the Oxide IP pool API, counting the calls so that a cache hit -- and an entry that
+// resolves without asking anything at all -- can be asserted as the absence of one.
 type fakeAPI struct {
 	pools []oxide.SiloIpPool
 	lists int
@@ -90,93 +90,201 @@ func fakePools() []oxide.SiloIpPool {
 	}
 }
 
-func nodeClass(selectors ...v1alpha1.IPPoolSelector) *v1alpha1.OxideNodeClass {
+func nodeClass(ephemeralIPs ...v1alpha1.EphemeralIP) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
-		Spec: v1alpha1.OxideNodeClassSpec{IPPoolSelector: selectors},
+		Spec: v1alpha1.OxideNodeClassSpec{EphemeralIPs: ephemeralIPs},
 	}
 }
 
-func TestResolveSelectsTheDefaultPool(t *testing.T) {
+func byName(name string) *v1alpha1.IPPoolRef { return &v1alpha1.IPPoolRef{Name: name} }
+
+func TestResolve(t *testing.T) {
+	tests := []struct {
+		name         string
+		ephemeralIPs []v1alpha1.EphemeralIP
+		want         []v1alpha1.OxideEphemeralIP
+		wantReason   string
+		wantViews    int
+	}{
+		{
+			name:         "a pool named by name is viewed and takes its version from the pool",
+			ephemeralIPs: []v1alpha1.EphemeralIP{{Pool: byName("public-v6")}},
+			want: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v6", PoolID: ipPoolIDB, PoolName: "public-v6"},
+			},
+			wantViews: 1,
+		},
+		{
+			name:         "a pool named by ID resolves the same way",
+			ephemeralIPs: []v1alpha1.EphemeralIP{{Pool: &v1alpha1.IPPoolRef{ID: ipPoolID}}},
+			want: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4", PoolID: ipPoolID, PoolName: "public-v4"},
+			},
+			wantViews: 1,
+		},
+		{
+			// The silo's default is Nexus's to pick at launch, so there is nothing to ask about and
+			// nothing worth recording beyond the family the entry asked for.
+			name:         "an entry with no pool takes the silo default without an API call",
+			ephemeralIPs: []v1alpha1.EphemeralIP{{IPVersion: "v4"}},
+			want:         []v1alpha1.OxideEphemeralIP{{IPVersion: "v4"}},
+		},
+		{
+			name: "an entry setting both a version and a pool that agree resolves",
+			ephemeralIPs: []v1alpha1.EphemeralIP{
+				{IPVersion: "v4", Pool: byName("public-v4")},
+			},
+			want: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4", PoolID: ipPoolID, PoolName: "public-v4"},
+			},
+			wantViews: 1,
+		},
+		{
+			name: "an entry whose pool allocates the other family is reported",
+			ephemeralIPs: []v1alpha1.EphemeralIP{
+				{IPVersion: "v6", Pool: byName("public-v4")},
+			},
+			wantReason: v1alpha1.ConditionReasonIPVersionMismatch,
+			wantViews:  1,
+		},
+		{
+			name: "two entries spanning both families resolve",
+			ephemeralIPs: []v1alpha1.EphemeralIP{
+				{IPVersion: "v4"},
+				{Pool: byName("public-v6")},
+			},
+			want: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4"},
+				{IPVersion: "v6", PoolID: ipPoolIDB, PoolName: "public-v6"},
+			},
+			wantViews: 1,
+		},
+		{
+			// The pair Nexus refuses at launch, caught here so it reads off the nodeclass instead.
+			name: "two entries resolving to one family are refused",
+			ephemeralIPs: []v1alpha1.EphemeralIP{
+				{IPVersion: "v4"},
+				{Pool: byName("public-v4")},
+			},
+			wantReason: v1alpha1.ConditionReasonDuplicateIPVersion,
+			wantViews:  1,
+		},
+		{
+			name:         "a pool that does not exist is reported rather than retried",
+			ephemeralIPs: []v1alpha1.EphemeralIP{{Pool: byName("missing")}},
+			wantReason:   v1alpha1.ConditionReasonIPPoolNotFound,
+			wantViews:    1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{pools: fakePools()}
+			provider := NewProvider(api.server(t), time.Hour)
+
+			got, err := provider.Resolve(context.Background(), nodeClass(tt.ephemeralIPs...))
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if got.Reason != tt.wantReason {
+				t.Fatalf("Resolve() reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+			if tt.wantReason != "" {
+				if got.Message == "" {
+					t.Error("Resolve() recorded no message alongside its reason")
+				}
+				if len(got.Unmatched) == 0 {
+					t.Error("Resolve() named none of the entries that failed")
+				}
+				if got.Resolved != nil {
+					t.Errorf(
+						"Resolve() published %v, want nothing on an incomplete resolution",
+						got.Resolved,
+					)
+				}
+			}
+			if len(got.Resolved) != len(tt.want) {
+				t.Fatalf("Resolve() = %v, want %v", got.Resolved, tt.want)
+			}
+			for i, want := range tt.want {
+				if got.Resolved[i] != want {
+					t.Errorf("Resolve()[%d] = %+v, want %+v", i, got.Resolved[i], want)
+				}
+			}
+			if api.views != tt.wantViews {
+				t.Errorf("the API was viewed %d times, want %d", api.views, tt.wantViews)
+			}
+			// There is no listing left in this provider at all: every entry is a direct view or no
+			// call, which is what keeps a nodeclass from getting one address per pool in the silo.
+			if api.lists != 0 {
+				t.Errorf("the API was listed %d times, want none", api.lists)
+			}
+		})
+	}
+}
+
+// A nodeclass declaring no ephemeral IPs has nothing to resolve, and must not reach the API to
+// discover that.
+func TestResolveWithoutEntries(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), time.Hour)
 
-	got, err := provider.Resolve(
-		context.Background(),
-		nodeClass(v1alpha1.IPPoolSelector{Default: true}),
-	)
+	got, err := provider.Resolve(context.Background(), nodeClass())
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(got.Resolved) != 1 || got.Resolved[0].ID != ipPoolID {
-		t.Errorf("Resolve() = %v, want only the default pool", got.Resolved)
+	if len(got.Resolved) != 0 || !got.Complete() {
+		t.Errorf("Resolve() = %+v, want an empty complete resolution", got)
 	}
-}
-
-// A pool named in a selector is looked up directly rather than listed, since that is the one form
-// the API can resolve on its own.
-func TestANamedPoolIsViewedRatherThanListed(t *testing.T) {
-	api := &fakeAPI{pools: fakePools()}
-	provider := NewProvider(api.server(t), time.Hour)
-
-	if _, err := provider.Resolve(
-		context.Background(),
-		nodeClass(v1alpha1.IPPoolSelector{Name: "public-v4"}),
-	); err != nil {
-		t.Fatalf("Resolve() error = %v", err)
-	}
-	if api.views != 1 || api.lists != 0 {
-		t.Errorf(
-			"the API was viewed %d times and listed %d, want one view and no list",
-			api.views,
-			api.lists,
-		)
+	if api.views != 0 || api.lists != 0 {
+		t.Errorf("the API was called %d times, want none", api.views+api.lists)
 	}
 }
 
 func TestResolveServesACacheHit(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), time.Hour)
-	class := nodeClass(v1alpha1.IPPoolSelector{Default: true})
+	class := nodeClass(v1alpha1.EphemeralIP{Pool: byName("public-v4")})
 
 	for range 3 {
 		if _, err := provider.Resolve(context.Background(), class); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 1 {
-		t.Errorf("the API was listed %d times across three resolutions, want 1", api.lists)
+	if api.views != 1 {
+		t.Errorf("the API was viewed %d times across three resolutions, want 1", api.views)
 	}
 }
 
 // A zero TTL makes every reading immediately due, which is the same code path as a reading that has
 // aged out without a test having to wait for it.
-func TestResolvePastTheTTLListsAgain(t *testing.T) {
+func TestResolvePastTheTTLViewsAgain(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), 0)
-	class := nodeClass(v1alpha1.IPPoolSelector{Default: true})
+	class := nodeClass(v1alpha1.EphemeralIP{Pool: byName("public-v4")})
 
 	for range 2 {
 		if _, err := provider.Resolve(context.Background(), class); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 2 {
-		t.Errorf("the API was listed %d times, want one per resolution", api.lists)
+	if api.views != 2 {
+		t.Errorf("the API was viewed %d times, want one per resolution", api.views)
 	}
 }
 
-func TestAnEditedSelectorResolvesAgain(t *testing.T) {
+func TestAnEditedEntryResolvesAgain(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), time.Hour)
 
-	for _, version := range []string{"", "v6"} {
-		class := nodeClass(v1alpha1.IPPoolSelector{Default: true, IPVersion: version})
+	for _, name := range []string{"public-v4", "public-v6"} {
+		class := nodeClass(v1alpha1.EphemeralIP{Pool: byName(name)})
 		if _, err := provider.Resolve(context.Background(), class); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 2 {
-		t.Errorf("the API was listed %d times for two different selectors, want 2", api.lists)
+	if api.views != 2 {
+		t.Errorf("the API was viewed %d times for two different entries, want 2", api.views)
 	}
 }
 
@@ -184,17 +292,21 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), time.Hour)
 
-	second := nodeClass(v1alpha1.IPPoolSelector{Default: true})
+	second := nodeClass(v1alpha1.EphemeralIP{Pool: byName("public-v4")})
 	second.ObjectMeta = metav1.ObjectMeta{Name: "another"}
-	for _, class := range []*v1alpha1.OxideNodeClass{nodeClass(v1alpha1.IPPoolSelector{Default: true}), second} {
+	classes := []*v1alpha1.OxideNodeClass{
+		nodeClass(v1alpha1.EphemeralIP{Pool: byName("public-v4")}),
+		second,
+	}
+	for _, class := range classes {
 		if _, err := provider.Resolve(context.Background(), class); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 1 {
+	if api.views != 1 {
 		t.Errorf(
-			"the API was listed %d times for two nodeclasses selecting the same pools, want 1",
-			api.lists,
+			"the API was viewed %d times for two nodeclasses declaring the same entries, want 1",
+			api.views,
 		)
 	}
 }
@@ -203,35 +315,72 @@ func TestDriftReason(t *testing.T) {
 	tests := []struct {
 		name     string
 		recorded *string
-		desired  []v1alpha1.OxideIPPool
+		desired  []v1alpha1.OxideEphemeralIP
 		want     karpcloudprovider.DriftReason
 	}{
 		{
-			name:     "a node with addresses from the selected pools has not drifted",
-			recorded: new(ipPoolID),
-			desired:  []v1alpha1.OxideIPPool{{ID: ipPoolID}},
+			name:     "a node with an address from the declared pool has not drifted",
+			recorded: new("v4=192.0.2.10@" + ipPoolID),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4", PoolID: ipPoolID}},
 		},
 		{
-			// Both directions: one ephemeral address is attached per selected pool at launch, and
-			// nothing attaches or detaches one afterwards.
-			name:     "a pool added to the set replaces the nodes without an address from it",
-			recorded: new(ipPoolID),
-			desired:  []v1alpha1.OxideIPPool{{ID: ipPoolID}, {ID: ipPoolIDB}},
-			want:     providers.DriftReasonIPPool,
+			name:     "an entry added is an address the node cannot be given in place",
+			recorded: new("v4=192.0.2.10@" + ipPoolID),
+			desired: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4", PoolID: ipPoolID},
+				{IPVersion: "v6", PoolID: ipPoolIDB},
+			},
+			want: providers.DriftReasonEphemeralIP,
 		},
 		{
-			name:     "and a pool removed replaces the nodes still holding one of its addresses",
-			recorded: new(ipPoolID + "," + ipPoolIDB),
-			desired:  []v1alpha1.OxideIPPool{{ID: ipPoolID}},
-			want:     providers.DriftReasonIPPool,
+			name:     "and an entry removed is an address it still holds",
+			recorded: new("v4=192.0.2.10@" + ipPoolID + ",v6=2001:db8::1@" + ipPoolIDB),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4", PoolID: ipPoolID}},
+			want:     providers.DriftReasonEphemeralIP,
 		},
 		{
-			name:     "a launch that recorded no pools and a nodeclass selecting none agree",
+			// The whole point of keying by version: the set of pool IDs is identical on both sides,
+			// and which family each one serves is not.
+			name:     "swapping which pool serves which family is drift",
+			recorded: new("v4=192.0.2.10@" + ipPoolID + ",v6=2001:db8::1@" + ipPoolIDB),
+			desired: []v1alpha1.OxideEphemeralIP{
+				{IPVersion: "v4", PoolID: ipPoolIDB},
+				{IPVersion: "v6", PoolID: ipPoolID},
+			},
+			want: providers.DriftReasonEphemeralIP,
+		},
+		{
+			name:     "a pool swapped for another of the same family is drift",
+			recorded: new("v4=192.0.2.10@" + ipPoolID),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4", PoolID: ipPoolIDB}},
+			want:     providers.DriftReasonEphemeralIP,
+		},
+		{
+			// An entry that asked for the silo default asked for whatever the default is, so the
+			// default moving underneath a fleet is not a reason to replace it.
+			name:     "an entry left to the silo default compares on family alone",
+			recorded: new("v4=192.0.2.10@" + ipPoolIDB),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4"}},
+		},
+		{
+			name:     "but it still drifts when the family it defaults for changes",
+			recorded: new("v4=192.0.2.10@" + ipPoolID),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v6"}},
+			want:     providers.DriftReasonEphemeralIP,
+		},
+		{
+			name:     "a launch that recorded no addresses and a nodeclass declaring none agree",
 			recorded: new(""),
 		},
 		{
+			name:     "a node launched with no address drifts once one is declared",
+			recorded: new(""),
+			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4"}},
+			want:     providers.DriftReasonEphemeralIP,
+		},
+		{
 			name:    "a NodeClaim launched before the record existed cannot be compared",
-			desired: []v1alpha1.OxideIPPool{{ID: ipPoolID}},
+			desired: []v1alpha1.OxideEphemeralIP{{IPVersion: "v4", PoolID: ipPoolID}},
 		},
 	}
 
@@ -241,10 +390,10 @@ func TestDriftReason(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
 			}
 			if tt.recorded != nil {
-				nodeClaim.Annotations[v1alpha1.AnnotationIPPools] = *tt.recorded
+				nodeClaim.Annotations[v1alpha1.AnnotationEphemeralIPs] = *tt.recorded
 			}
 			class := &v1alpha1.OxideNodeClass{
-				Status: v1alpha1.OxideNodeClassStatus{IPPools: tt.desired},
+				Status: v1alpha1.OxideNodeClassStatus{EphemeralIPs: tt.desired},
 			}
 			if got := (&Provider{}).DriftReason(nodeClaim, class); got != tt.want {
 				t.Errorf("DriftReason() = %q, want %q", got, tt.want)

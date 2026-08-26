@@ -8,8 +8,8 @@ import (
 )
 
 // The launch record is what a NodeClaim remembers about the resolved state it was launched from: the
-// subnet its interface sits in, the SSH keys copied into it, the IP pools its external addresses came
-// from. None of it can be read back off the instance in a form that answers the drift question -- a
+// subnet its interface sits in, the SSH keys copied into it, the external addresses attached to it.
+// None of it can be read back off the instance in a form that answers the drift question -- a
 // pool is not recoverable from an address, and a key is not recoverable from an authorized_keys file
 // nobody promises stayed untouched -- so it is recorded at launch, in the same style as
 // AnnotationAffinityGroups.
@@ -62,13 +62,61 @@ func SSHKeyIDs(sshKeys []OxideSSHKey) []string {
 	return ids
 }
 
-// IPPoolIDs is the resolved IP pools, in the form the launch record stores them.
-func IPPoolIDs(ipPools []OxideIPPool) []string {
-	ids := make([]string, 0, len(ipPools))
-	for _, ipPool := range ipPools {
-		ids = append(ids, ipPool.ID)
+// EphemeralIPRecord is one external address an instance was launched with, as the launch record
+// remembers it: which family it belongs to, the address itself, and the pool it actually came from.
+//
+// The pool is ground truth read back off the instance rather than what the nodeclass asked for,
+// which is the only way an entry that took the silo's default records a pool at all.
+type EphemeralIPRecord struct {
+	IPVersion string
+	Address   string
+	PoolID    string
+}
+
+// EncodeEphemeralIPs renders the addresses an instance launched with as an annotation value:
+// "<version>=<address>@<pool-uuid>" entries, sorted by version and comma-separated.
+//
+// Keyed by version rather than written as an unordered set of pool IDs because Oxide gives an
+// instance at most one ephemeral address per version, so the version is the slot each entry
+// occupies. It is also what makes swapping which pool serves v4 and which serves v6 visible, which
+// a set of IDs cannot see.
+func EncodeEphemeralIPs(records []EphemeralIPRecord) string {
+	entries := make([]string, 0, len(records))
+	for _, record := range records {
+		version := strings.TrimSpace(record.IPVersion)
+		if version == "" {
+			continue
+		}
+		entries = append(
+			entries,
+			version+"="+strings.TrimSpace(record.Address)+"@"+strings.TrimSpace(record.PoolID),
+		)
 	}
-	return ids
+	slices.Sort(entries)
+	return strings.Join(slices.Compact(entries), ",")
+}
+
+// ParseEphemeralIPs reads an EncodeEphemeralIPs value back into the records it holds, keyed by IP
+// version. An entry with no "=" is dropped, since it says nothing about which slot it filled; the
+// "@<pool>" half is optional so that an address whose pool was not recorded still names its version.
+func ParseEphemeralIPs(value string) map[string]EphemeralIPRecord {
+	records := map[string]EphemeralIPRecord{}
+	for entry := range strings.SplitSeq(value, ",") {
+		version, rest, found := strings.Cut(strings.TrimSpace(entry), "=")
+		if !found {
+			continue
+		}
+		if version = strings.TrimSpace(version); version == "" {
+			continue
+		}
+		address, pool, _ := strings.Cut(rest, "@")
+		records[version] = EphemeralIPRecord{
+			IPVersion: version,
+			Address:   strings.TrimSpace(address),
+			PoolID:    strings.TrimSpace(pool),
+		}
+	}
+	return records
 }
 
 // EncodeDiskSetSources renders the source each diskSet's disks were created from as an annotation

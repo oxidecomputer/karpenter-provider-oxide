@@ -50,7 +50,12 @@ func TestEffectiveInstanceTypeUsesNodeOverlayStore(t *testing.T) {
 		t.Fatalf("effectiveInstanceType() error = %v", err)
 	}
 	if !store.called || store.pool != "priced-pool" {
-		t.Fatalf("overlay store call = (%v, %q), want (true, %q)", store.called, store.pool, "priced-pool")
+		t.Fatalf(
+			"overlay store call = (%v, %q), want (true, %q)",
+			store.called,
+			store.pool,
+			"priced-pool",
+		)
 	}
 	if price := got.Offerings[0].Price; price != 0.42 {
 		t.Fatalf("effective price = %v, want 0.42", price)

@@ -132,9 +132,15 @@ var (
 	// carries different public key material, which is exactly the change worth replacing a node over.
 	AnnotationSSHKeys = apis.Group + "/ssh-keys"
 
-	// AnnotationIPPools is the set of IP pool IDs the instance's ephemeral external IPs were
-	// allocated from at launch, sorted and comma-separated. One IP is attached per resolved pool.
-	AnnotationIPPools = apis.Group + "/ip-pools"
+	// AnnotationEphemeralIPs is the external addresses the instance was launched with, as
+	// "<version>=<address>@<pool-uuid>" entries sorted by version and comma-separated.
+	//
+	// Keyed by IP version because that is the slot an ephemeral address occupies: Oxide gives an
+	// instance at most one per version. The pool is the one the address actually came from, read
+	// back off the instance at launch, which is the only way an entry that took the silo's default
+	// records a pool at all. Written once at launch and never re-read from the API, since listing an
+	// instance's external IPs is a call per instance per reconcile.
+	AnnotationEphemeralIPs = apis.Group + "/ephemeral-ips"
 
 	// AnnotationHourlyPrice is the effective hourly price Karpenter used for the instance's offering
 	// when it launched the NodeClaim, including any NodeOverlay price override or adjustment. The

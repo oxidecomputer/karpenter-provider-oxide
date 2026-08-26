@@ -73,11 +73,18 @@ type OxideNodeClassSpec struct {
 	// Excluded from the nodeclass hash for the same reason ImageSelector is.
 	// +optional
 	SSHKeySelector []SSHKeySelector `json:"sshKeySelector,omitempty" hash:"ignore"`
-	// IPPoolSelector is used to select IP Pools to allocate ephemeral IPs from
+	// EphemeralIPs are the external addresses attached to every launched instance. An ephemeral
+	// address is allocated when the instance is created and released when it is destroyed.
 	//
-	// Excluded from the nodeclass hash for the same reason ImageSelector is.
+	// Oxide allows at most one ephemeral address per IP version, so at most two entries, and the
+	// versions must differ. Unset means launched nodes get no external address.
+	//
+	// Excluded from the nodeclass hash for the same reason ImageSelector is: what a pool reference
+	// resolves to is a function of the silo as well as of the nodeclass, so drift is decided by
+	// comparing resolved pools rather than by hashing the spec.
+	// +kubebuilder:validation:MaxItems=2
 	// +optional
-	IPPoolSelector []IPPoolSelector `json:"ipPoolSelector,omitempty" hash:"ignore"`
+	EphemeralIPs []EphemeralIP `json:"ephemeralIPs,omitempty" hash:"ignore"`
 	// Affinity controls which Oxide affinity and anti-affinity groups launched instances join.
 	// +optional
 	Affinity *Affinity `json:"affinity,omitempty"`
@@ -501,19 +508,37 @@ type SubnetSelector struct {
 	Project string `json:"project,omitempty"`
 }
 
-type IPPoolSelector struct {
-	// ID is the exact IP Pool ID
-	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the exact name of an IP Pool
-	// +optional
-	Name string `json:"name,omitempty"`
-	// Default is the default IP Pool
-	// +optional
-	Default bool `json:"default,omitempty"`
-	// IPVersion is either v4 or v6
+// EphemeralIP is one external address attached to an instance at launch.
+//
+// The two fields are the two ways Oxide's PoolSelector can name a pool, and at least one is
+// required: ipVersion alone is PoolSelectorAuto, which takes the silo's default pool for that
+// version; pool alone is PoolSelectorExplicit. Setting both is allowed and is checked for
+// agreement when the nodeclass is reconciled, since only the resolved pool knows its version.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.ipVersion) || has(self.pool)",message="an ephemeral IP needs an ipVersion, to take the silo's default pool for that version, or a pool to allocate from"
+type EphemeralIP struct {
+	// IPVersion is the address family this entry allocates.
+	// +kubebuilder:validation:Enum=v4;v6
 	// +optional
 	IPVersion string `json:"ipVersion,omitempty"`
+	// Pool is the IP pool to allocate from. When unset the silo's default pool for ipVersion is
+	// used. A pool is linked to a silo rather than owned by a project, so no project is named.
+	// +optional
+	Pool *IPPoolRef `json:"pool,omitempty"`
+}
+
+// IPPoolRef identifies exactly one IP pool. Unlike the image and subnet selectors it is a
+// reference rather than a selector: the number of ephemeral addresses an instance gets is fixed by
+// the nodeclass, so a reference matching two pools is an error rather than two addresses.
+//
+// +kubebuilder:validation:XValidation:rule="[has(self.id), has(self.name)].exists_one(x, x)",message="exactly one of id or name must be set"
+type IPPoolRef struct {
+	// ID is the exact IP pool UUID.
+	// +optional
+	ID string `json:"id,omitempty"`
+	// Name is the exact name of an IP pool. No wildcards: a reference resolves to one pool.
+	// +optional
+	Name string `json:"name,omitempty"`
 }
 
 type SSHKeySelector struct {

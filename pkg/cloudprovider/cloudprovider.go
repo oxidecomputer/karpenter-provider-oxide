@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -307,20 +308,7 @@ func (c *OxideCloudProvider) Create(
 					},
 				},
 			},
-			ExternalIps: lo.Map(
-				nodeClass.Status.IPPools,
-				func(ipPool v1alpha1.OxideIPPool, _ int) oxide.ExternalIpCreate {
-					return oxide.ExternalIpCreate{
-						Value: &oxide.ExternalIpCreateEphemeral{
-							PoolSelector: oxide.PoolSelector{
-								Value: &oxide.PoolSelectorExplicit{
-									Pool: oxide.NameOrId(ipPool.Name),
-								},
-							},
-						},
-					}
-				},
-			),
+			ExternalIps: externalIPs(nodeClass.Status.EphemeralIPs),
 			SshPublicKeys: lo.Map(
 				nodeClass.Status.SSHKeys,
 				func(sshKey v1alpha1.OxideSSHKey, _ int) oxide.NameOrId {
@@ -417,7 +405,48 @@ func (c *OxideCloudProvider) Create(
 	// policy is satisfiable. Cleared unconditionally: a nodeclass with no history is a no-op.
 	c.affinityPolicy.RecordSuccess(ctx, nodeClass.Name)
 
-	resolvedNodeClaim, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
+	resolvedNodeClaim, err := c.resolveLaunched(
+		ctx,
+		launched,
+		nodeClass,
+		nodeClaim,
+		name,
+		subnet.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
+
+	return resolvedNodeClaim, nil
+}
+
+// resolveLaunched is the NodeClaim Karpenter gets back from a launch: the instance's own labels and
+// status, plus the launch record stamped on top of it.
+//
+// The record is what this instance was actually launched from, as opposed to what the nodeclass would
+// launch from now. Drift is the difference between the two, and only this side of it can be recorded
+// here -- the other side moves whenever the spec or the project does.
+//
+// Reading the instance's external addresses is part of it, which is why this takes a context: they
+// are the one piece of the record that cannot be assembled from the nodeclass alone.
+func (c *OxideCloudProvider) resolveLaunched(
+	ctx context.Context,
+	launched *oxide.Instance,
+	nodeClass *v1alpha1.OxideNodeClass,
+	nodeClaim *karpcorev1.NodeClaim,
+	instanceName string,
+	subnetID string,
+) (*karpcorev1.NodeClaim, error) {
+	resolved, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
+	if err != nil {
+		return nil, err
+	}
+	// Which address each entry actually got, and which pool it came from, are only knowable by asking
+	// the instance: oxide.Instance carries no external IPs, and an entry that took the silo's default
+	// never named a pool for the nodeclass to record. Read here and only here -- doing it from Get or
+	// List would be one extra call per instance on every reconcile.
+	ephemeralIPs, err := c.ephemeralIPRecords(ctx, nodeClass, instanceName)
 	if err != nil {
 		return nil, err
 	}
@@ -426,21 +455,22 @@ func (c *OxideCloudProvider) Create(
 	// it can be recorded here -- the other side moves whenever the spec or the project does.
 	//
 	// The subnet is recorded singular because a launch picks one of the selected subnets: the resolved
-	// set says what could have been used, and only this says what was. The keys and pools are recorded
-	// as the whole set, since a launch uses all of them.
-	resolvedNodeClaim.Annotations = lo.Assign(resolvedNodeClaim.Annotations, map[string]string{
+	// set says what could have been used, and only this says what was. The keys and external addresses
+	// are recorded whole, since a launch uses all of them.
+	resolved.Annotations = lo.Assign(resolved.Annotations, map[string]string{
 		v1alpha1.AnnotationOxideNodeClassHash:        nodeClass.Hash(),
 		v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
-		v1alpha1.AnnotationSubnet:                    subnet.ID,
+		v1alpha1.AnnotationSubnet:                    subnetID,
 		// Written even when empty, which is what tells a node launched with no keys apart from one
 		// launched before there was a record to keep. The first drifts when a key is added; the
 		// second cannot be compared at all and never drifts.
 		v1alpha1.AnnotationSSHKeys: v1alpha1.EncodeIDs(
 			v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys),
 		),
-		v1alpha1.AnnotationIPPools: v1alpha1.EncodeIDs(
-			v1alpha1.IPPoolIDs(nodeClass.Status.IPPools),
-		),
+		// Written even when empty, for the reason the SSH keys are: an empty value is a node launched
+		// with no external address, and no annotation at all is a node launched before there was a
+		// record, which cannot be compared and never drifts.
+		v1alpha1.AnnotationEphemeralIPs: v1alpha1.EncodeEphemeralIPs(ephemeralIPs),
 		// Written even when a set has no source, for the reason the SSH keys are: an entry with an
 		// empty value is a set whose disks were created blank, and no entry at all is a set nothing
 		// was recorded for, which cannot be compared and never drifts.
@@ -452,13 +482,99 @@ func (c *OxideCloudProvider) Create(
 	// that a group removed from it can still be left. The desired set alone cannot answer either
 	// question: it says what an instance should be in, not what this one actually joined.
 	if len(nodeClass.Status.AffinityGroups) > 0 {
-		resolvedNodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
+		resolved.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
 			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
 		)
 	}
-	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
+	return resolved, nil
+}
 
-	return resolvedNodeClaim, nil
+// externalIPs is the external address attachments a launch asks for: exactly one per resolved
+// ephemeral IP entry, never one per pool that happens to exist in the silo.
+//
+// That is the whole shape of this feature. Oxide allows at most one ephemeral address per IP version
+// and refuses a pair that does not span two versions, so how many addresses an instance gets has to
+// be fixed by the nodeclass rather than discovered from the silo.
+func externalIPs(ephemeralIPs []v1alpha1.OxideEphemeralIP) []oxide.ExternalIpCreate {
+	return lo.Map(
+		ephemeralIPs,
+		func(ephemeralIP v1alpha1.OxideEphemeralIP, _ int) oxide.ExternalIpCreate {
+			// An entry that named no pool takes the silo's default for its version, which is Nexus's
+			// to resolve at launch rather than something worth guessing at here.
+			selector := oxide.PoolSelector{
+				Value: &oxide.PoolSelectorAuto{IpVersion: oxide.IpVersion(ephemeralIP.IPVersion)},
+			}
+			if ephemeralIP.PoolName != "" {
+				selector = oxide.PoolSelector{
+					Value: &oxide.PoolSelectorExplicit{Pool: oxide.NameOrId(ephemeralIP.PoolName)},
+				}
+			}
+			return oxide.ExternalIpCreate{
+				Value: &oxide.ExternalIpCreateEphemeral{PoolSelector: selector},
+			}
+		},
+	)
+}
+
+// ephemeralIPRecords reads back the external addresses the instance was launched with, in the form
+// the launch record stores them.
+//
+// A nodeclass declaring none is answered without an API call: nothing was attached, so nothing can be
+// listed, and the empty record is written all the same to distinguish a node launched with no address
+// from one launched before there was a record.
+//
+// Only the ephemeral addresses are kept. An instance also carries a SNAT address it did not ask for,
+// and could carry a floating IP somebody attached by hand; neither is something the nodeclass
+// templated, so neither belongs in a record that drift is decided against.
+func (c *OxideCloudProvider) ephemeralIPRecords(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	instanceName string,
+) ([]v1alpha1.EphemeralIPRecord, error) {
+	if len(nodeClass.Status.EphemeralIPs) == 0 {
+		return nil, nil
+	}
+	listed, err := c.ox.InstanceExternalIpList(ctx, oxide.InstanceExternalIpListParams{
+		Project:  oxide.NameOrId(c.project),
+		Instance: oxide.NameOrId(instanceName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"unable to read the external addresses of instance %q: %w",
+			instanceName,
+			err,
+		)
+	}
+
+	records := make([]v1alpha1.EphemeralIPRecord, 0, len(listed.Items))
+	for _, externalIP := range listed.Items {
+		ephemeral, ok := externalIP.Value.(*oxide.ExternalIpEphemeral)
+		if !ok {
+			continue
+		}
+		address, err := netip.ParseAddr(ephemeral.Ip)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"instance %q reported the unparseable external address %q: %w",
+				instanceName,
+				ephemeral.Ip,
+				err,
+			)
+		}
+		records = append(records, v1alpha1.EphemeralIPRecord{
+			// Derived from the address rather than looked up on the pool. The family of an address is
+			// a property of the address, so asking the API for it would be a call per launch to learn
+			// something already in hand.
+			IPVersion: lo.Ternary(
+				address.Is4(),
+				string(oxide.IpVersionV4),
+				string(oxide.IpVersionV6),
+			),
+			Address: address.String(),
+			PoolID:  ephemeral.IpPoolId,
+		})
+	}
+	return records, nil
 }
 
 // effectiveInstanceType returns the selected instance type as Karpenter evaluated it for this
@@ -484,7 +600,11 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 	}
 	effective, err := c.instanceTypeStore.Apply(nodePoolName, instanceType)
 	if err != nil {
-		return nil, fmt.Errorf("applying nodeoverlays to instance type %q, %w", instanceTypeName, err)
+		return nil, fmt.Errorf(
+			"applying nodeoverlays to instance type %q, %w",
+			instanceTypeName,
+			err,
+		)
 	}
 	return effective, nil
 }
@@ -492,7 +612,10 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 // annotateHourlyPrice records the price of the offering the provider actually resolved. There is no
 // fallback to the cheapest offering: if Oxide gains more zones or capacity types later, publishing a
 // plausible but different offering's price would be worse than leaving the annotation absent.
-func annotateHourlyPrice(nodeClaim *karpcorev1.NodeClaim, instanceType *cloudprovider.InstanceType) {
+func annotateHourlyPrice(
+	nodeClaim *karpcorev1.NodeClaim,
+	instanceType *cloudprovider.InstanceType,
+) {
 	price, ok := instanceType.OfferingPrice(
 		nodeClaim.Labels[corev1.LabelTopologyZone],
 		nodeClaim.Labels[karpcorev1.CapacityTypeLabelKey],

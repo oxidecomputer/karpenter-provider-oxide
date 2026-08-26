@@ -459,7 +459,7 @@ Every `OxideNodeClass` parameter is covered, in one of two ways:
 | a `diskSet`'s `imageSelector` or `snapshotSelector`, or a newer source matching an unchanged one | `DiskSetSourceDrift` | `status.storage.diskSets[].images[0]` vs. the sources recorded at launch |
 | `subnetSelector`                                                     | `SubnetDrift`  | `status.subnets` vs. the subnet the node launched in |
 | `sshKeySelector`                                                     | `SSHKeyDrift`  | `status.sshKeys` vs. the keys copied at launch    |
-| `ipPoolSelector`                                                     | `IPPoolDrift`  | `status.ipPools` vs. the pools the node's IPs came from |
+| `ephemeralIPs`                                                       | `EphemeralIPDrift` | `status.ephemeralIPs` vs. the addresses attached at launch, keyed by IP version |
 | `affinity`                                                           | `AffinityGroup` | `status.affinityGroups` vs. the groups the node joined |
 
 The split is not arbitrary. What the spec states outright can only change when someone edits the
