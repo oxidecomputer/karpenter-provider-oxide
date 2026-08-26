@@ -25,7 +25,11 @@ import (
 
 func init() {
 	karpv1.RestrictedLabelDomains = karpv1.RestrictedLabelDomains.Insert(RestrictedLabelDomains...)
-	karpv1.WellKnownLabels = karpv1.WellKnownLabels.Insert()
+	karpv1.WellKnownLabels = karpv1.WellKnownLabels.Insert(
+		LabelInstanceCPU,
+		LabelInstanceMemory,
+		LabelInstanceCPUMemoryRatio,
+	)
 	karpv1.WellKnownResources.Insert()
 }
 
@@ -45,8 +49,14 @@ var (
 		apis.Group,
 	}
 
-	LabelInstanceCPU = apis.Group + "/instance-cpu"
-	LabelNodeClass   = apis.Group + "/oxidenodeclass"
+	// CPU and memory are numeric so NodePool requirements can use range operators.
+	// Memory is expressed in MiB to match the AWS provider's scheduling label convention.
+	// CPUMemoryRatio is a reduced CPU:GiB ratio, with a label-safe hyphen in place of the
+	// colon; 4 CPUs / 16 GiB is represented as 1-4.
+	LabelInstanceCPU            = apis.Group + "/instance-cpu"
+	LabelInstanceMemory         = apis.Group + "/instance-memory"
+	LabelInstanceCPUMemoryRatio = apis.Group + "/instance-cpu-memory-ratio"
+	LabelNodeClass              = apis.Group + "/oxidenodeclass"
 
 	// Sled placement labels, written to Nodes by the optional inventory controller.
 	LabelSledID          = apis.Group + "/sled-id"

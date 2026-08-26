@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
@@ -445,6 +446,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			corev1.ResourcePods:   *resource.NewQuantity(int64(110), resource.DecimalSI),
 		}
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
+		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
 		refused, _ := availability.Unavailable(specs)
 
 		overQuota := false
@@ -474,6 +476,21 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 				corev1.LabelWindowsBuild: scheduling.NewRequirement(
 					corev1.LabelWindowsBuild,
 					corev1.NodeSelectorOpDoesNotExist,
+				),
+				v1alpha1.LabelInstanceCPU: scheduling.NewRequirement(
+					v1alpha1.LabelInstanceCPU,
+					corev1.NodeSelectorOpIn,
+					strconv.Itoa(cpus),
+				),
+				v1alpha1.LabelInstanceMemory: scheduling.NewRequirement(
+					v1alpha1.LabelInstanceMemory,
+					corev1.NodeSelectorOpIn,
+					strconv.Itoa(mem*1024),
+				),
+				v1alpha1.LabelInstanceCPUMemoryRatio: scheduling.NewRequirement(
+					v1alpha1.LabelInstanceCPUMemoryRatio,
+					corev1.NodeSelectorOpIn,
+					cpuMemoryRatio,
 				),
 			},
 			Overhead: &cloudprovider.InstanceTypeOverhead{
@@ -514,6 +531,18 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.generation = current
 	i.built = true
 	return instanceTypes
+}
+
+func reducedCPUMemoryRatio(cpus, memGiB int) string {
+	divisor := greatestCommonDivisor(cpus, memGiB)
+	return fmt.Sprintf("%d-%d", cpus/divisor, memGiB/divisor)
+}
+
+func greatestCommonDivisor(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
 }
 
 func price(specs Specs) float64 {

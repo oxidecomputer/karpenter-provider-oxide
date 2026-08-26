@@ -74,3 +74,19 @@ spec:
       vpcName: ${OXIDE_VPC}
 EOF
 ```
+
+## Instance scheduling labels
+
+Every generated instance type, NodeClaim, and Node has shape labels that can be used in
+NodePool requirements:
+
+| Label | Unit | Example for 4 CPU / 16 GiB |
+| --- | --- | --- |
+| `karpenter.oxide.computer/instance-cpu` | CPUs | `4` |
+| `karpenter.oxide.computer/instance-memory` | MiB | `16384` |
+| `karpenter.oxide.computer/instance-cpu-memory-ratio` | Reduced CPU:GiB ratio | `1-4` |
+
+CPU and memory are numeric and support range operators. The ratio is reduced, so 8 CPU and
+32 GiB is also `1-4`. Kubernetes label values cannot contain `:`, so the label-safe value
+uses `-`: logical ratios `1:2`, `1:4`, `1:8`, `1:16`, and `1:32` are stored as `1-2`,
+`1-4`, `1-8`, `1-16`, and `1-32`. Select ratio values with `In` or `NotIn`.
