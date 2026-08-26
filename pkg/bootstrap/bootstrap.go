@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
@@ -37,6 +38,15 @@ type Request struct {
 	NodeTaints []corev1.Taint
 	// Hostname is the hostname the instance will be created with.
 	Hostname string
+	// Storage is the resolved disk layout for this node: the Oxide disk names the launch is creating,
+	// the NVMe serials they will present in the guest, and where each one is to end up. Nil when the
+	// nodeclass configures no diskSets.
+	//
+	// Carried per-Request rather than resolved onto the nodeclass status because disk names are
+	// minted per-NodeClaim: they embed this instance's fingerprint and ordinals, so no two nodes of a
+	// nodeclass share them and there is nothing about them a reconcile of the nodeclass could
+	// resolve.
+	Storage *storage.Plan
 }
 
 // Bootstrapper joins nodes to the cluster for a single bootstrap provider.

@@ -70,3 +70,58 @@ func IPPoolIDs(ipPools []OxideIPPool) []string {
 	}
 	return ids
 }
+
+// EncodeDiskSetSources renders the source each diskSet's disks were created from as an annotation
+// value: "<set>=<uuid>" entries, sorted by set name and comma-separated.
+//
+// A set with no source records an empty value rather than being left out. That is the same
+// distinction EncodeIDs draws for SSH keys: an entry with an empty value is a set whose disks were
+// created blank, and no entry at all is a set nothing was recorded for. The first can drift when a
+// selector is added; the second cannot be compared and never does.
+func EncodeDiskSetSources(sources map[string]string) string {
+	entries := make([]string, 0, len(sources))
+	for set, id := range sources {
+		if set = strings.TrimSpace(set); set != "" {
+			entries = append(entries, set+"="+strings.TrimSpace(id))
+		}
+	}
+	slices.Sort(entries)
+	return strings.Join(entries, ",")
+}
+
+// ParseDiskSetSources reads an EncodeDiskSetSources value back into the map it records. An entry with
+// no "=" is dropped, since it says nothing about which set it belonged to.
+func ParseDiskSetSources(value string) map[string]string {
+	sources := map[string]string{}
+	for entry := range strings.SplitSeq(value, ",") {
+		set, id, found := strings.Cut(strings.TrimSpace(entry), "=")
+		if !found {
+			continue
+		}
+		if set = strings.TrimSpace(set); set != "" {
+			sources[set] = strings.TrimSpace(id)
+		}
+	}
+	return sources
+}
+
+// DiskSetSources is the source each resolved diskSet's disks would be created from now, in the form
+// the launch record stores them. An image wins over a snapshot, which CEL makes mutually exclusive
+// anyway.
+func DiskSetSources(status *StorageStatus) map[string]string {
+	sources := map[string]string{}
+	if status == nil {
+		return sources
+	}
+	for _, set := range status.DiskSets {
+		switch {
+		case len(set.Images) > 0:
+			sources[set.Name] = set.Images[0].ID
+		case len(set.Snapshots) > 0:
+			sources[set.Name] = set.Snapshots[0].ID
+		default:
+			sources[set.Name] = ""
+		}
+	}
+	return sources
+}

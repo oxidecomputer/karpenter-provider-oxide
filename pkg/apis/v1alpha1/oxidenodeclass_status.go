@@ -44,6 +44,33 @@ const ConditionTypeAffinityPolicySatisfiable = "AffinityPolicySatisfiable"
 // on the refusal, even though the Oxide API reports the two identically today.
 const ConditionReasonAffinityPolicyUnsatisfiable = "AffinityPolicyUnsatisfiable"
 
+// ConditionTypeStorageResolved reports whether every diskSet's image or snapshot selector matched
+// something a disk can actually be created from, and whether each disk is large enough for the
+// source it is created from.
+//
+// Registered only on a nodeclass with at least one diskSet carrying a source selector, following
+// ConditionTypeAffinityGroupsResolved: a nodeclass whose data disks are all blank has nothing here to
+// resolve and must never be held un-Ready by it. Registration is keyed on the spec rather than on
+// what resolved, so the condition does not appear and disappear as the project changes underneath it.
+const ConditionTypeStorageResolved = "StorageResolved"
+
+// Reasons recorded on ConditionTypeStorageResolved.
+const (
+	// ConditionReasonDiskSourceNotFound is a diskSet selector, wildcard included, that matched
+	// nothing. Nodes cannot launch without a source for every sourced set, so this holds the
+	// nodeclass un-Ready rather than letting the launch fail later against the Oxide API with
+	// nothing on the nodeclass to explain why.
+	ConditionReasonDiskSourceNotFound = "DiskSourceNotFound"
+	// ConditionReasonDiskTooSmall is a diskSet whose size is smaller than the image or snapshot its
+	// disks are created from. Reported rather than rounded up: a disk silently larger than the
+	// nodeclass asked for is a storage bill nobody agreed to.
+	ConditionReasonDiskTooSmall = "DiskTooSmall"
+	// ConditionReasonTooManyDisks is a layout asking for more than the eight disks an instance can
+	// attach. Normally refused by CEL; reported for a nodeclass stored before that rule shipped,
+	// which the apiserver does not re-validate until it is next written.
+	ConditionReasonTooManyDisks = "TooManyDisks"
+)
+
 // Reasons recorded on ConditionTypeAffinityGroupsResolved.
 const (
 	// ConditionReasonAffinityGroupNotFound is a selector, wildcard included, that matched nothing.
@@ -100,6 +127,16 @@ type OxideNodeClassStatus struct {
 	// compares against, and what memberships are allowed to persist.
 	// +optional
 	AffinityGroups []OxideAffinityGroup `json:"affinityGroups,omitempty"`
+	// Storage is the resolved disk layout of a launched instance: the source each diskSet's disks are
+	// created from, and where each one lands in the guest.
+	//
+	// Published because several of these values are resolved rather than written -- the filesystem
+	// when the spec leaves it unset, and the mount point of each disk in a set with a mountDir -- so
+	// this is what makes the effective layout readable off the object rather than re-derived. It is
+	// also what a launch reads to decide which image or snapshot a data disk is created from, which
+	// is why it holds its previous value on an incomplete resolution rather than shrinking.
+	// +optional
+	Storage *StorageStatus `json:"storage,omitempty"`
 	// Bootstrap contains resolved state that only applies to a single bootstrap provider.
 	// +optional
 	Bootstrap *BootstrapStatus `json:"bootstrap,omitempty"`
@@ -126,12 +163,83 @@ type KubeadmStatus struct {
 	ClusterName string `json:"clusterName,omitempty"`
 }
 
+// StorageStatus is the resolved disk layout every instance launched from this nodeclass gets.
+type StorageStatus struct {
+	// BootSizeBytes is the boot disk's size as a byte count, rather than as the quantity it was
+	// written as.
+	// +optional
+	BootSizeBytes int64 `json:"bootSizeBytes,omitempty"`
+	// DiskSets is the resolved form of spec.storage.diskSets, in the same order.
+	// +optional
+	DiskSets []DiskSetStatus `json:"diskSets,omitempty"`
+}
+
+// DiskSetStatus is one resolved disk set.
+//
+// It deliberately carries no disk names. A disk's name is minted per-NodeClaim, so it is a property
+// of a launch rather than of the nodeclass, and there is nothing about it a reconcile of the
+// nodeclass could resolve.
+type DiskSetStatus struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Count is how many disks the set has, as resolved after defaulting.
+	Count int32 `json:"count"`
+	// SizeBytes is the capacity of each disk in the set, not of the set as a whole.
+	SizeBytes int64  `json:"sizeBytes"`
+	Layout    string `json:"layout"`
+	// Filesystem is the effective value: ext4 where the spec left it unset and formatting applies,
+	// and empty for a set created from an image or a snapshot, which is never formatted.
+	// +optional
+	Filesystem string `json:"filesystem,omitempty"`
+	// MountPoints is where each of the set's disks is mounted, in ordinal order. It is the resolved
+	// answer to mountPath versus mountDir, so nothing has to re-derive it to configure a consumer
+	// such as the local static provisioner's hostDir. Empty for a raw block set, which is not
+	// mounted.
+	// +optional
+	MountPoints []string `json:"mountPoints,omitempty"`
+	// BlockLinks is where each of a raw block set's devices is linked, in ordinal order. Empty for a
+	// set with a filesystem.
+	// +optional
+	BlockLinks []string `json:"blockLinks,omitempty"`
+	// Images and Snapshots are the resolved sources, most recent first and truncated the same way
+	// Status.Images is. Only the first is ever used; the rest are reported so a wildcard selector can
+	// be understood from the nodeclass alone.
+	// +optional
+	Images []OxideImage `json:"images,omitempty"`
+	// +optional
+	Snapshots []OxideSnapshot `json:"snapshots,omitempty"`
+}
+
+// OxideSnapshot is one resolved snapshot.
+//
+// It carries no OS or version, unlike OxideImage, because the Oxide API's snapshot has neither.
+type OxideSnapshot struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Project is the project the snapshot is in. A snapshot is always in one: there is no silo-level
+	// snapshot the way there is a silo-level image.
+	Project string `json:"project"`
+	// DiskID is the disk the snapshot was taken of, reported so a snapshot can be traced back to
+	// where it came from without a second API call.
+	// +optional
+	DiskID string `json:"diskID,omitempty"`
+	// SizeBytes is what makes "this diskSet is smaller than its source" checkable when the nodeclass
+	// is reconciled rather than at launch.
+	// +optional
+	SizeBytes   int64       `json:"sizeBytes,omitempty"`
+	TimeCreated metav1.Time `json:"timeCreated"`
+}
+
 type OxideImage struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	OS          string      `json:"os"`
-	Version     string      `json:"version"`
-	Project     string      `json:"project"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	OS      string `json:"os"`
+	Version string `json:"version"`
+	Project string `json:"project"`
+	// SizeBytes is the image's size, which is what makes "this disk is smaller than the image it is
+	// created from" checkable when the nodeclass is reconciled rather than at launch.
+	// +optional
+	SizeBytes   int64       `json:"sizeBytes,omitempty"`
 	TimeCreated metav1.Time `json:"timeCreated"`
 }
 
@@ -187,6 +295,9 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		}
 	case BootstrapKindKubeadm:
 		conds = append(conds, ConditionTypeClusterInfoAvailable)
+	}
+	if in.Spec.Storage.NeedsSourceResolution() {
+		conds = append(conds, ConditionTypeStorageResolved)
 	}
 	if in.Spec.Affinity != nil {
 		conds = append(

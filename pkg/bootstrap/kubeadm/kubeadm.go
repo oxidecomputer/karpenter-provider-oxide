@@ -22,6 +22,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,12 +65,18 @@ const (
 
 	userDataTemplateText = `#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p /etc/kubernetes
+{{ with .DiskSetup }}{{ . }}
+{{ end }}mkdir -p /etc/kubernetes
 cat <<'EOF' > /etc/kubernetes/karpenter-join.yaml
-{{ . }}
+{{ .Config }}
 EOF
 kubeadm join --config /etc/kubernetes/karpenter-join.yaml
 `
+
+	// consumerUnit is the unit that must not start before the data disks are mounted. kubeadm join
+	// starts the kubelet through systemd, and the drop-in is written before the join runs, so systemd
+	// picks it up when the unit is first loaded.
+	consumerUnit = "kubelet.service"
 )
 
 var userDataTemplate = template.Must(template.New("userdata").Parse(userDataTemplateText))
@@ -167,11 +174,21 @@ func (b *Bootstrapper) UserData(
 		return "", err
 	}
 
-	var userData strings.Builder
-	if err := userDataTemplate.Execute(&userData, config); err != nil {
+	var rendered strings.Builder
+	diskSetup, err := disk.Script(req.Storage, disk.Options{
+		ConsumerUnits: []string{consumerUnit},
+	})
+	if err != nil {
+		return "", fmt.Errorf("unable to render disk setup: %w", err)
+	}
+
+	if err := userDataTemplate.Execute(&rendered, userData{
+		DiskSetup: diskSetup,
+		Config:    config,
+	}); err != nil {
 		return "", fmt.Errorf("unable to execute user-data template: %w", err)
 	}
-	return userData.String(), nil
+	return rendered.String(), nil
 }
 
 // clusterInfoData is the discovery information parsed out of kube-public/cluster-info.
@@ -415,4 +432,16 @@ func kubeletExtraArgs(args []string, configVersion string) any {
 		out = append(out, map[string]string{"name": name, "value": value})
 	}
 	return out
+}
+
+// userData is what the user-data template is rendered from.
+//
+// DiskSetup is spliced in after "set -euo pipefail" and before the configuration is written, which is
+// what guarantees the disks are mounted before the node joins: the block ends by running a oneshot
+// unit synchronously, so under set -e the join is never reached on a node whose disks did not come up.
+// It is empty for a nodeclass with no diskSets, which renders the script this template rendered
+// before disk support existed.
+type userData struct {
+	DiskSetup string
+	Config    string
 }

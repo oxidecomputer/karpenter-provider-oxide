@@ -168,18 +168,6 @@ spec:
                     - type
                     type: object
                 type: object
-              bootDiskSize:
-                anyOf:
-                - type: integer
-                - type: string
-                description: |-
-                  BootDiskSize is the stoage capcity of the boot disk
-
-                  Excluded from the reflected part of the nodeclass hash and folded in as a byte count instead:
-                  a resource.Quantity keeps its value in unexported fields and its formatting in an exported one,
-                  so reflection over it sees how the size was written rather than what it is. See Hash.
-                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                x-kubernetes-int-or-string: true
               bootstrap:
                 description: |-
                   Bootstrap selects and configures the mechanism nodes use to join the cluster.
@@ -347,6 +335,298 @@ spec:
                       type: string
                   type: object
                 type: array
+              storage:
+                description: |-
+                  Storage is the disks every instance launched from this nodeclass is created with: the boot
+                  disk, and any additional sets of data disks.
+
+                  A value rather than a pointer, and required: a nodeclass has always needed a boot disk size,
+                  so making the whole stanza optional would buy nothing but a nil check in every reader.
+
+                  Everything here except the nested source selectors is fixed into an instance at launch: a disk
+                  cannot be resized, re-sourced or re-mounted afterwards, so a change to any of it is
+                  drift by definition.
+
+                  Excluded from the reflected part of the nodeclass hash all the same, and folded in as an
+                  explicit fingerprint instead. Reflection cannot be used here because the sizes are
+                  resource.Quantity, which keeps its value in unexported fields and its formatting in an exported
+                  one, so a reflected hash would see how a size was written rather than what it is. Tagging the
+                  individual sizes does not work either: hashstructure only honours hash:"ignore" on fields of the
+                  struct it is handed, not on fields of structs nested inside it, so a tag down here would be
+                  silently ineffective. See Hash and storageFingerprint.
+                properties:
+                  boot:
+                    description: |-
+                      Boot is the disk the instance boots from. Its image comes from spec.imageSelector rather than
+                      from here: the boot image is what the whole nodeclass is built around, it is what
+                      nodeClaim.Status.ImageID records, and it is what image drift is decided on.
+                    properties:
+                      size:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          Size is the boot disk's capacity. It must be at least as large as the image it is created
+                          from, which is checked when the nodeclass is reconciled rather than here, because only the
+                          resolved image knows how large it is.
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - size
+                    type: object
+                  diskSets:
+                    description: |-
+                      DiskSets are additional disks attached to every instance, in sets of identically configured
+                      disks.
+
+                      Order is not significant to what the guest sees, but it does decide the disk names, so
+                      reordering a nodeclass's diskSets changes the names of the disks the next launch creates. That
+                      is deliberately not drift: the names are internal and every launch renders its own, so the
+                      nodeclass hash is unchanged by a reorder even though the names are not.
+                    items:
+                      description: |-
+                        DiskSet is a group of identically configured disks attached to every launched instance.
+
+                        mountPath and mountDir are two mutually exclusive fields rather than one field with two meanings.
+                        mountPath is a literal mount point; mountDir is a parent directory, and disk k lands at
+                        <mountDir>/<name>-<k>. Naming the two cases is what makes the incoherent combination
+                        unrepresentable: the local static provisioner discovers the *contents* of its hostDir, so a
+                        hostDir that is itself a symlink to a raw block device discovers nothing. It also means there is
+                        no discontinuity in what a path means as count grows from one to two.
+                      properties:
+                        count:
+                          default: 1
+                          description: |-
+                            Count is how many disks the set has. Every disk in the set has the same size, type, source and
+                            filesystem; what differs is where it is mounted.
+                          format: int32
+                          maximum: 7
+                          minimum: 1
+                          type: integer
+                        filesystem:
+                          description: |-
+                            Filesystem is what the guest formats each disk with. None leaves the disk as a raw block
+                            device: nothing is created on it and nothing is mounted, which is what a
+                            consumer that manages its own on-disk format wants.
+
+                            Deliberately without a CRD default even though an unset filesystem means ext4. A default
+                            applies unconditionally, and a disk created from an image or a snapshot must never be
+                            formatted, so a defaulted ext4 would be an instruction to destroy the image the user asked
+                            for, and CRDs have no conditional default. Unset is therefore resolved to ext4 only where
+                            formatting is meaningful, and the effective value is published on the status so it is still
+                            readable off the object.
+                          enum:
+                          - ext4
+                          - xfs
+                          - None
+                          type: string
+                        imageSelector:
+                          description: |-
+                            ImageSelector selects the image each disk in the set is created from. Only for Distributed
+                            sets: the Oxide API has no disk source for a local disk at all.
+
+                            Resolved per set, so two sets carrying the same selector resolve once between them. A set whose
+                            selector matches nothing holds the nodeclass un-Ready rather than launching a disk with an
+                            empty source.
+
+                            Excluded from the nodeclass hash for the reason every selector is: what it matches is a
+                            function of the project as well as of the nodeclass, so its drift is decided by comparing
+                            resolved state. Excluded by storageFingerprint simply not covering it, rather than by a tag,
+                            which at this depth would do nothing.
+                          items:
+                            properties:
+                              id:
+                                description: ID is the exact image UUID
+                                type: string
+                              name:
+                                description: |-
+                                  Name is the name of an image. A name without a "*" must match exactly, ignoring case.
+
+                                  A name containing "*" selects every image whose name matches, where each "*" stands for any
+                                  run of characters including none. So "rke2-ubuntu-*" and "rke2-*" both select
+                                  "rke2-ubuntu-1780929039", and "*-ubuntu-*" selects it as well. Unlike a version, a name is
+                                  matched character by character, so a wildcard does not have to fall on a "-" boundary.
+
+                                  When a wildcard matches several images the most recently uploaded one is launched.
+                                type: string
+                              os:
+                                description: OS is the operating system of the image
+                                type: string
+                              project:
+                                description: |-
+                                  Project where the image is located.
+                                  If the project is not specified, then we query for Silo level images
+                                  that are not linked to a project.
+                                type: string
+                              version:
+                                description: |-
+                                  Version is the version of the image or OS. Oxide image versions are free-form, so a version
+                                  without a "*" is matched literally and case-insensitively.
+
+                                  A version containing "*" is instead matched a segment at a time, where segments are separated
+                                  by ".", "-", "_", or whitespace, and a leading "v" is ignored on both sides. A "*" matches
+                                  exactly one segment, except as the last segment of the version, where it matches one or more
+                                  remaining segments. So "1.2.*" selects "1.2.3" but not "1.2" or "1.20"; "1.*" selects both
+                                  "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
+
+                                  When a wildcard matches several images the most recently uploaded one is launched.
+                                type: string
+                            type: object
+                          type: array
+                        layout:
+                          default: Individual
+                          description: |-
+                            Layout is how the set's disks are presented to the guest. Individual, the only value, gives one
+                            filesystem per disk, which is what the local static provisioner consumes.
+                          enum:
+                          - Individual
+                          type: string
+                        mountDir:
+                          description: |-
+                            MountDir is the parent directory the set's disks are placed beneath: disk k is mounted at
+                            <mountDir>/<name>-<k>, counting from zero, or for a raw block set is linked there instead.
+                            That is the layout the local static provisioner's hostDir expects. Mutually exclusive with
+                            MountPath.
+                          maxLength: 253
+                          pattern: ^/[^/]+(/[^/]+)*$
+                          type: string
+                        mountPath:
+                          description: MountPath is the single mount point for a set
+                            of one disk. Mutually exclusive with MountDir.
+                          maxLength: 253
+                          pattern: ^/[^/]+(/[^/]+)*$
+                          type: string
+                        name:
+                          description: |-
+                            Name identifies the set. It appears in the disk names Karpenter creates and in the directory
+                            each disk is mounted under, so it is constrained to what is legal in both.
+
+                            The minimum of three characters is not cosmetic. It is what makes every disk name at least 20
+                            bytes long, and 20 bytes is exactly what the guest sees of a disk name as its NVMe serial
+                            number. A shorter name would be padded by the NVMe layer, which the guest would then have to
+                            know to strip. See pkg/providers/storage.
+                          maxLength: 20
+                          minLength: 3
+                          pattern: ^[a-z]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        readOnly:
+                          description: |-
+                            ReadOnly asks the rack to attach the disks read-only, which is only meaningful for a disk
+                            created from an image or a snapshot. It is a property of the attachment rather than of the
+                            guest's mount: the guest cannot write to it whatever it does with the mount options.
+
+                            Note that the disks of a set are still deleted with the node. A snapshot-sourced set reads
+                            like "restore this dataset onto every node", and the per-node copy does not outlive the node.
+                          type: boolean
+                        size:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          description: |-
+                            Size is the capacity of each disk in the set, not of the set as a whole. A set of four 500Gi
+                            disks provisions 2Ti.
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        snapshotSelector:
+                          description: |-
+                            SnapshotSelector selects the snapshot each disk in the set is created from.
+
+                            Excluded from the nodeclass hash for the same reason ImageSelector is.
+                          items:
+                            description: |-
+                              SnapshotSelector selects a snapshot by ID or by name.
+
+                              It has no OS or version term, unlike ImageSelector, because oxide.Snapshot has no such fields: a
+                              snapshot in the Oxide API is an ID, a name, a project, the disk it came from, a size and a state,
+                              and there is nothing else to match on.
+
+                              Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
+                              the selectors, which validate at reconcile instead.
+                            properties:
+                              id:
+                                description: ID is the exact snapshot UUID.
+                                type: string
+                              name:
+                                description: |-
+                                  Name is the name of a snapshot. A name without a "*" must match exactly, ignoring case; a name
+                                  containing "*" selects every snapshot whose name matches, where each "*" stands for any run of
+                                  characters including none. Matched character by character, the same way an image name is.
+
+                                  When a wildcard matches several snapshots the most recently created one is used.
+                                type: string
+                              project:
+                                description: |-
+                                  Project where the snapshot is located. Unlike an image, a snapshot is always in a project:
+                                  there is no silo-level snapshot, so an empty project means the project Karpenter runs in.
+                                type: string
+                            type: object
+                          type: array
+                        type:
+                          default: Distributed
+                          description: |-
+                            Type is whether the set's disks are Distributed, replicated across the rack by Crucible and
+                            able to outlive the sled, or Local, sitting on the sled the instance is placed on.
+
+                            Local disks have a fixed 4 KiB block size, cannot be created from an image or a snapshot, and
+                            do not outlive the instance. They are also provisioned differently: a local disk's capacity
+                            belongs to one sled, so it is created by the instance create itself rather than ahead of it.
+                            See pkg/providers/instance.
+                          enum:
+                          - Distributed
+                          - Local
+                          type: string
+                      required:
+                      - name
+                      - size
+                      - type
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of mountPath or mountDir must be set
+                        rule: '[has(self.mountPath), has(self.mountDir)].exists_one(x,
+                          x)'
+                      - message: mountPath is a single mount point, so it needs count
+                          1; a set of several disks wants mountDir, which each disk
+                          is mounted beneath
+                        rule: '!has(self.mountPath) || self.count == 1'
+                      - message: a raw block diskSet is not mounted, so it needs mountDir,
+                          the directory its block devices are linked into, rather
+                          than mountPath
+                        rule: '!has(self.mountPath) || !has(self.filesystem) || self.filesystem
+                          != ''None'''
+                      - message: 'a Local diskSet cannot be created from an image
+                          or a snapshot: the Oxide API has no disk source for a local
+                          disk, and local disks cannot be created from distributed
+                          disk images'
+                        rule: self.type == 'Distributed' || (!has(self.imageSelector)
+                          && !has(self.snapshotSelector))
+                      - message: a diskSet may select an image or a snapshot, not
+                          both
+                        rule: '!(has(self.imageSelector) && has(self.snapshotSelector))'
+                      - message: readOnly only means something for a diskSet created
+                          from an image or a snapshot
+                        rule: '!has(self.readOnly) || has(self.imageSelector) || has(self.snapshotSelector)'
+                      - message: 'a diskSet created from an image or a snapshot already
+                          carries a filesystem, so filesystem must not be set: it
+                          would be formatted over'
+                        rule: '!has(self.filesystem) || (!has(self.imageSelector)
+                          && !has(self.snapshotSelector))'
+                    maxItems: 7
+                    type: array
+                required:
+                - boot
+                type: object
+                x-kubernetes-validations:
+                - message: an instance can attach at most 8 disks and the boot disk
+                    is one of them, so the diskSets' counts must sum to 7 or fewer
+                  rule: '!has(self.diskSets) || self.diskSets.map(s, s.count).sum()
+                    <= 7'
+                - message: each diskSet must have a distinct name
+                  rule: '!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y,
+                    y.name == x.name))'
+                - message: each diskSet must have a distinct mountPath or mountDir
+                  rule: '!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y,
+                    (has(y.mountPath) ? y.mountPath : y.mountDir) == (has(x.mountPath)
+                    ? x.mountPath : x.mountDir)))'
               subnetSelector:
                 description: |-
                   SubnetSelector is used to select subnets to launch nodes into.
@@ -378,6 +658,8 @@ spec:
                   It must be in the appropriate format based on the machine image in use. Karpenter will merge certain fields into
                   this UserData to ensure nodes are being provisioned with the correct configuration.
                 type: string
+            required:
+            - storage
             type: object
           status:
             description: OxideNodeClassStatus contains the resolved state of the OxideNodeClass
@@ -517,6 +799,12 @@ spec:
                       type: string
                     project:
                       type: string
+                    sizeBytes:
+                      description: |-
+                        SizeBytes is the image's size, which is what makes "this disk is smaller than the image it is
+                        created from" checkable when the nodeclass is reconciled rather than at launch.
+                      format: int64
+                      type: integer
                     timeCreated:
                       format: date-time
                       type: string
@@ -581,6 +869,152 @@ spec:
                   - name
                   type: object
                 type: array
+              storage:
+                description: |-
+                  Storage is the resolved disk layout of a launched instance: the source each diskSet's disks are
+                  created from, and where each one lands in the guest.
+
+                  Published because several of these values are resolved rather than written -- the filesystem
+                  when the spec leaves it unset, and the mount point of each disk in a set with a mountDir -- so
+                  this is what makes the effective layout readable off the object rather than re-derived. It is
+                  also what a launch reads to decide which image or snapshot a data disk is created from, which
+                  is why it holds its previous value on an incomplete resolution rather than shrinking.
+                properties:
+                  bootSizeBytes:
+                    description: |-
+                      BootSizeBytes is the boot disk's size as a byte count, rather than as the quantity it was
+                      written as.
+                    format: int64
+                    type: integer
+                  diskSets:
+                    description: DiskSets is the resolved form of spec.storage.diskSets,
+                      in the same order.
+                    items:
+                      description: |-
+                        DiskSetStatus is one resolved disk set.
+
+                        It deliberately carries no disk names. A disk's name is minted per-NodeClaim, so it is a property
+                        of a launch rather than of the nodeclass, and there is nothing about it a reconcile of the
+                        nodeclass could resolve.
+                      properties:
+                        blockLinks:
+                          description: |-
+                            BlockLinks is where each of a raw block set's devices is linked, in ordinal order. Empty for a
+                            set with a filesystem.
+                          items:
+                            type: string
+                          type: array
+                        count:
+                          description: Count is how many disks the set has, as resolved
+                            after defaulting.
+                          format: int32
+                          type: integer
+                        filesystem:
+                          description: |-
+                            Filesystem is the effective value: ext4 where the spec left it unset and formatting applies,
+                            and empty for a set created from an image or a snapshot, which is never formatted.
+                          type: string
+                        images:
+                          description: |-
+                            Images and Snapshots are the resolved sources, most recent first and truncated the same way
+                            Status.Images is. Only the first is ever used; the rest are reported so a wildcard selector can
+                            be understood from the nodeclass alone.
+                          items:
+                            properties:
+                              id:
+                                type: string
+                              name:
+                                type: string
+                              os:
+                                type: string
+                              project:
+                                type: string
+                              sizeBytes:
+                                description: |-
+                                  SizeBytes is the image's size, which is what makes "this disk is smaller than the image it is
+                                  created from" checkable when the nodeclass is reconciled rather than at launch.
+                                format: int64
+                                type: integer
+                              timeCreated:
+                                format: date-time
+                                type: string
+                              version:
+                                type: string
+                            required:
+                            - id
+                            - name
+                            - os
+                            - project
+                            - timeCreated
+                            - version
+                            type: object
+                          type: array
+                        layout:
+                          type: string
+                        mountPoints:
+                          description: |-
+                            MountPoints is where each of the set's disks is mounted, in ordinal order. It is the resolved
+                            answer to mountPath versus mountDir, so nothing has to re-derive it to configure a consumer
+                            such as the local static provisioner's hostDir. Empty for a raw block set, which is not
+                            mounted.
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          type: string
+                        sizeBytes:
+                          description: SizeBytes is the capacity of each disk in the
+                            set, not of the set as a whole.
+                          format: int64
+                          type: integer
+                        snapshots:
+                          items:
+                            description: |-
+                              OxideSnapshot is one resolved snapshot.
+
+                              It carries no OS or version, unlike OxideImage, because the Oxide API's snapshot has neither.
+                            properties:
+                              diskID:
+                                description: |-
+                                  DiskID is the disk the snapshot was taken of, reported so a snapshot can be traced back to
+                                  where it came from without a second API call.
+                                type: string
+                              id:
+                                type: string
+                              name:
+                                type: string
+                              project:
+                                description: |-
+                                  Project is the project the snapshot is in. A snapshot is always in one: there is no silo-level
+                                  snapshot the way there is a silo-level image.
+                                type: string
+                              sizeBytes:
+                                description: |-
+                                  SizeBytes is what makes "this diskSet is smaller than its source" checkable when the nodeclass
+                                  is reconciled rather than at launch.
+                                format: int64
+                                type: integer
+                              timeCreated:
+                                format: date-time
+                                type: string
+                            required:
+                            - id
+                            - name
+                            - project
+                            - timeCreated
+                            type: object
+                          type: array
+                        type:
+                          type: string
+                      required:
+                      - count
+                      - layout
+                      - name
+                      - sizeBytes
+                      - type
+                      type: object
+                    type: array
+                type: object
               subnets:
                 description: Subnets contain selected subnets for launching nodes
                   into

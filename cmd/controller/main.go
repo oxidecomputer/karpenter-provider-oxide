@@ -22,7 +22,9 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/sled"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
@@ -51,8 +53,7 @@ const (
 	envOxideProject = "OXIDE_PROJECT"
 
 	// Sled inventory configuration. Inventory reads the fleet-scoped system API, which is a far
-	// broader grant than provisioning into a single project, so it is off unless asked for and nothing
-	// else depends on it.
+	// broader grant than provisioning into a single project, so it is off by default.
 	envInventoryEnabled                  = "OXIDE_INVENTORY_ENABLED"
 	envInventoryRefreshPeriod            = "OXIDE_INVENTORY_REFRESH_PERIOD"
 	envInventoryRepairTolerationDuration = "OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION"
@@ -177,6 +178,9 @@ func run() error {
 	sshKeys := sshkey.NewProvider(ox, providers.CoalesceWindow)
 	ipPools := ippool.NewProvider(ox, providers.CoalesceWindow)
 	affinityGroups := affinitygroup.NewProvider(ox, project, providers.CoalesceWindow)
+	// Given the project, unlike the image provider: there is no silo-level snapshot in the Oxide API,
+	// so a selector that names no project means the one Karpenter runs in.
+	snapshots := snapshot.NewProvider(ox, project, providers.CoalesceWindow)
 
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
@@ -188,7 +192,11 @@ func run() error {
 		inventoryCfg.repairPolicies(),
 		// In resolution order. Which reason wins when several apply is this order, and it is asserted
 		// by pkg/cloudprovider's tests.
-		[]providers.Drifter{images, subnets, sshKeys, ipPools, affinityGroups},
+		// Ordered as the nodeclass controller resolves them, with the disk set drifter after images so
+		// that a boot image change is reported as ImageDrift rather than as disk drift.
+		[]providers.Drifter{
+			images, storage.NewDrifter(), subnets, sshKeys, ipPools, affinityGroups,
+		},
 	)
 	overlayUndecoratedCloudProvider := metrics.Decorate(oxideCloudProivder)
 	cloudProvider := overlay.Decorate(
@@ -218,6 +226,7 @@ func run() error {
 			sshKeys,
 			ipPools,
 			affinityGroups,
+			snapshots,
 			affinityPolicy,
 			bootstrappers,
 		),

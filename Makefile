@@ -46,6 +46,11 @@ endif
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+# Every shell script in the repository: the per-boot disk setup a node runs and
+# the repo's own helpers. They are files rather than generated strings so that
+# shellcheck and `bash -n` can be pointed at them.
+SHELL_SOURCES = $(shell git ls-files --cached --others --exclude-standard '*.sh')
+
 .PHONY: all
 all: precommit
 
@@ -79,7 +84,7 @@ generate: ## Generate deepcopy code and CRDs w/ controller-gen, vendor the karpe
 	$(HELM_DOCS) --chart-search-root charts
 
 .PHONY: verify
-verify: release-check ## Run linters and vetting on codebase with no commit checks and no mutations.
+verify: release-check lint-shell ## Run linters and vetting on codebase with no commit checks and no mutations.
 	"$(GOLANGCI_LINT)" config verify
 	$(GOLANGCI_LINT) run
 	go vet ./...
@@ -102,6 +107,18 @@ coverage: ## Render the coverage profile written by `make test` as HTML
 .PHONY: vulncheck
 vulncheck: ## Verify code vulnerabilities
 	$(GOVULNCHECK) ./pkg/...
+# The shell a node runs is checked in as .sh rather than generated into a Go
+# string precisely so that shellcheck can see it. Skipped with a warning where
+# shellcheck is not installed; CI has it, and `go test ./pkg/bootstrap/disk`
+# runs it too when it is present.
+.PHONY: lint-shell
+lint-shell: ## Run shellcheck over the checked-in shell scripts.
+	@command -v shellcheck >/dev/null 2>&1 || { \
+		echo "WARNING: shellcheck is not installed, skipping shell lint"; \
+		exit 0; \
+	}; \
+	shellcheck --severity=style $(SHELL_SOURCES)
+
 
 .PHONY: licenses
 licenses: ## Verifies dependency licenses

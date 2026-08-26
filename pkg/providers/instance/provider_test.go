@@ -520,7 +520,11 @@ func TestDeleteReportsTheCapacityItReleased(t *testing.T) {
 		released = append(released, r)
 	})
 
-	if err := p.Delete(context.Background(), "karpenter-node", "karpenter-node"); err != nil {
+	if err := p.Delete(
+		context.Background(),
+		"karpenter-node",
+		Teardown{BootDiskName: "karpenter-node"},
+	); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 
@@ -549,7 +553,11 @@ func TestDeleteReportsNothingUntilTheRackConfirms(t *testing.T) {
 		released = append(released, r)
 	})
 
-	if err := p.Delete(context.Background(), "karpenter-node", "karpenter-node"); err == nil {
+	if err := p.Delete(
+		context.Background(),
+		"karpenter-node",
+		Teardown{BootDiskName: "karpenter-node"},
+	); err == nil {
 		t.Fatal("delete succeeded despite the API refusing it")
 	}
 	if api.stops == 0 {
@@ -571,7 +579,11 @@ func TestDeleteReportsNothingForAnInstanceAlreadyGone(t *testing.T) {
 		released = append(released, r)
 	})
 
-	err := p.Delete(context.Background(), "karpenter-node", "karpenter-node")
+	err := p.Delete(
+		context.Background(),
+		"karpenter-node",
+		Teardown{BootDiskName: "karpenter-node"},
+	)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete returned %v, want %v", err, ErrNotFound)
 	}
@@ -589,7 +601,11 @@ func TestDeleteWorksWithoutAReleaseCallback(t *testing.T) {
 
 	p := NewProvider(api.server(t), "project", nil)
 
-	if err := p.Delete(context.Background(), "karpenter-node", "karpenter-node"); err != nil {
+	if err := p.Delete(
+		context.Background(),
+		"karpenter-node",
+		Teardown{BootDiskName: "karpenter-node"},
+	); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	if api.deletes != 1 {

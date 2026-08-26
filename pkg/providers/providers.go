@@ -31,6 +31,14 @@ const (
 	// DriftReasonImage is a node running an image the nodeclass would no longer launch, whether
 	// because the selector changed or because a newer image matched the one it already had.
 	DriftReasonImage cloudprovider.DriftReason = "ImageDrift"
+	// DriftReasonDiskSetSource is a node whose data disks were created from an image or a snapshot the
+	// nodeclass would no longer create them from, whether because the selector changed or because a
+	// newer source matched the one it already had.
+	//
+	// Separate from DriftReasonImage, which is about the boot disk: a data disk re-sourced is not a
+	// node running different software, and reporting the two the same way would tell an operator the
+	// wrong thing about why a node is being replaced.
+	DriftReasonDiskSetSource cloudprovider.DriftReason = "DiskSetSourceDrift"
 	// DriftReasonSubnet is a node whose interface sits in a subnet the nodeclass no longer selects.
 	// An interface cannot be moved between subnets, so replacing the node is the only way out of one.
 	DriftReasonSubnet cloudprovider.DriftReason = "SubnetDrift"

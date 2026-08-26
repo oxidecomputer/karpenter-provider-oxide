@@ -13,6 +13,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/samber/lo"
@@ -69,6 +70,9 @@ type Controller struct {
 	// affinityGroups resolves the groups every launched instance joins, and owns the one group this
 	// nodeclass may have Karpenter create for it.
 	affinityGroups *affinitygroup.Provider
+	// snapshots resolves what a diskSet's snapshot selectors match. Held as the provider for the same
+	// reason images is: the cache is shared across every nodeclass and every diskSet.
+	snapshots *snapshot.Provider
 	// affinityPolicy is what the launch path recorded about fail-policy groups it could not satisfy.
 	// Read rather than written here: this controller only publishes it as a condition.
 	affinityPolicy *affinitypolicy.Tracker
@@ -83,6 +87,7 @@ func NewController(
 	sshKeys *sshkey.Provider,
 	ipPools *ippool.Provider,
 	affinityGroups *affinitygroup.Provider,
+	snapshots *snapshot.Provider,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
@@ -94,6 +99,7 @@ func NewController(
 		sshKeys:        sshKeys,
 		ipPools:        ipPools,
 		affinityGroups: affinityGroups,
+		snapshots:      snapshots,
 		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
@@ -166,6 +172,10 @@ func (c *Controller) Reconcile(
 		)
 	} else {
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesResolved)
+	}
+
+	if err := c.resolveStorage(ctx, nodeClass); err != nil {
+		return reconcile.Result{}, err
 	}
 
 	subnets, err := c.subnets.Resolve(ctx, nodeClass)

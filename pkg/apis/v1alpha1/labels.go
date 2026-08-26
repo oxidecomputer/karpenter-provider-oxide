@@ -136,6 +136,16 @@ var (
 	// allocated from at launch, sorted and comma-separated. One IP is attached per resolved pool.
 	AnnotationIPPools = apis.Group + "/ip-pools"
 
+	// AnnotationDiskSetSources is the image or snapshot each diskSet's disks were created from at
+	// launch, as "<set>=<uuid>" entries, sorted and comma-separated.
+	//
+	// Keyed by diskSet name because there can be several, and the question drift asks is per set. An
+	// entry with an empty value is meaningful and is written: it is what tells a set whose disks were
+	// created blank apart from a set that had no record kept, the same distinction AnnotationSSHKeys
+	// draws. A disk cannot be re-sourced in place, so a set whose source has moved can only be
+	// followed by replacing the node.
+	AnnotationDiskSetSources = apis.Group + "/disk-set-sources"
+
 	AnnotationOxideNodeClassHash             = apis.Group + "/oxidenodeclass-hash"
 	AnnotationClusterNameTaggedCompatability = apis.CompatibilityGroup + "/cluster-name-tagged"
 	AnnotationOxideNodeClassHashVersion      = apis.Group + "/oxidenodeclass-hash-version"

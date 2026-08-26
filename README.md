@@ -276,6 +276,170 @@ spec:
 EOF
 ```
 
+## Storage
+
+`spec.storage` describes every disk a node is created with: the boot disk, and any number of named
+*disk sets*. An instance can attach **8 disks in total** and the boot disk is one of them, so the disk
+sets' counts may sum to at most 7.
+
+```yaml
+spec:
+  storage:
+    boot:
+      size: 20Gi                  # always distributed; the image comes from spec.imageSelector
+    diskSets:
+      - name: kubernetes
+        type: Distributed
+        size: 100Gi
+        filesystem: ext4
+        mountPath: /var/lib/rancher
+
+      - name: local-pv
+        type: Local
+        count: 4
+        size: 500Gi
+        filesystem: ext4
+        mountDir: /mnt/local-pv    # -> /mnt/local-pv/local-pv-0 .. -3
+```
+
+**`Distributed` versus `Local`.** A distributed disk is replicated across the rack by Crucible and can
+outlive the sled. A local disk sits on the sled the instance is placed on: it has a fixed 4 KiB block
+size, cannot be created from an image or a snapshot, and does not outlive the instance. A local disk
+can also come back blank, in which case it is reformatted on the next boot — so **data on a local disk
+can vanish and be silently replaced by an empty filesystem.** Use it for caches and scratch, or for
+data the workload itself replicates.
+
+**`mountPath` versus `mountDir`.** Exactly one is required. `mountPath` is a single mount point, so it
+needs `count: 1`. `mountDir` is a parent directory: disk *k* lands at `<mountDir>/<name>-<k>`, counting from zero, which is the layout
+`local-static-provisioner` expects of its `hostDir`. They are two fields rather than one so that a set
+growing from one disk to several does not silently change what the path means.
+
+**`filesystem`.** `ext4` when unset, `xfs`, or `None` for a raw block device that is symlinked into
+`mountDir` and never formatted or mounted. A set created from an image or a snapshot arrives already
+carrying a filesystem, so `filesystem` must not be set on one — it would be formatted over. An
+existing filesystem is never reformatted, and one of the wrong type fails the boot rather than being
+replaced.
+
+**`layout`.** `Individual` is the only value: every disk in a set gets its own filesystem and its own
+mount point. The field exists so a layout that combines a set's disks into one volume can be added
+later without changing what an existing nodeclass means.
+
+Disks are always deleted with the node. A `snapshotSelector` set reads like "restore this dataset onto
+every node", and the per-node copy does not outlive the node.
+
+### How the Guest Finds Its Disks
+
+Oxide presents every disk to the guest as NVMe, and **device numbering is not deterministic** — it need
+not match the order the disks were created in. The one deterministic handle is the NVMe serial number,
+which Nexus sets to the first 20 bytes of the Oxide disk name.
+
+So Karpenter names disks such that those 20 bytes are unique per instance, and renders one udev rule
+per disk into the node's user-data:
+
+```
+SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="nvme*n*",
+  ATTRS{serial}=="kd-eafttntzclra-2-lo", SYMLINK+="karpenter/local-pv-0"
+```
+
+Every disk is matched **positively** on its serial and anything that does not match is left strictly
+alone, which is how the boot disk is excluded without ever being identified. `SYMLINK+=` only adds a
+name — it never renames or replaces a device node.
+
+The result is that each disk has a stable, predictable path:
+
+```
+/dev/karpenter/<diskSet name>-<ordinal>
+```
+
+That name is derivable from the OxideNodeClass alone, so nothing on the node has to publish a mapping
+and nothing reading the node has to look one up. udev recreates the symlinks on every boot, which is
+what makes the name safe to put in a static `/etc/fstab` and what makes a raw block link stable.
+
+`/etc/fstab` is therefore written **once**, at launch, keyed on those paths:
+
+```
+/dev/karpenter/local-pv-0 /mnt/local-pv/local-pv-0 ext4 defaults,noatime,x-systemd.requires=karpenter-disks.service,x-systemd.device-timeout=60s 0 0
+```
+
+`x-systemd.requires=` is the whole of the ordering guarantee: it puts both a `Requires=` and an
+`After=` on the mount unit systemd generates, so the disks are formatted before anything is mounted.
+Entries deliberately carry no `nofail` — a node that cannot mount a data disk keeps its kubelet down
+(via `RequiresMountsFor=` in a drop-in) and fails to register rather than starting with an empty
+directory where the disk belongs. A set attached with `readOnly: true` gets `ro`.
+
+**What still runs as a script.** `karpenter-disks.service` runs
+[`disk-setup.sh`](pkg/bootstrap/disk/scripts/disk-setup.sh) before the mounts, on every boot, for the
+three things udev and systemd will not do:
+
+1. **Format a blank disk the way we want it formatted.** `x-systemd.makefs` would do this, but takes
+   no mkfs options; a full discard and inode-table write of a large Crucible-backed disk delays
+   registration for no gain, so we pass `-E nodiscard,lazy_itable_init=1`. An existing filesystem is
+   never reformatted, and one of the wrong type fails the boot rather than being replaced.
+2. **Seed a mount point that is already populated.** Mounting over `/var/lib/rancher` would hide the
+   RKE2 image's own preinstalled binaries, so on the boot that formats the disk its contents are
+   copied in first.
+3. **Relabel a fresh filesystem for SELinux**, which otherwise breaks container runtimes on
+   RHEL-family images in ways that are hard to diagnose from the kubelet's side.
+
+Running on every boot rather than only the first is required rather than tidy: a sled-local disk can
+come back blank and needs reformatting.
+
+There is no manifest file. The success contract is systemd's own — `systemctl is-active
+karpenter-disks.service` and the state of the `.mount` units — and `lsblk -o NAME,SERIAL,FSTYPE,MOUNTPOINT`
+reports the rest. Check `journalctl -u karpenter-disks` when a node does not register; the last
+failure's reason is also left in `/run/karpenter/disks.error`.
+
+### Node Image Requirements
+
+Only what a given layout actually uses is required, and all of it is checked before any device is
+touched, so a missing tool fails the boot cleanly rather than half-configuring the node.
+
+| Need | Package | When |
+| --- | --- | --- |
+| `bash` 4 or newer | `bash` | always |
+| `blkid`, `mount`, `umount` | `util-linux` | always |
+| `mktemp` | `coreutils` | always |
+| `awk` | `awk` / `busybox` | always |
+| `systemctl`, `udevadm`, `systemd-escape` | `systemd` | always |
+| `mkfs.ext4` | `e2fsprogs` | any set with `filesystem: ext4` |
+| `mkfs.xfs` | `xfsprogs` | any set with `filesystem: xfs` |
+| `logger`, `restorecon` | `util-linux`, `policycoreutils` | optional; used when present |
+
+`nvme-cli` is **not** required — udev reads serials from sysfs. It is still handy for debugging
+(`nvme id-ctrl /dev/nvme0 | grep sn`), as is `lsblk -o NAME,SERIAL,FSTYPE,MOUNTPOINT`. To check what
+udev sees on a node, `hack/verify-udev-serial.sh` exercises the whole matching path.
+
+A read-only root filesystem is not supported: the node writes `/etc/fstab`, the script, its table, a
+udev rules file, the unit and a drop-in. It fails loudly with a clear message if those are not
+writable.
+
+### With local-static-provisioner
+
+Karpenter creates and mounts the disks; it does not install or configure the provisioner. Point its
+`hostDir` at the set's `mountDir`. No node label is needed — the provisioner discovers through the host
+path and sets node affinity on the PVs it creates.
+
+For `filesystem: ext4` or `xfs` sets, one mount per volume:
+
+```yaml
+# local-static-provisioner ConfigMap
+storageClassMap: |
+  local-pv:
+    hostDir: /mnt/local-pv
+    mountDir: /mnt/local-pv
+    volumeMode: Filesystem
+```
+
+For `filesystem: None` sets, one symlinked block device per volume:
+
+```yaml
+storageClassMap: |
+  local-block:
+    hostDir: /mnt/raw
+    mountDir: /mnt/raw
+    volumeMode: Block
+```
+
 ## Drift
 
 An Oxide instance is configured once, at launch: its image, its interface's subnet, its SSH keys, its
@@ -288,8 +452,9 @@ Every `OxideNodeClass` parameter is covered, in one of two ways:
 
 | Changed                                                             | Drifts as      | Detected by                                       |
 | ------------------------------------------------------------------- | -------------- | ------------------------------------------------- |
-| `userData`, `env`, `server`, `kubeletArgs`, `bootstrap`, `bootDiskSize` | `NodeClassDrift` | a hash of the spec                             |
+| `userData`, `env`, `server`, `kubeletArgs`, `bootstrap`, `storage` | `NodeClassDrift` | a hash of the spec                             |
 | `imageSelector`, or a newer image matching an unchanged one          | `ImageDrift`   | `status.images[0]` vs. the node's image           |
+| a `diskSet`'s `imageSelector` or `snapshotSelector`, or a newer source matching an unchanged one | `DiskSetSourceDrift` | `status.storage.diskSets[].images[0]` vs. the sources recorded at launch |
 | `subnetSelector`                                                     | `SubnetDrift`  | `status.subnets` vs. the subnet the node launched in |
 | `sshKeySelector`                                                     | `SSHKeyDrift`  | `status.sshKeys` vs. the keys copied at launch    |
 | `ipPoolSelector`                                                     | `IPPoolDrift`  | `status.ipPools` vs. the pools the node's IPs came from |
@@ -369,7 +534,7 @@ smaller pods.
 ### Storage Is Checked Later Than CPU and Memory
 
 CPU and memory are properties of the instance type, so they are folded into offerings and the scheduler
-never picks an oversized shape. Storage is not: boot disk size comes from `spec.bootDiskSize` on the
+never picks an oversized shape. Storage is not: disk sizes come from `spec.storage` on the
 OxideNodeClass, so two nodes of identical shape can consume different storage quota. It is therefore
 checked at launch time, immediately before the instance is created, and produces the same style of
 error:
@@ -382,6 +547,13 @@ the silo's storage quota has no room for this node: it needs 200 GiB, and 900 Gi
 Because a storage quota refuses every shape equally, this does **not** mark the shape unavailable —
 there is no smaller instance type that would help, and saying otherwise about the shape would be
 untrue.
+
+Only **distributed** disks are counted here. The Oxide API reports one storage figure with no way to
+tell the two backends apart, so whether a local disk is charged against the silo's storage quota is
+not something Karpenter can establish. The two ways to be wrong are not symmetric: under-counting
+means the pre-check passes and the disk create is refused, which is already reported as insufficient
+storage, while over-counting means refusing launches the rack would have accepted and explaining the
+refusal with a figure that is not true. So local disks are left out and the API is the authority.
 
 ### Interaction With the Capacity Manager
 

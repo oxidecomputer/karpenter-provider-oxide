@@ -1,0 +1,36 @@
+[Unit]
+Description=Karpenter data disk preparation
+Documentation=https://github.com/oxidecomputer/karpenter-provider-oxide
+
+# This unit does not mount anything and does not order itself against the kubelet. It formats blank
+# disks, seeds mount points and relabels fresh filesystems -- the three things udev and systemd will
+# not do -- and everything else is declarative: a udev rule names each disk, an /etc/fstab entry
+# mounts it with x-systemd.requires= pointing back here, and the consumer's drop-in waits on the
+# mounts.
+#
+# DefaultDependencies=no is load-bearing rather than tidy. The mount units this runs before are
+# ordered before local-fs.target, and the default dependencies would put this unit after
+# basic.target, which is after local-fs.target: a cycle, which systemd would break by silently
+# dropping one of the orderings.
+DefaultDependencies=no
+Wants=systemd-udevd.service
+After=systemd-udevd.service
+Before=local-fs.target shutdown.target
+Conflicts=shutdown.target
+# The script and its table live under /var, which is the root filesystem on every image this has been
+# run on but need not be. Not a cycle: the /var mount is ordered before this unit, and this unit
+# before local-fs.target.
+RequiresMountsFor=/var/lib/karpenter
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/var/lib/karpenter/disk-setup.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+
+[Install]
+# Load-bearing where a nodeclass configures only raw block disks: with no fstab entry to require this
+# unit through x-systemd.requires=, nothing else would pull it into the boot transaction.
+WantedBy=local-fs.target

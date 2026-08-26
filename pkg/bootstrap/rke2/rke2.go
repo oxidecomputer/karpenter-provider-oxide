@@ -10,6 +10,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -22,12 +23,17 @@ const (
 
 	userDataTemplateText = `#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p /etc/rancher/rke2
+{{ with .DiskSetup }}{{ . }}
+{{ end }}mkdir -p /etc/rancher/rke2
 cat <<'EOF' > /etc/rancher/rke2/config.yaml
-{{ . }}
+{{ .Config }}
 EOF
 systemctl start rke2-agent.service
 `
+
+	// consumerUnit is the unit that must not start before the data disks are mounted. RKE2 runs the
+	// kubelet as a child of the agent, so the agent is the only consumer to order against.
+	consumerUnit = "rke2-agent.service"
 )
 
 var userDataTemplate = template.Must(template.New("userdata").Parse(userDataTemplateText))
@@ -123,11 +129,21 @@ func (b *Bootstrapper) UserData(
 		return "", fmt.Errorf("unable to marshal RKE2 config to YAML: %w", err)
 	}
 
-	var userData strings.Builder
-	if err := userDataTemplate.Execute(&userData, string(configYAML)); err != nil {
+	var rendered strings.Builder
+	diskSetup, err := disk.Script(req.Storage, disk.Options{
+		ConsumerUnits: []string{consumerUnit},
+	})
+	if err != nil {
+		return "", fmt.Errorf("unable to render disk setup: %w", err)
+	}
+
+	if err := userDataTemplate.Execute(&rendered, userData{
+		DiskSetup: diskSetup,
+		Config:    string(configYAML),
+	}); err != nil {
 		return "", fmt.Errorf("unable to execute user-data template: %w", err)
 	}
-	return userData.String(), nil
+	return rendered.String(), nil
 }
 
 // token reads the long-lived agent join token from the referenced Secret.
@@ -154,4 +170,16 @@ func (b *Bootstrapper) token(
 		)
 	}
 	return string(token), nil
+}
+
+// userData is what the user-data template is rendered from.
+//
+// DiskSetup is spliced in after "set -euo pipefail" and before the configuration is written, which is
+// what guarantees the disks are mounted before the node joins: the block ends by running a oneshot
+// unit synchronously, so under set -e the join is never reached on a node whose disks did not come up.
+// It is empty for a nodeclass with no diskSets, which renders the script this template rendered
+// before disk support existed.
+type userData struct {
+	DiskSetup string
+	Config    string
 }

@@ -2,6 +2,7 @@ package cloudprovider
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
@@ -370,15 +371,81 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 		{
 			name: "the boot disk size",
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
-				spec.BootDiskSize = *resourceQuantity("100Gi")
+				spec.Storage.Boot.Size = *resourceQuantity("100Gi")
+			},
+		},
+		{
+			name: "a diskSet's size",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets[0].Size = *resourceQuantity("200Gi")
+			},
+		},
+		{
+			name: "a diskSet's count",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets[0].Count = 3
+			},
+		},
+		{
+			name: "a diskSet's type",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets[0].Type = v1alpha1.DiskSetTypeLocal
+			},
+		},
+		{
+			name: "a diskSet's filesystem",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets[0].Filesystem = v1alpha1.FilesystemXFS
+			},
+		},
+		{
+			name: "a diskSet's mount directory",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets[0].MountDir = "/mnt/elsewhere"
+			},
+		},
+		{
+			name: "a diskSet being added",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets = append(spec.Storage.DiskSets, v1alpha1.DiskSet{
+					Name: "extra", Type: v1alpha1.DiskSetTypeLocal, Count: 1,
+					Size: *resourceQuantity("10Gi"), MountDir: "/mnt/extra",
+				})
+			},
+		},
+		{
+			name: "two diskSets swapping sizes",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Storage.DiskSets = []v1alpha1.DiskSet{
+					{
+						Name: "aaa", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
+						Size: *resourceQuantity("200Gi"), MountDir: "/mnt/aaa",
+					},
+					{
+						Name: "bbb", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
+						Size: *resourceQuantity("100Gi"), MountDir: "/mnt/bbb",
+					},
+				}
 			},
 		},
 	}
 
 	base := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
-			Bootstrap:    &v1alpha1.Bootstrap{RKE2: &v1alpha1.RKE2Bootstrap{}},
-			BootDiskSize: *resourceQuantity("50Gi"),
+			Bootstrap: &v1alpha1.Bootstrap{RKE2: &v1alpha1.RKE2Bootstrap{}},
+			Storage: v1alpha1.Storage{
+				Boot: v1alpha1.BootDisk{Size: *resourceQuantity("50Gi")},
+				DiskSets: []v1alpha1.DiskSet{
+					{
+						Name: "aaa", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
+						Size: *resourceQuantity("100Gi"), MountDir: "/mnt/aaa",
+					},
+					{
+						Name: "bbb", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
+						Size: *resourceQuantity("200Gi"), MountDir: "/mnt/bbb",
+					},
+				},
+			},
 		},
 	}
 	before := base.Hash()
@@ -394,8 +461,8 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 	}
 }
 
-// resourceQuantity keeps the boot disk cases readable; a parse failure here is a broken test rather
-// than a condition worth handling.
+// resourceQuantity keeps the disk cases readable; a parse failure here is a broken test rather than a
+// condition worth handling.
 func resourceQuantity(value string) *resource.Quantity {
 	quantity := resource.MustParse(value)
 	return &quantity
@@ -406,11 +473,17 @@ func resourceQuantity(value string) *resource.Quantity {
 // Otherwise the same nodeclass hashes two ways and every node reads as drifted.
 func TestHashIsStableAcrossQuantityFormats(t *testing.T) {
 	binary := &v1alpha1.OxideNodeClass{
-		Spec: v1alpha1.OxideNodeClassSpec{BootDiskSize: resource.MustParse("1Gi")},
+		Spec: v1alpha1.OxideNodeClassSpec{
+			Storage: v1alpha1.Storage{
+				Boot: v1alpha1.BootDisk{Size: resource.MustParse("1Gi")},
+			},
+		},
 	}
 	decimal := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
-			BootDiskSize: *resource.NewQuantity(1<<30, resource.DecimalSI),
+			Storage: v1alpha1.Storage{
+				Boot: v1alpha1.BootDisk{Size: *resource.NewQuantity(1<<30, resource.DecimalSI)},
+			},
 		},
 	}
 	if binary.Hash() != decimal.Hash() {
@@ -419,5 +492,62 @@ func TestHashIsStableAcrossQuantityFormats(t *testing.T) {
 			binary.Hash(),
 			decimal.Hash(),
 		)
+	}
+}
+
+// Reordering diskSets changes the disk names a launch mints, but it does not change anything about
+// the node those disks make, so it must not replace the fleet. This is the asymmetry the storage
+// fingerprint is built around, and it is easy to break by switching to a reflected hash.
+func TestHashIgnoresDiskSetOrder(t *testing.T) {
+	first := v1alpha1.DiskSet{
+		Name: "aaa", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
+		Size: *resourceQuantity("100Gi"), MountDir: "/mnt/aaa",
+	}
+	second := v1alpha1.DiskSet{
+		Name: "bbb", Type: v1alpha1.DiskSetTypeLocal, Count: 4,
+		Size: *resourceQuantity("500Gi"), MountDir: "/mnt/bbb",
+	}
+	nodeClassWith := func(sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
+		return &v1alpha1.OxideNodeClass{
+			Spec: v1alpha1.OxideNodeClassSpec{
+				Storage: v1alpha1.Storage{
+					Boot:     v1alpha1.BootDisk{Size: *resourceQuantity("20Gi")},
+					DiskSets: sets,
+				},
+			},
+		}
+	}
+	forward := nodeClassWith(first, second)
+	reversed := nodeClassWith(second, first)
+	if got, want := reversed.Hash(), forward.Hash(); got != want {
+		t.Errorf("Hash() = %q with diskSets reversed and %q in order, want them equal", got, want)
+	}
+}
+
+// A nodeclass that has been through the API server must hash the same as the one that was written,
+// or every node reads as drifted the first time the object is re-read. resource.Quantity is the trap
+// here: it comes back carrying a format the author never chose.
+func TestHashSurvivesARoundTrip(t *testing.T) {
+	nodeClass := &v1alpha1.OxideNodeClass{
+		Spec: v1alpha1.OxideNodeClassSpec{
+			Storage: v1alpha1.Storage{
+				Boot: v1alpha1.BootDisk{Size: *resourceQuantity("20Gi")},
+				DiskSets: []v1alpha1.DiskSet{{
+					Name: "local-pv", Type: v1alpha1.DiskSetTypeLocal, Count: 4,
+					Size: *resourceQuantity("500Gi"), MountDir: "/mnt/local-pv",
+				}},
+			},
+		},
+	}
+	encoded, err := json.Marshal(nodeClass)
+	if err != nil {
+		t.Fatalf("unable to marshal the nodeclass: %v", err)
+	}
+	roundTripped := &v1alpha1.OxideNodeClass{}
+	if err := json.Unmarshal(encoded, roundTripped); err != nil {
+		t.Fatalf("unable to unmarshal the nodeclass: %v", err)
+	}
+	if got, want := roundTripped.Hash(), nodeClass.Hash(); got != want {
+		t.Errorf("Hash() = %q after a round trip and %q before, want them equal", got, want)
 	}
 }

@@ -3,7 +3,54 @@ kind: OxideNodeClass
 metadata:
   name: default
 spec:
-  bootDiskSize: 20Gi
+  storage:
+    boot:
+      size: 20Gi
+    # Additional disks attached to every node. An instance can attach 8 disks in total, and the boot
+    # disk is one of them, so the counts below may sum to at most 7.
+    # diskSets:
+    #   # A second distributed disk, so container images and etcd data are not on the boot disk.
+    #   # mountPath is a single mount point, which is why this set is one disk.
+    #   - name: kubernetes
+    #     type: Distributed
+    #     size: 100Gi
+    #     filesystem: ext4          # ext4 (the default when unset), xfs, or None for a raw block device
+    #     mountPath: /var/lib/rancher
+    #
+    #   # Sled-local disks for the local static provisioner. mountDir is a parent directory: these
+    #   # land at /mnt/local-pv/local-pv-0 through -3, which is what its hostDir expects.
+    #   #
+    #   # A local disk lives on the sled the instance is placed on. It does not outlive the instance,
+    #   # cannot be created from an image or a snapshot, and can come back blank, in which case it is
+    #   # reformatted on the next boot -- so anything on it can vanish.
+    #   - name: local-pv
+    #     type: Local
+    #     count: 4
+    #     size: 500Gi
+    #     layout: Individual        # Individual is the only layout today
+    #     filesystem: ext4
+    #     mountDir: /mnt/local-pv
+    #
+    #   # Raw block devices, for a consumer that manages its own on-disk format. Nothing is created on
+    #   # them and nothing is mounted; each is symlinked into mountDir, which is the local static
+    #   # provisioner's volumeMode: Block discovery mode.
+    #   - name: raw
+    #     type: Local
+    #     count: 2
+    #     size: 500Gi
+    #     filesystem: None
+    #     mountDir: /mnt/raw
+    #
+    #   # A Distributed set can be created from an image or a snapshot instead of blank. It arrives
+    #   # already carrying a filesystem, so filesystem must not be set: it would be formatted over.
+    #   # Note the copy is still deleted with the node.
+    #   - name: restored
+    #     type: Distributed
+    #     size: 200Gi
+    #     mountPath: /var/lib/dataset
+    #     snapshotSelector:
+    #       - name: nightly-*
+    #     readOnly: false
   # Shared by every bootstrap provider. Leave server unset to discover the kube-apiserver from the
   # default/kubernetes EndpointSlice; each provider renders it with the port it joins on.
   kubeletArgs:

@@ -53,7 +53,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/google/uuid"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -185,19 +188,17 @@ func (p *Provider) Create(
 	// call had already returned success. Creating it stopped keeps placement in a call of its own.
 	params.Body.Start = new(false)
 	name := string(params.Body.Name)
-	// The name the boot disk is created with, which is the only handle on it left once the instance
-	// is gone and can no longer be asked which disk it booted from. Resolved before the disk is
-	// provisioned, because provisioning rewrites the params to attach the disk instead of creating
-	// it, and asking to create it is what makes the disk this launch's to delete.
-	bootDiskName := bootDiskName(params.Body)
+	// Every disk name this launch owns, which is the only handle on them left once the instance is
+	// gone and can no longer be asked what was attached to it. Resolved before anything is
+	// provisioned, because provisioning rewrites the params to attach the distributed disks instead
+	// of creating them, and asking to create a disk is what makes it this launch's to delete.
+	//
+	// Local disks are in this set too. They are created by the instance create rather than ahead of
+	// it, but they are still named by the plan and still this launch's to remove.
+	diskNames := diskNames(params.Body)
 
-	if spec, ok := bootDiskSpec(params.Body); ok {
-		if err := p.ensureBootDisk(ctx, spec); err != nil {
-			return nil, err
-		}
-		params.Body.BootDisk = oxide.InstanceDiskAttachment{
-			Value: &oxide.InstanceDiskAttachmentAttach{Name: spec.Name},
-		}
+	if err := p.ensureDisks(ctx, params.Body, diskNames); err != nil {
+		return nil, err
 	}
 
 	created, err := p.ox.InstanceCreate(ctx, params)
@@ -210,16 +211,16 @@ func (p *Provider) Create(
 			// The boot disk exists and this launch is over, so it has to go. Karpenter reschedules an
 			// insufficient capacity failure onto a fresh NodeClaim under a different name, which would
 			// never come looking for this disk.
-			p.abandonDisk(ctx, bootDiskName, err)
+			p.abandonDisks(ctx, diskNames, err)
 			return nil, fmt.Errorf(
 				"unable to create instance %s, %w, %w", name, ErrInsufficientCapacity, err,
 			)
 		case errors.Is(err, oxide.ErrObjectAlreadyExists):
 			// An adopted instance is already started, or has been started by the adoption, so it has
 			// had its placement decided and does not go through the start below again.
-			return p.adopt(ctx, name, bootDiskName, opts)
+			return p.adopt(ctx, name, diskNames, opts)
 		default:
-			p.abandonDisk(ctx, bootDiskName, err)
+			p.abandonDisks(ctx, diskNames, err)
 			return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 		}
 	}
@@ -231,7 +232,7 @@ func (p *Provider) Create(
 	if err := p.joinAffinityGroups(ctx, created.Id, opts.AffinityGroups); err != nil {
 		// The same path a failed start takes: nothing else comes back for this instance, so it would
 		// otherwise hold rack capacity, its boot disk and its name indefinitely.
-		p.abandon(ctx, created.Id, bootDiskName, err)
+		p.abandon(ctx, created.Id, diskNames, err)
 		return nil, err
 	}
 
@@ -240,7 +241,7 @@ func (p *Provider) Create(
 		// Nothing else will come back for this instance: the caller is about to be told the launch
 		// failed, and an insufficient capacity failure is rescheduled onto a NodeClaim under a
 		// different name. Left behind, it would hold its boot disk and its name indefinitely.
-		p.abandon(ctx, created.Id, bootDiskName, err)
+		p.abandon(ctx, created.Id, diskNames, err)
 		return nil, err
 	}
 	return started, nil
@@ -259,20 +260,20 @@ func (p *Provider) Create(
 // disk that will not delete holds neither.
 //
 // It is safe to call repeatedly, and each step tolerates its resource already being gone. ref is a
-// name or an ID, so a launch that failed before it learned the ID can still clean up by name.
-// bootDiskName is the name the boot disk was created with, used to finish the cleanup on a retry
-// that runs after the instance itself is gone and can no longer be asked what was attached to it.
-func (p *Provider) Delete(ctx context.Context, ref string, bootDiskName string) error {
+// name or an ID, so a launch that failed before it learned the ID can still clean up by name, and
+// teardown carries the handles needed to finish the cleanup on a retry that runs after the instance
+// itself is gone and can no longer be asked what was attached to it.
+func (p *Provider) Delete(ctx context.Context, ref string, teardown Teardown) error {
 	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
 		Instance: oxide.NameOrId(ref),
 		Project:  p.projectFor(ref),
 	})
 	if err != nil {
 		if errors.Is(err, oxide.ErrObjectNotFound) {
-			// The instance is gone, but an earlier attempt may have died before deleting its boot
-			// disk. Deleting by name is the only handle left on it, and is a no-op once the disk is
-			// gone too.
-			if diskErr := p.deleteDisks(ctx, []string{bootDiskName}); diskErr != nil {
+			// The instance is gone, but an earlier attempt may have died before deleting its disks.
+			// Names are the only handle left on them, and deleting one that is already gone is a
+			// no-op.
+			if diskErr := p.deleteDisks(ctx, p.ownedDisks(ctx, teardown)); diskErr != nil {
 				return diskErr
 			}
 			return ErrNotFound
@@ -282,7 +283,7 @@ func (p *Provider) Delete(ctx context.Context, ref string, bootDiskName string) 
 
 	// Collected before the delete: the instance is the only thing that knows what is attached to it,
 	// and deleting it takes that knowledge with it.
-	disks := p.attachedDisks(ctx, instance, bootDiskName)
+	disks := p.attachedDisks(ctx, instance, teardown)
 
 	if err := p.stop(ctx, instance); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -324,16 +325,71 @@ func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance)
 	})
 }
 
-// ensureBootDisk provisions the boot disk an instance create asked for and returns once it is
-// attachable, adopting or replacing one left behind by an earlier attempt.
+// ensureDisks provisions every distributed disk an instance create asked for and rewrites the create
+// to attach them, leaving local disks for the instance create itself to make.
 //
-// The Oxide API allocates the disk's regions before the create returns, so a rack with nowhere to
-// put them fails here rather than leaving a disk to fault later. That is what makes this the call
-// that answers "is there storage", and it is reported as ErrInsufficientStorage so the caller does
-// not read it as a verdict on the instance shape.
-func (p *Provider) ensureBootDisk(
+// Distributed disks are pre-created because the Oxide API allocates their regions before the create
+// returns, so a rack with nowhere to put them fails here rather than leaving a disk to fault later.
+// That is what makes this the call that answers "is there storage", and it is reported as
+// ErrInsufficientStorage so the caller does not read it as a verdict on the instance shape.
+//
+// Local disks are deliberately left alone. See distributed for why.
+//
+// They are provisioned concurrently. Seven disks waiting their turn through diskReadyTimeout each
+// would run to a worst case longer than Karpenter's registration timeout, so a slow rack would look
+// like a node that never came up.
+func (p *Provider) ensureDisks(
+	ctx context.Context,
+	body *oxide.InstanceCreate,
+	owned []string,
+) error {
+	specs := diskCreateSpecs(body)
+	pre := make([]*oxide.InstanceDiskAttachmentCreate, 0, len(specs))
+	for _, spec := range specs {
+		if distributed(spec) {
+			pre = append(pre, spec)
+		}
+	}
+	if len(pre) == 0 {
+		return nil
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	for _, spec := range pre {
+		group.Go(func() error { return p.ensureDisk(groupCtx, spec, string(body.Name)) })
+	}
+	if err := group.Wait(); err != nil {
+		// Everything this launch owns goes, not just what this call managed to create. A name in the
+		// owned set can only ever have been created by an earlier attempt at this same launch, and
+		// this launch is over: Karpenter reschedules an insufficient capacity failure onto a fresh
+		// NodeClaim under a different name, which would never come looking for any of it.
+		p.abandonDisks(ctx, owned, err)
+		return err
+	}
+
+	// Rewritten only once every pre-created disk exists, so a partial failure above leaves the create
+	// params untouched rather than half converted.
+	if spec, ok := diskCreateSpec(body.BootDisk); ok && distributed(spec) {
+		body.BootDisk = oxide.InstanceDiskAttachment{
+			Value: &oxide.InstanceDiskAttachmentAttach{Name: spec.Name},
+		}
+	}
+	for i, attachment := range body.Disks {
+		if spec, ok := diskCreateSpec(attachment); ok && distributed(spec) {
+			body.Disks[i] = oxide.InstanceDiskAttachment{
+				Value: &oxide.InstanceDiskAttachmentAttach{Name: spec.Name},
+			}
+		}
+	}
+	return nil
+}
+
+// ensureDisk provisions one disk and returns once it is attachable, adopting or replacing one left
+// behind by an earlier attempt.
+func (p *Provider) ensureDisk(
 	ctx context.Context,
 	spec *oxide.InstanceDiskAttachmentCreate,
+	instanceName string,
 ) error {
 	name := string(spec.Name)
 
@@ -352,8 +408,8 @@ func (p *Provider) ensureBootDisk(
 		})
 		if err == nil {
 			if err := p.waitForDiskReady(ctx, created); err != nil {
-				// Nothing else has been created yet, so the disk is the whole of the cleanup.
-				p.abandonDisk(ctx, name, err)
+				// Left for the caller to clean up along with everything else the launch owns; a
+				// sibling disk may be in flight concurrently and is not this call's to remove.
 				return err
 			}
 			return nil
@@ -362,11 +418,11 @@ func (p *Provider) ensureBootDisk(
 		switch {
 		case errors.Is(err, oxide.ErrInsufficientCapacity):
 			return fmt.Errorf(
-				"unable to create boot disk %s, %w, %w", name, ErrInsufficientStorage, err,
+				"unable to create disk %s, %w, %w", name, ErrInsufficientStorage, err,
 			)
 
 		case errors.Is(err, oxide.ErrObjectAlreadyExists) && attempt == 0:
-			replace, err := p.adoptBootDisk(ctx, spec)
+			replace, err := p.adoptDisk(ctx, spec, instanceName)
 			if err != nil {
 				return err
 			}
@@ -376,21 +432,22 @@ func (p *Provider) ensureBootDisk(
 			// The name is free now, so fall through and create it again.
 
 		default:
-			return fmt.Errorf("unable to create boot disk %s, %w", name, err)
+			return fmt.Errorf("unable to create disk %s, %w", name, err)
 		}
 	}
 }
 
-// adoptBootDisk takes over a boot disk that already exists under the name a create tried to use,
-// which is what an earlier attempt that died between creating the disk and creating the instance
-// looks like. It reports whether the caller should create the disk again, having removed the one
-// that was in the way.
-func (p *Provider) adoptBootDisk(
+// adoptDisk takes over a disk that already exists under the name a create tried to use, which is
+// what an earlier attempt that died between creating the disk and creating the instance looks like.
+// It reports whether the caller should create the disk again, having removed the one that was in the
+// way.
+func (p *Provider) adoptDisk(
 	ctx context.Context,
 	spec *oxide.InstanceDiskAttachmentCreate,
+	instanceName string,
 ) (bool, error) {
 	name := string(spec.Name)
-	log.FromContext(ctx).V(1).Info("boot disk already exists, adopting it", "disk", name)
+	log.FromContext(ctx).V(1).Info("disk already exists, adopting it", "disk", name)
 
 	existing, err := p.ox.DiskView(ctx, oxide.DiskViewParams{
 		Disk:    oxide.NameOrId(name),
@@ -401,16 +458,34 @@ func (p *Provider) adoptBootDisk(
 			// Deleted between the create and this view. Something else is working on this name, and
 			// creating it again here would race that rather than resolve it.
 			return false, fmt.Errorf(
-				"boot disk %s already exists but was deleted before it could be adopted", name,
+				"disk %s already exists but was deleted before it could be adopted", name,
 			)
 		}
-		return false, fmt.Errorf("unable to view existing boot disk %s, %w", name, err)
+		return false, fmt.Errorf("unable to view existing disk %s, %w", name, err)
+	}
+
+	// Never taken from another instance. A disk name embeds a fingerprint of the instance name, so a
+	// name already attached elsewhere means that fingerprint collided -- astronomically unlikely, but
+	// the difference between reporting it and acting on it is the difference between a failed launch
+	// and somebody else's data. Refused rather than adopted or deleted.
+	//
+	// A disk attached to this launch's own instance is a different thing entirely, and is adopted: it
+	// is what a retry of an attempt that got as far as creating the instance looks like.
+	if attached, ok := existing.State.AsAttached(); ok && attached.Instance != "" {
+		if !p.instanceIs(ctx, attached.Instance, instanceName) {
+			return false, fmt.Errorf(
+				"disk %s already exists and is attached to instance %s rather than to %s, so it is not this launch's to adopt",
+				name,
+				attached.Instance,
+				instanceName,
+			)
+		}
 	}
 
 	// Adopted on state alone. A disk whose size no longer matches the OxideNodeClass is adopted like
-	// any other: it boots a working node, just not the one the class now describes, which is drift and
-	// belongs to whatever reconciles drift rather than to a launch in progress. Replacing it here would
-	// also make a boot disk size edit destroy disks as a side effect of an unrelated retry.
+	// any other: it works, just not as the class now describes, which is drift and belongs to whatever
+	// reconciles drift rather than to a launch in progress. Replacing it here would also make a disk
+	// size edit destroy disks as a side effect of an unrelated retry.
 	switch state := existing.State.State(); state {
 	// Usable already, or on its way there under its own steam.
 	case oxide.DiskStateStateCreating,
@@ -420,12 +495,12 @@ func (p *Provider) adoptBootDisk(
 		return false, p.waitForDiskReady(ctx, existing)
 
 	// Detaching, faulted, destroyed, or partway through an import this provider never starts. None of
-	// these become a usable boot disk on their own, so the name has to be freed before a create under
-	// it can succeed.
+	// these become a usable disk on their own, so the name has to be freed before a create under it
+	// can succeed.
 	default:
 		if err := p.deleteDisk(ctx, existing.Id); err != nil {
 			return false, fmt.Errorf(
-				"boot disk %s already exists in state %q and could not be removed, %w",
+				"disk %s already exists in state %q and could not be removed, %w",
 				name, state, err,
 			)
 		}
@@ -433,7 +508,7 @@ func (p *Provider) adoptBootDisk(
 	}
 }
 
-// waitForDiskReady waits for a boot disk to reach a state the instance create can attach it in.
+// waitForDiskReady waits for a disk to reach a state the instance create can attach it in.
 //
 // A disk that comes back already attachable is the common case: the create allocated its regions
 // synchronously. This only covers the tail, and the states it gives up on are the ones a disk does
@@ -498,25 +573,29 @@ func (p *Provider) waitForDiskReady(ctx context.Context, disk *oxide.Disk) error
 	return err
 }
 
-// abandonDisk removes a boot disk this launch created and is giving up on. The caller is about to be
+// abandonDisks removes the disks this launch created and is giving up on. The caller is about to be
 // told the launch failed, and Karpenter retries insufficient capacity onto a NodeClaim with a
 // different name, so a disk left behind here is one nothing ever comes back for. Failures are logged
 // rather than returned: cause is why the launch is being abandoned and is the more useful error to
 // surface.
 //
-// An empty name means the boot disk was one the caller asked to attach, which this launch did not
-// create and must not delete.
-func (p *Provider) abandonDisk(ctx context.Context, name string, cause error) {
-	if name == "" {
-		return
-	}
-	if err := p.deleteDisk(ctx, name); err != nil {
-		log.FromContext(ctx).Error(
-			err,
-			"unable to clean up a boot disk whose instance did not launch",
-			"disk", name,
-			"cause", cause.Error(),
-		)
+// It is given the whole set the launch owns rather than the disks that happened to be created,
+// because a name in that set can only ever have been created by an attempt at this same launch, and
+// deleting one that was never created is a no-op. An empty set means every disk was one the caller
+// asked to attach, which this launch did not create and must not delete.
+func (p *Provider) abandonDisks(ctx context.Context, names []string, cause error) {
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if err := p.deleteDisk(ctx, name); err != nil {
+			log.FromContext(ctx).Error(
+				err,
+				"unable to clean up a disk whose instance did not launch",
+				"disk", name,
+				"cause", cause.Error(),
+			)
+		}
 	}
 }
 
@@ -529,7 +608,8 @@ func (p *Provider) abandonDisk(ctx context.Context, name string, cause error) {
 // The instance is addressed by name because a create that failed never reported an ID.
 func (p *Provider) adopt(
 	ctx context.Context,
-	name, bootDiskName string,
+	name string,
+	diskNames []string,
 	opts Options,
 ) (*oxide.Instance, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
@@ -563,7 +643,7 @@ func (p *Provider) adopt(
 		// Re-issued rather than assumed: an earlier attempt may have died between the create and the
 		// joins. A membership already in place comes back as a conflict, which counts as success.
 		if err := p.joinAffinityGroups(ctx, instance.Id, opts.AffinityGroups); err != nil {
-			p.abandon(ctx, instance.Id, bootDiskName, err)
+			p.abandon(ctx, instance.Id, diskNames, err)
 			return nil, err
 		}
 		started, err := p.start(ctx, instance.Id)
@@ -571,7 +651,7 @@ func (p *Provider) adopt(
 			// Whatever the reason, this instance is not going to run, and its user-data holds a join
 			// credential from the earlier attempt that may already have expired. Tear it down so the
 			// next attempt builds a new one.
-			p.abandon(ctx, instance.Id, bootDiskName, err)
+			p.abandon(ctx, instance.Id, diskNames, err)
 			return nil, err
 		}
 		return started, nil
@@ -583,7 +663,7 @@ func (p *Provider) adopt(
 			"instance %s already exists in run state %q and cannot be adopted",
 			name, instance.RunState,
 		)
-		if err := p.Delete(ctx, instance.Id, bootDiskName); err != nil &&
+		if err := p.Delete(ctx, instance.Id, teardownFor(diskNames)); err != nil &&
 			!errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("%w, and it could not be terminated, %w", abandonErr, err)
 		}
@@ -719,8 +799,13 @@ func (p *Provider) stop(ctx context.Context, instance *oxide.Instance) error {
 // launch failed and will never reference the instance again, so left behind it would hold rack
 // capacity and a boot disk indefinitely. Cleanup failures are logged rather than returned: cause is
 // why the launch is being abandoned and is the more useful error to surface.
-func (p *Provider) abandon(ctx context.Context, ref, bootDiskName string, cause error) {
-	if err := p.Delete(ctx, ref, bootDiskName); err != nil && !errors.Is(err, ErrNotFound) {
+func (p *Provider) abandon(ctx context.Context, ref string, diskNames []string, cause error) {
+	if err := p.Delete(
+		ctx,
+		ref,
+		teardownFor(diskNames),
+	); err != nil &&
+		!errors.Is(err, ErrNotFound) {
 		log.FromContext(ctx).Error(
 			err,
 			"unable to clean up an instance that did not launch",
@@ -740,7 +825,7 @@ func (p *Provider) abandon(ctx context.Context, ref, bootDiskName string, cause 
 func (p *Provider) attachedDisks(
 	ctx context.Context,
 	instance *oxide.Instance,
-	bootDiskName string,
+	teardown Teardown,
 ) []string {
 	refs := []string{}
 	seen := map[string]struct{}{}
@@ -758,7 +843,13 @@ func (p *Provider) attachedDisks(
 	if instance.BootDiskId != "" {
 		add(instance.BootDiskId)
 	} else {
-		add(bootDiskName)
+		add(teardown.BootDiskName)
+	}
+	// Unioned with the attachment listing rather than used only as a fallback. A disk created between
+	// the disk provisioning and the instance create is this launch's, is named from the same plan, and
+	// is attached to nothing, so no attachment listing can report it.
+	for _, name := range p.disksMatchingPrefix(ctx, teardown.DataPrefix) {
+		add(name)
 	}
 
 	attached, err := p.ox.InstanceDiskListAllPages(
@@ -767,7 +858,7 @@ func (p *Provider) attachedDisks(
 	)
 	if err != nil {
 		log.FromContext(ctx).V(1).Info(
-			"unable to list the disks attached to the instance, deleting the boot disk only",
+			"unable to list the disks attached to the instance, deleting the disks named by the plan only",
 			"instance-id", instance.Id,
 			"reason", err.Error(),
 		)
@@ -849,20 +940,39 @@ func (p *Provider) projectFor(ref string) oxide.NameOrId {
 	return oxide.NameOrId(p.project)
 }
 
-// bootDiskName returns the name the create is giving the instance's boot disk, which is the handle
-// cleanup needs when the instance itself can no longer be asked for it. It is empty when the boot
-// disk is an existing one being attached, since that disk is not this launch's to delete.
-func bootDiskName(body *oxide.InstanceCreate) string {
-	if spec, ok := bootDiskSpec(body); ok {
-		return string(spec.Name)
+// diskNames returns every disk name a create is asking to have made, which is the whole set the
+// launch owns and therefore the whole set cleanup has to consider. A disk being attached rather than
+// created is not in it, since such a disk is not this launch's to delete.
+func diskNames(body *oxide.InstanceCreate) []string {
+	specs := diskCreateSpecs(body)
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, string(spec.Name))
 	}
-	return ""
+	return names
 }
 
-// bootDiskSpec returns the boot disk a create is asking to have made, if it is asking for one. The
+// diskCreateSpecs returns every disk a create is asking to have made, the boot disk first, in the
+// order the create lists them.
+func diskCreateSpecs(body *oxide.InstanceCreate) []*oxide.InstanceDiskAttachmentCreate {
+	var specs []*oxide.InstanceDiskAttachmentCreate
+	if spec, ok := diskCreateSpec(body.BootDisk); ok {
+		specs = append(specs, spec)
+	}
+	for _, attachment := range body.Disks {
+		if spec, ok := diskCreateSpec(attachment); ok {
+			specs = append(specs, spec)
+		}
+	}
+	return specs
+}
+
+// diskCreateSpec returns the disk an attachment is asking to have made, if it is asking for one. The
 // API accepts either variant by value or by pointer, so both are matched.
-func bootDiskSpec(body *oxide.InstanceCreate) (*oxide.InstanceDiskAttachmentCreate, bool) {
-	switch spec := body.BootDisk.Value.(type) {
+func diskCreateSpec(
+	attachment oxide.InstanceDiskAttachment,
+) (*oxide.InstanceDiskAttachmentCreate, bool) {
+	switch spec := attachment.Value.(type) {
 	case *oxide.InstanceDiskAttachmentCreate:
 		return spec, true
 	case oxide.InstanceDiskAttachmentCreate:
@@ -870,6 +980,19 @@ func bootDiskSpec(body *oxide.InstanceCreate) (*oxide.InstanceDiskAttachmentCrea
 	default:
 		return nil, false
 	}
+}
+
+// distributed reports whether a disk create asks for a distributed disk rather than a sled-local one.
+//
+// It is what decides whether the disk is provisioned ahead of the instance. A distributed disk's
+// regions are allocated across three sleds chosen independently of where the instance lands, so a
+// refusal is about storage and is worth establishing before anything else is created. A local disk's
+// capacity belongs to the one sled the instance is placed on, so a refusal is a placement refusal:
+// creating it ahead of time would decide the sled before the instance was placed, which is not a
+// decision this provider is in a position to make.
+func distributed(spec *oxide.InstanceDiskAttachmentCreate) bool {
+	_, local := spec.DiskBackend.AsLocal()
+	return !local
 }
 
 // diskAttachable reports whether an instance create can attach a disk in this state. Attached counts:
@@ -897,4 +1020,102 @@ func deletable(state oxide.InstanceState) bool {
 	default:
 		return false
 	}
+}
+
+// Teardown is how a delete finds the resources a launch created, once the instance itself is gone and
+// can no longer be asked what was attached to it.
+//
+// Both fields are derived from the NodeClaim name alone, deliberately: the OxideNodeClass may have
+// been edited or deleted between the launch and the teardown, so nothing here may depend on it. That
+// is what makes cleaning up N disks tractable without a per-launch record of what was created.
+type Teardown struct {
+	// BootDiskName is the name the boot disk was created with.
+	BootDiskName string
+	// DataPrefix is the prefix every data disk of this launch was named with. It is what finds a disk
+	// that was created but never attached, which no attachment listing can report.
+	DataPrefix string
+}
+
+// teardownFor builds a Teardown from the disk names a launch owns, for the internal callers that
+// already have them. The boot disk is the first name the plan produces.
+func teardownFor(diskNames []string) Teardown {
+	teardown := Teardown{}
+	if len(diskNames) > 0 {
+		teardown.BootDiskName = diskNames[0]
+	}
+	return teardown
+}
+
+// ownedDisks is every disk name a teardown can find, used on the path where the instance is already
+// gone and its attachment list is no longer available.
+func (p *Provider) ownedDisks(ctx context.Context, teardown Teardown) []string {
+	names := []string{}
+	if teardown.BootDiskName != "" {
+		names = append(names, teardown.BootDiskName)
+	}
+	return append(names, p.disksMatchingPrefix(ctx, teardown.DataPrefix)...)
+}
+
+// disksMatchingPrefix lists the project's disks and returns those a launch named with this prefix.
+//
+// A project-wide list is the price of there being no other way to find a disk that was created but
+// never attached: the Oxide API has no name-prefix filter, and an unattached disk appears in no
+// instance's attachment list. It runs once per teardown.
+//
+// A disk attached to some other instance is never returned. A data disk name embeds a fingerprint of
+// the instance name, so one attached elsewhere means that fingerprint collided, and the difference
+// between skipping it and deleting it is the difference between a leaked disk and somebody else's
+// data.
+func (p *Provider) disksMatchingPrefix(ctx context.Context, prefix string) []string {
+	if prefix == "" {
+		return nil
+	}
+	disks, err := p.ox.DiskListAllPages(ctx, oxide.DiskListParams{
+		Project: oxide.NameOrId(p.project),
+	})
+	if err != nil {
+		log.FromContext(ctx).V(1).Info(
+			"unable to list the project's disks, so any disk this launch created but never attached is left behind",
+			"prefix", prefix,
+			"reason", err.Error(),
+		)
+		return nil
+	}
+
+	var names []string
+	for _, disk := range disks {
+		if !strings.HasPrefix(string(disk.Name), prefix) {
+			continue
+		}
+		if attached, ok := disk.State.AsAttached(); ok && attached.Instance != "" {
+			// Attached disks are already covered by the instance's own attachment list on the path
+			// that has one, and on the path that does not, one attached elsewhere is not ours.
+			continue
+		}
+		names = append(names, disk.Id)
+	}
+	return names
+}
+
+// instanceIs reports whether the instance with this ID is the one named. It is used to tell a disk
+// left attached by an earlier attempt at this launch, which is adoptable, from one belonging to
+// another instance, which is not.
+//
+// An instance that cannot be viewed is treated as not being this one. That is the safe direction: it
+// refuses the adoption and fails the launch rather than taking a disk whose owner it could not
+// establish.
+func (p *Provider) instanceIs(ctx context.Context, id, name string) bool {
+	if id == "" || name == "" {
+		return false
+	}
+	view, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{Instance: oxide.NameOrId(id)})
+	if err != nil {
+		log.FromContext(ctx).V(1).Info(
+			"unable to view the instance a disk is attached to, so the disk is not adopted",
+			"instance-id", id,
+			"reason", err.Error(),
+		)
+		return false
+	}
+	return string(view.Name) == name
 }

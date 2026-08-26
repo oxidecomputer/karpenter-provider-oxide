@@ -17,6 +17,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -199,14 +200,29 @@ func (c *OxideCloudProvider) Create(
 	// reservation is handed back here. RecordICE and RecordSuccess release it themselves; this is
 	// idempotent alongside them.
 	defer c.instanceTypeProvider.ReleaseProbe(instanceType)
+	name := InstanceNamePrefix + nodeClaim.Name
+
+	// Planned before anything is created, because every later step reads from it: the disks the
+	// instance is created with, the storage the quota is asked about, and the serials the user-data
+	// tells the guest to match on. Planning is also the second line of defence behind the CRD's
+	// validation, so a layout the apiserver never re-validated is refused here rather than launching
+	// something wrong.
+	plan, err := storage.Build(name, nodeClass)
+	if err != nil {
+		return nil, fmt.Errorf("unable to plan the disks for %s: %w", nodeClaim.Name, err)
+	}
+
 	// Checked before anything is created, and before a bootstrapper mints a join credential the
-	// launch would waste. This is the only place the boot disk is known, so it is the only place the
+	// launch would waste. This is the only place the disks are known, so it is the only place the
 	// storage quota can be checked at all: disk size comes from the OxideNodeClass, not the shape, so
 	// it cannot be folded into an instance type's offerings the way CPU and memory are.
+	//
+	// Local disks are excluded from the figure. See Plan.DistributedBytes for why counting them would
+	// be the more dangerous of the two ways to be wrong.
 	request := utilization.Request{
 		CPUs:    int64(instanceType.Ncpus),
 		Memory:  uint64(instanceType.MemInGiB) * GiB,
-		Storage: uint64(nodeClass.Spec.BootDiskSize.Value()),
+		Storage: uint64(plan.DistributedBytes()),
 	}
 	if quota, err := c.instanceTypeProvider.Quota(); err == nil {
 		if admits, resource := quota.Admits(request); !admits {
@@ -222,7 +238,6 @@ func (c *OxideCloudProvider) Create(
 		}
 	}
 
-	name := InstanceNamePrefix + nodeClaim.Name
 	subnet := nodeClass.Status.Subnets[rand.IntN(len(nodeClass.Status.Subnets))]
 
 	// Generated last, immediately before the instance is created. Some bootstrappers mint a
@@ -232,6 +247,7 @@ func (c *OxideCloudProvider) Create(
 		NodeClaim:  nodeClaim,
 		NodeTaints: nodeTaints,
 		Hostname:   name,
+		Storage:    &plan,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
@@ -254,25 +270,10 @@ func (c *OxideCloudProvider) Create(
 			// a membership added after it would be recorded against a placement it did not influence.
 			// The create-time field is also free and atomic, which no separate call would be.
 			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
-			BootDisk: oxide.InstanceDiskAttachment{
-				Value: &oxide.InstanceDiskAttachmentCreate{
-					Name:        oxide.Name(name),
-					Description: "Boot disk",
-					Size:        oxide.ByteCount(nodeClass.Spec.BootDiskSize.Value()),
-					DiskBackend: oxide.DiskBackend{
-						Value: &oxide.DiskBackendDistributed{
-							DiskSource: oxide.DiskSource{
-								Value: &oxide.DiskSourceImage{
-									// Images is empty when no selector matched. Launch with an empty
-									// image and let the Oxide API reject it, which is what happened
-									// when an unmatched selector still left a zero-valued entry here.
-									ImageId: lo.FirstOrEmpty(nodeClass.Status.Images).ID,
-								},
-							},
-						},
-					},
-				},
-			},
+			// Both come from the same plan as the serials rendered into the user-data above, so
+			// what the rack creates and what the guest is told to look for cannot disagree.
+			BootDisk: plan.BootAttachment(),
+			Disks:    plan.DataAttachments(),
 			NetworkInterfaces: oxide.InstanceNetworkInterfaceAttachment{
 				Value: &oxide.InstanceNetworkInterfaceAttachmentCreate{
 					Params: []oxide.InstanceNetworkInterfaceCreate{
@@ -419,6 +420,12 @@ func (c *OxideCloudProvider) Create(
 		v1alpha1.AnnotationIPPools: v1alpha1.EncodeIDs(
 			v1alpha1.IPPoolIDs(nodeClass.Status.IPPools),
 		),
+		// Written even when a set has no source, for the reason the SSH keys are: an entry with an
+		// empty value is a set whose disks were created blank, and no entry at all is a set nothing
+		// was recorded for, which cannot be compared and never drifts.
+		v1alpha1.AnnotationDiskSetSources: v1alpha1.EncodeDiskSetSources(
+			v1alpha1.DiskSetSources(nodeClass.Status.Storage),
+		),
 	})
 	// Recorded so that a group added to the desired set after this launch is visible as drift, and so
 	// that a group removed from it can still be left. The desired set alone cannot answer either
@@ -441,11 +448,17 @@ func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.N
 		return fmt.Errorf("invalid provider id, must use the oxide ccm: %w", err)
 	}
 
-	// Matches the instance and boot disk names assigned in Create. It is the fallback used to find
-	// the boot disk when the instance is already gone and can no longer be asked for its disk ID.
-	bootDiskName := InstanceNamePrefix + nodeClaim.Name
+	// Matches the names assigned in Create, and deliberately derived from the NodeClaim name alone
+	// rather than from the nodeclass, which may have been edited or deleted since the launch. It is
+	// the fallback used to find the disks when the instance is already gone and can no longer be
+	// asked what was attached to it.
+	name := InstanceNamePrefix + nodeClaim.Name
+	teardown := instance.Teardown{
+		BootDiskName: name,
+		DataPrefix:   storage.DataPrefix(name),
+	}
 
-	if err := c.instanceProvider.Delete(ctx, instanceID, bootDiskName); err != nil {
+	if err := c.instanceProvider.Delete(ctx, instanceID, teardown); err != nil {
 		if errors.Is(err, instance.ErrNotFound) {
 			return cloudprovider.NewNodeClaimNotFoundError(err)
 		}

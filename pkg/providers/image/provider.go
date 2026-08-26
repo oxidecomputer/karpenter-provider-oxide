@@ -53,7 +53,23 @@ func (p *Provider) Resolve(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
 ) (Result, error) {
-	selectors := nodeClass.Spec.ImageSelector
+	return p.ResolveSelectors(ctx, nodeClass.Spec.ImageSelector)
+}
+
+// ResolveSelectors is Resolve for a selector list that is not the nodeclass's boot image selector,
+// which is what a diskSet carries.
+//
+// Taking the selectors rather than the nodeclass is what keeps the cache key over exactly the
+// question being asked: a fingerprint must never be taken over a whole nodeclass, and there can be
+// several diskSets each with their own selector. It also means two selectors that happen to be
+// identical share one cache entry and one listing between them.
+func (p *Provider) ResolveSelectors(
+	ctx context.Context,
+	selectors []v1alpha1.ImageSelector,
+) (Result, error) {
+	if len(selectors) == 0 {
+		return Result{}, nil
+	}
 	entry, err := p.cache.Get(
 		ctx,
 		resolver.Fingerprint(selectors),
@@ -170,6 +186,7 @@ func (p *Provider) resolve(
 			Name:        string(image.Name),
 			OS:          image.Os,
 			Version:     image.Version,
+			SizeBytes:   int64(image.Size),
 			TimeCreated: metav1.NewTime(*image.TimeCreated),
 		}
 	}), nil
