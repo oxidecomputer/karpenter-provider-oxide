@@ -10,7 +10,7 @@ require (
 	github.com/awslabs/operatorpkg v0.0.0-20260812232916-6d329cee9a40
 	github.com/google/uuid v1.6.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
-	github.com/oxidecomputer/oxide.go v0.9.1-0.20260420200835-b6f489e52089
+	github.com/oxidecomputer/oxide.go v0.10.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/samber/lo v1.53.0
 	go.yaml.in/yaml/v3 v3.0.5
