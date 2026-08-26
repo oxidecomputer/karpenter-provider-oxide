@@ -1,5 +1,7 @@
 # Karpenter - Oxide Provider
 
+See the [OxideNodeClass documentation](docs/oxide-karpenter.adoc) for the provider API reference.
+
 ## Getting Started
 
 Both charts are published to ghcr.io alongside the controller image. Their chart version matches the

@@ -1,0 +1,147 @@
+@layer base, components, utilities;
+@import 'tailwindcss';
+
+@import '@oxide/design-system/styles/preflight.css' layer(base);
+@import '@oxide/design-system/styles/tailwind.css';
+@import '@oxide/design-system/styles/main.css';
+@import '@oxide/design-system/styles/dark.css';
+@import '@oxide/design-system/styles/green.css';
+@import '@oxide/design-system/components/asciidoc.css';
+
+@source './src';
+@source './node_modules/@oxide/design-system/dist/components';
+
+@font-face {
+  font-family: 'GT America Mono';
+  src: url('https://oxide.computer/fonts/GT-America-Mono-Regular-OCC.woff2') format('woff2');
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'SuisseIntl';
+  src: url('https://oxide.computer/fonts/SuisseIntl-Regular-WebS.woff2') format('woff2');
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'SuisseIntl';
+  src: url('https://oxide.computer/fonts/SuisseIntl-Medium-WebS.woff2') format('woff2');
+  font-weight: 500;
+}
+
+:root {
+  color-scheme: dark;
+  background: var(--surface-default);
+  font-family: var(--font-sans);
+  scroll-padding-top: 86px;
+}
+
+body {
+  background: var(--surface-default);
+  color: var(--content-default);
+  margin: 0;
+}
+
+.docs-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  align-items: center;
+  background: color-mix(in srgb, var(--surface-default) 92%, transparent);
+  border-bottom: 1px solid var(--stroke-secondary);
+  display: flex;
+  height: 58px;
+  justify-content: space-between;
+  left: 0;
+  padding: 0 28px;
+  position: fixed;
+  right: 0;
+  top: 0;
+  z-index: 20;
+}
+
+.wordmark {
+  align-items: center;
+  color: var(--content-raise);
+  display: flex;
+  gap: 12px;
+  text-decoration: none;
+}
+
+.oxide-mark {
+  color: var(--content-accent);
+  font-family: var(--font-mono);
+  font-size: 25px;
+  letter-spacing: -0.08em;
+}
+
+.product-name {
+  border: 1px solid var(--stroke-default);
+  color: var(--content-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  padding: 5px 7px;
+  text-transform: uppercase;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 24px;
+}
+
+.topbar nav a {
+  color: var(--content-secondary);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.topbar nav a:hover {
+  color: var(--content-accent);
+}
+
+.content-column {
+  margin: 0 auto;
+  max-width: 980px;
+  padding: 110px clamp(20px, 6vw, 80px) 100px;
+}
+
+.page-title,
+.asciidoc-body h1 {
+  color: var(--content-raise);
+  font-size: 38px;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+  margin: 0 0 22px;
+}
+
+.asciidoc-body .table-wrapper {
+  border: 1px solid var(--stroke-secondary);
+  max-width: calc(100vw - 40px);
+  overflow-x: auto;
+}
+
+.asciidoc-body table {
+  min-width: 760px;
+}
+
+.loading {
+  color: var(--content-tertiary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    padding: 0 18px;
+  }
+
+  .topbar nav a:first-child {
+    display: none;
+  }
+
+  .content-column {
+    padding-top: 96px;
+  }
+}

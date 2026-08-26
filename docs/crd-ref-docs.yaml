@@ -1,0 +1,23 @@
+processor:
+  ignoreTypes:
+    - "List$"
+    - "AffinityGroupRef$"
+    - "OxideCapacity$"
+    - "OxideCapacityStatus$"
+    - "InstanceTypeAvailability$"
+    - "StorageRefusal$"
+    - "UnavailableRange$"
+    - "InventoryStatus$"
+    - "SledCapacity$"
+    - "QuotaHeadroom$"
+  ignoreFields:
+    - "TypeMeta$"
+    - "ObjectMeta$"
+    - "ListMeta$"
+
+render:
+  kubernetesVersion: 1.36
+  knownTypes:
+    - name: Condition
+      package: github.com/awslabs/operatorpkg/status
+      link: https://pkg.go.dev/github.com/awslabs/operatorpkg/status#Condition

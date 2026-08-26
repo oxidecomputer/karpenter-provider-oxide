@@ -33,6 +33,10 @@ go.work.sum
 
 # Build artifacts (helm packages, rendered manifests)
 _artifacts/
+docs/site/.vite/
+docs/site/node_modules/
+# Built preview; CI runs `make docs` and deploys it to gh-pages.
+docs/dist/
 
 # Release artifacts (GoReleaser output)
 dist/
