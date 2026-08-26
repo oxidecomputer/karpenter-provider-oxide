@@ -6,16 +6,12 @@ import (
 	"github.com/awslabs/operatorpkg/status"
 )
 
-// The nodeclass controller no longer asserts Ready; it only sets the dependent conditions and lets
-// the condition set recompute the root. That only works if at least one dependent is always
-// registered, which is the contract these tests pin.
 func TestReadyIsDerivedFromImagesResolved(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		nodeClass *OxideNodeClass
 	}{
-		// The bootstrap provider decides which other dependents are registered, including the rke2
-		// case that registers none of its own.
+
 		{"no bootstrap", &OxideNodeClass{}},
 		{"rke2 without a token ref", &OxideNodeClass{Spec: OxideNodeClassSpec{
 			Bootstrap: &Bootstrap{RKE2: &RKE2Bootstrap{}},
@@ -38,7 +34,6 @@ func TestReadyIsDerivedFromImagesResolved(t *testing.T) {
 	}
 }
 
-// A provider condition going false must hold the nodeclass un-Ready even though images resolved.
 func TestReadyIsFalseWhenABootstrapConditionIsFalse(t *testing.T) {
 	nodeClass := &OxideNodeClass{Spec: OxideNodeClassSpec{
 		Bootstrap: &Bootstrap{Kubeadm: &KubeadmBootstrap{}},

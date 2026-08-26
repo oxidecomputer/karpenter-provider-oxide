@@ -13,15 +13,6 @@ limitations under the License.
 */
 
 // Package metrics holds every Prometheus series this provider publishes.
-//
-// They live together rather than next to the code that moves them so that the cost of the whole set
-// can be read in one file. Cardinality is the thing to watch: the provider offers close to two
-// thousand instance shapes, so anything labeled by shape has to be restricted to the handful of
-// shapes something has actually happened to, and anything labeled by sled is bounded by the rack.
-// Nothing here is labeled by node, NodeClaim or pod.
-//
-// Karpenter's operator serves the controller-runtime registry, so registering with it is all it takes
-// to appear on the existing metrics endpoint.
 package metrics
 
 import (
@@ -32,25 +23,25 @@ import (
 )
 
 const (
-	// namespace prefixes every series, keeping them distinct from the karpenter_ series core
-	// publishes. These describe an Oxide rack, and nobody should have to guess whose they are.
 	namespace = "oxide_karpenter"
 
 	capacitySubsystem  = "capacity"
+	launchSubsystem    = "launch"
+	reaperSubsystem    = "reaper"
 	inventorySubsystem = "inventory"
 	providerSubsystem  = "provider"
 
-	// instanceTypeLabel is the shape a series is about, as an instance type name.
 	instanceTypeLabel = "instance_type"
-	// sledLabel is the Oxide sled ID a series is about.
+
+	kindLabel = "kind"
+
+	stateLabel = "state"
+
 	sledLabel = "sled"
-	// reasonLabel is why something happened, and resultLabel is how it turned out. Both are closed
-	// sets defined by the caller, never free-form strings.
+
 	reasonLabel = "reason"
 	resultLabel = "result"
-	// providerLabel is which resource provider a series is about, as the provider's own name. One
-	// value per package under pkg/providers, so the set is fixed at compile time rather than by
-	// anything an operator writes.
+
 	providerLabel = "provider"
 )
 
@@ -58,8 +49,7 @@ const (
 const (
 	// ProbeAcquired is the launch that got the reservation and is testing the shape.
 	ProbeAcquired = "acquired"
-	// ProbeRejected is a launch turned away because another one is already testing the shape. It is
-	// not a capacity failure, and a burst of them means the interlock is doing its job.
+	// ProbeRejected is a launch turned away because another one is already testing the shape.
 	ProbeRejected = "rejected"
 )
 
@@ -67,8 +57,7 @@ const (
 const (
 	// ResolutionSuccess is a resolution that reached the API and produced a reading.
 	ResolutionSuccess = "success"
-	// ResolutionError is a resolution that could not be made, whether or not a previous reading was
-	// served in its place.
+	// ResolutionError is a resolution that could not be made, whether or not a previous reading was served in its place.
 	ResolutionError = "error"
 )
 
@@ -83,9 +72,58 @@ const (
 )
 
 var (
-	// ICEs counts refused launches, by which limit was diagnosed as binding. This is the rate to alert
-	// on: a rack that refuses launches steadily is a rack that needs attention, whatever the provider
-	// does about it in the meantime.
+	// StuckLaunchResources counts launches abandoned because an Oxide resource never left a transitional state.
+	StuckLaunchResources = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: launchSubsystem,
+		Name:      "stuck_resources_total",
+		Help: "Number of launches abandoned because an Oxide resource never left a transitional " +
+			"state, by resource kind and the state it was stuck in.",
+	}, []string{kindLabel, stateLabel})
+
+	// WatchdogDeletions counts NodeClaims the launch watchdog deleted, by what it found the instance doing.
+	WatchdogDeletions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: launchSubsystem,
+		Name:      "watchdog_deletions_total",
+		Help: "Number of launched but unregistered NodeClaims deleted by the launch watchdog, " +
+			"by the instance run state that prompted it.",
+	}, []string{stateLabel})
+
+	// OrphanResources counts suspected orphaned Oxide resources.
+	OrphanResources = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: reaperSubsystem,
+		Name:      "orphan_resources",
+		Help: "Oxide resources owned by this cluster whose NodeClaim no longer exists, " +
+			"by resource kind.",
+	}, []string{kindLabel})
+
+	// OrphanAgeSeconds is how long the oldest orphan has been one.
+	OrphanAgeSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: reaperSubsystem,
+		Name:      "orphan_age_seconds",
+		Help: "Seconds since the oldest outstanding orphan was first observed. " +
+			"Zero when there are none.",
+	})
+
+	// ReaperDeleteAttempts and ReaperDeleteFailures are the reaper's work and how much of it is not working.
+	ReaperDeleteAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: reaperSubsystem,
+		Name:      "delete_attempts_total",
+		Help:      "Number of orphaned Oxide resources the reaper has tried to delete, by kind.",
+	}, []string{kindLabel})
+
+	ReaperDeleteFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: reaperSubsystem,
+		Name:      "delete_failures_total",
+		Help:      "Number of orphan deletions the reaper could not complete, by kind.",
+	}, []string{kindLabel})
+
+	// ICEs counts refused launches, by which limit was diagnosed as binding.
 	ICEs = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -94,8 +132,7 @@ var (
 			"by the limit diagnosed as binding.",
 	}, []string{reasonLabel})
 
-	// Successes counts launches that succeeded and so cleared a shape's refusal history. Compared
-	// against ICEs it says whether the provider is converging or thrashing.
+	// Successes counts launches that succeeded and so cleared a shape's refusal history.
 	Successes = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -112,9 +149,7 @@ var (
 			"by whether the reservation was granted.",
 	}, []string{resultLabel})
 
-	// Reopens counts shapes returning to consideration, by what put them there. The split is the
-	// interesting part: reopens by timeout are the breaker working on its own, and reopens by
-	// inventory or by released capacity are the provider learning something instead of waiting.
+	// Reopens counts shapes returning to consideration, by what put them there.
 	Reopens = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -122,13 +157,7 @@ var (
 		Help:      "Number of times a shape returned to consideration, by what reopened it.",
 	}, []string{reasonLabel})
 
-	// StorageRefusals counts launches refused because the boot disk could not be provisioned, by which
-	// limit was diagnosed as binding.
-	//
-	// Kept apart from ICEs on purpose. A storage refusal takes no shape out of consideration, so
-	// folding it into the shape counter would show refusals climbing with nothing going unavailable to
-	// account for them. This is the series to alert on for "nodes are not launching and no shape is to
-	// blame".
+	// StorageRefusals counts launches refused because the boot disk could not be provisioned.
 	StorageRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -137,9 +166,7 @@ var (
 			"by which limit was diagnosed as binding.",
 	}, []string{reasonLabel})
 
-	// StorageRefusalsConsecutive is how many launches in a row have been refused for want of boot disk
-	// storage, and zero when the last launch created its disk. Unlabeled, because a storage refusal is
-	// not about any shape.
+	// StorageRefusalsConsecutive is how many launches in a row have been refused for want of boot disk storage.
 	StorageRefusalsConsecutive = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -148,8 +175,7 @@ var (
 			"Zero means the most recent launch provisioned its boot disk.",
 	})
 
-	// UnavailableShapes is how many shapes are currently out of consideration. Each covers every
-	// shape at least as large, so this counts boundaries rather than shapes.
+	// UnavailableShapes is how many shapes are currently out of consideration.
 	UnavailableShapes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -158,9 +184,7 @@ var (
 			"Each covers every shape at least as large in both CPU and memory.",
 	})
 
-	// UnavailableInstanceTypes is how many instance types the scheduler is not being offered, which is
-	// what UnavailableShapes reads as but is not. One boundary covers every shape above it, so alerting
-	// on the boundary count would miss a rack that has just ruled out most of the list.
+	// UnavailableInstanceTypes is how many instance types the scheduler is not being offered.
 	UnavailableInstanceTypes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -177,9 +201,7 @@ var (
 		Help:      "Number of instance types the provider offers in total.",
 	})
 
-	// BackoffSeconds is how much longer each unavailable shape has to wait. Labeled by shape, which is
-	// only affordable because the label set is reset on every publish and so only ever holds shapes
-	// that are actually out.
+	// BackoffSeconds is how much longer each unavailable shape has to wait.
 	BackoffSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -188,8 +210,7 @@ var (
 			"Zero means it is being offered now for a trial launch.",
 	}, []string{instanceTypeLabel})
 
-	// ConsecutiveICEs is how many refusals in a row each unavailable shape has accumulated, which is
-	// what its wait is computed from.
+	// ConsecutiveICEs is how many refusals in a row each unavailable shape has accumulated.
 	ConsecutiveICEs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: capacitySubsystem,
@@ -197,10 +218,7 @@ var (
 		Help:      "Consecutive refused launches recorded against an unavailable instance shape.",
 	}, []string{instanceTypeLabel})
 
-	// FeasibleInstances is how many instances of a shape the rack could place right now, published
-	// only for shapes that are currently unavailable. Those are the shapes where the question matters:
-	// a zero here alongside a backoff says the rack agrees, and a non-zero says the refusal came from
-	// something the reading cannot see.
+	// FeasibleInstances is how many instances of a shape the rack could place right now.
 	FeasibleInstances = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: inventorySubsystem,
@@ -209,9 +227,7 @@ var (
 			"sled inventory reading.",
 	}, []string{instanceTypeLabel})
 
-	// SnapshotAgeSeconds is how old the sled inventory reading is. Alert on this rather than on
-	// inventory errors: a reading that stops being refreshed stops constraining anything, which is
-	// safe but means the provider is back to learning from refused launches.
+	// SnapshotAgeSeconds is how old the sled inventory reading is.
 	SnapshotAgeSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: inventorySubsystem,
@@ -230,7 +246,6 @@ var (
 	})
 
 	// SledFreeCPUs and SledFreeMemoryBytes are per-sled headroom, bounded by the size of the rack.
-	// They are per sled rather than summed because that is how placement works.
 	SledFreeCPUs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: inventorySubsystem,
@@ -246,8 +261,7 @@ var (
 			"Zero for a sled accepting no placements.",
 	}, []string{sledLabel})
 
-	// LargestFeasibleCPUs and LargestFeasibleMemoryBytes are the largest shape any single sled could
-	// take. This is the one number that answers "how big a node can I get right now".
+	// LargestFeasibleCPUs and LargestFeasibleMemoryBytes are the largest shape any single sled could take.
 	LargestFeasibleCPUs = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: inventorySubsystem,
@@ -262,9 +276,7 @@ var (
 		Help:      "Memory in bytes of the largest instance shape the rack could place right now.",
 	})
 
-	// ProviderCacheHits counts resolutions served from a cached reading, which is the series that
-	// says whether the cache is doing anything: read against ProviderResolutions it is the share of
-	// reconciles that cost no Oxide API traffic at all.
+	// ProviderCacheHits counts resolutions served from a cached reading.
 	ProviderCacheHits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: providerSubsystem,
@@ -282,10 +294,6 @@ var (
 	}, []string{providerLabel, resultLabel})
 
 	// ProviderStaleServed counts failed resolutions absorbed by serving the previous reading.
-	//
-	// This is the early warning worth alerting on. A steady rate means nodeclass status is being
-	// republished from readings nobody can refresh, and it is what precedes the loud failure that
-	// arrives once a reading passes the staleness ceiling and the reconcile starts erroring.
 	ProviderStaleServed = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: providerSubsystem,
@@ -295,8 +303,6 @@ var (
 	}, []string{providerLabel})
 
 	// ProviderOldestEntryAge is the worst-case staleness of anything a provider is currently serving.
-	// Per provider rather than per cache key, because a key is a selector fingerprint and there is no
-	// bound on how many of those a cluster's nodeclasses produce.
 	ProviderOldestEntryAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: providerSubsystem,
@@ -305,10 +311,7 @@ var (
 			"Zero when it holds none.",
 	}, []string{providerLabel})
 
-	// ProviderCacheEntries is how many readings a provider holds. A cache key is a fingerprint of the
-	// selectors that produced the reading, so this should track the number of distinct selector sets
-	// across the cluster's nodeclasses; a count that climbs without new nodeclasses means a
-	// fingerprint is being taken over something that changes every reconcile.
+	// ProviderCacheEntries is how many readings a provider holds.
 	ProviderCacheEntries = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Subsystem: providerSubsystem,
@@ -319,6 +322,12 @@ var (
 
 func init() {
 	crmetrics.Registry.MustRegister(
+		StuckLaunchResources,
+		WatchdogDeletions,
+		OrphanResources,
+		OrphanAgeSeconds,
+		ReaperDeleteAttempts,
+		ReaperDeleteFailures,
 		ICEs,
 		Successes,
 		Probes,
@@ -346,25 +355,19 @@ func init() {
 }
 
 // ResetShapeGauges drops every per-shape series before a publisher writes the current set.
-//
-// A gauge labeled by shape has to be cleared rather than overwritten: a shape that is no longer
-// unavailable has no value to write, and leaving its last one behind would report a backoff that
-// expired long ago as though it were still counting down.
 func ResetShapeGauges() {
 	BackoffSeconds.Reset()
 	ConsecutiveICEs.Reset()
 	FeasibleInstances.Reset()
 }
 
-// ResetSledGauges drops every per-sled series, for the same reason: a sled removed from the rack, or a
-// reading that no longer mentions it, must stop reporting headroom.
+// ResetSledGauges clears per-sled series.
 func ResetSledGauges() {
 	SledFreeCPUs.Reset()
 	SledFreeMemoryBytes.Reset()
 }
 
-// Seconds is the value to publish for a duration gauge, floored at zero so that a wait that has
-// already elapsed reads as "now" rather than as a negative number.
+// Seconds is the value to publish for a duration gauge, floored at zero.
 func Seconds(d time.Duration) float64 {
 	if d <= 0 {
 		return 0

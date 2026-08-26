@@ -14,11 +14,6 @@ import (
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 )
 
-// nodeClassSchema is the OxideNodeClass spec exactly as the apiserver will see it, structural form
-// and all. The rules under test are CEL and MaxItems, neither of which the Go types can express and
-// neither of which any amount of provider testing exercises: they are enforced at admission or not
-// at all, so this runs the real validators over the generated CRD rather than asserting the strings
-// are present in it.
 func nodeClassSchema(t *testing.T) (*apiextensions.JSONSchemaProps, *structuralschema.Structural) {
 	t.Helper()
 
@@ -52,10 +47,6 @@ func nodeClassSchema(t *testing.T) (*apiextensions.JSONSchemaProps, *structurals
 	return &props, structural
 }
 
-// validate runs the same two validators the apiserver runs on an update: the structural schema,
-// which is where MaxItems is enforced, and the CEL validator, which is where the XValidation rules
-// are. It returns the messages rather than a bool so that a rule firing for the wrong reason is not
-// mistaken for the rule under test.
 func validate(
 	t *testing.T,
 	props *apiextensions.JSONSchemaProps,
@@ -130,8 +121,7 @@ func TestEphemeralIPsValidation(t *testing.T) {
 			wantValid: true,
 		},
 		{
-			// Neither half set names nothing at all: not a pool, and not a family to take the silo's
-			// default for.
+
 			name:         "an entry naming neither a version nor a pool is refused",
 			ephemeralIPs: []any{map[string]any{}},
 		},
@@ -140,7 +130,7 @@ func TestEphemeralIPsValidation(t *testing.T) {
 			ephemeralIPs: []any{map[string]any{"ipVersion": "v5"}},
 		},
 		{
-			// MAX_EPHEMERAL_IPS_PER_INSTANCE is 2, so a third entry could never be attached.
+
 			name: "a third entry is refused, since an instance can hold at most two",
 			ephemeralIPs: []any{
 				map[string]any{"ipVersion": "v4"},
@@ -149,8 +139,7 @@ func TestEphemeralIPsValidation(t *testing.T) {
 			},
 		},
 		{
-			// A pool reference resolves to one pool. Two ways of naming it is two pools' worth of
-			// ambiguity for one address slot.
+
 			name: "a pool reference naming both an id and a name is refused",
 			ephemeralIPs: []any{
 				map[string]any{
@@ -170,8 +159,7 @@ func TestEphemeralIPsValidation(t *testing.T) {
 	props, schema := nodeClassSchema(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Storage is required, so it is carried on every case: what is under test is the
-			// ephemeralIPs rules, not whether the rest of a spec is well formed.
+
 			spec := map[string]any{
 				"storage":      map[string]any{"boot": map[string]any{"size": "50Gi"}},
 				"ephemeralIPs": tt.ephemeralIPs,

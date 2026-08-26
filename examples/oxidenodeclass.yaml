@@ -6,53 +6,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-    # Additional disks attached to every node. An instance can attach 8 disks in total, and the boot
-    # disk is one of them, so the counts below may sum to at most 7.
-    # diskSets:
-    #   # A second distributed disk, so container images and etcd data are not on the boot disk.
-    #   # mountPath is a single mount point, which is why this set is one disk.
-    #   - name: kubernetes
-    #     type: Distributed
-    #     size: 100Gi
-    #     filesystem: ext4          # ext4 (the default when unset), xfs, or None for a raw block device
-    #     mountPath: /var/lib/rancher
-    #
-    #   # Sled-local disks for the local static provisioner. mountDir is a parent directory: these
-    #   # land at /mnt/local-pv/local-pv-0 through -3, which is what its hostDir expects.
-    #   #
-    #   # A local disk lives on the sled the instance is placed on. It does not outlive the instance,
-    #   # cannot be created from an image or a snapshot, and can come back blank, in which case it is
-    #   # reformatted on the next boot -- so anything on it can vanish.
-    #   - name: local-pv
-    #     type: Local
-    #     count: 4
-    #     size: 500Gi
-    #     layout: Individual        # Individual is the only layout today
-    #     filesystem: ext4
-    #     mountDir: /mnt/local-pv
-    #
-    #   # Raw block devices, for a consumer that manages its own on-disk format. Nothing is created on
-    #   # them and nothing is mounted; each is symlinked into mountDir, which is the local static
-    #   # provisioner's volumeMode: Block discovery mode.
-    #   - name: raw
-    #     type: Local
-    #     count: 2
-    #     size: 500Gi
-    #     filesystem: None
-    #     mountDir: /mnt/raw
-    #
-    #   # A Distributed set can be created from an image or a snapshot instead of blank. It arrives
-    #   # already carrying a filesystem, so filesystem must not be set: it would be formatted over.
-    #   # Note the copy is still deleted with the node.
-    #   - name: restored
-    #     type: Distributed
-    #     size: 200Gi
-    #     mountPath: /var/lib/dataset
-    #     snapshotSelector:
-    #       - name: nightly-*
-    #     readOnly: false
-  # Shared by every bootstrap provider. Leave server unset to discover the kube-apiserver from the
-  # default/kubernetes EndpointSlice; each provider renders it with the port it joins on.
   kubeletArgs:
     - cloud-provider=external
   bootstrap:
@@ -65,28 +18,6 @@ spec:
     - name: rke2-ubuntu-1780929039
       os: ubuntu
       project: brandon
-    # Versions are matched literally unless they contain a "*", which matches whole segments: this
-    # takes the newest 1.2.x image, but never 1.2 or 1.20. Selectors are OR'd, so this only applies
-    # if the image named above is gone.
-    # - os: ubuntu
-    #   version: 1.2.*
-    #   project: brandon
   subnetSelector:
     - project: brandon
       vpcName: default
-  # Which Oxide affinity and anti-affinity groups launched instances join. Selected groups are
-  # referenced only; the managed group is the one Karpenter creates and deletes itself.
-  # affinity:
-  #   # Affinity groups are an experimental Oxide API. They have no create-time field, so they are
-  #   # joined between the instance create and the start, which is what places the instance.
-  #   affinityGroupSelector:
-  #     - name: gpu-colocate
-  #   antiAffinityGroupSelector:
-  #     - name: control-plane-spread
-  #     # A "*" matches any run of characters, and every matching group is joined, so a group created
-  #     # in the project that matches this drifts and replaces every node so it can join.
-  #     - name: rack-*
-  #   managed:
-  #     type: AntiAffinity
-  #     # allow places the instance anyway when the rack cannot spread it; fail refuses the launch.
-  #     policy: allow

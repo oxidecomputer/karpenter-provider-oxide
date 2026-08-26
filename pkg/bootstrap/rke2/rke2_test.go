@@ -18,7 +18,6 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// tokenSecret is the long-lived agent join token the bootstrapper reads at render time.
 func tokenSecret(t *testing.T) *corev1.Secret {
 	t.Helper()
 	return &corev1.Secret{
@@ -32,7 +31,6 @@ func readerFor(t *testing.T, objects ...client.Object) client.Reader {
 	return fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).Build()
 }
 
-// nodeClass is an RKE2 nodeclass, optionally with diskSets.
 func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 	t.Helper()
 	return &v1alpha1.OxideNodeClass{
@@ -62,7 +60,7 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 		Hostname:  "karpenter-default-x7k2p",
 	}
 	if len(sets) > 0 {
-		plan, err := storage.Build("karpenter-default-x7k2p", nc)
+		plan, err := storage.Build("karpenter-default-x7k2p", "launch-token", nc)
 		if err != nil {
 			t.Fatalf("unable to build a plan: %v", err)
 		}
@@ -85,8 +83,6 @@ func localPVSet(t *testing.T) v1alpha1.DiskSet {
 	}
 }
 
-// A nodeclass with no diskSets must render the script it rendered before disk support existed, so
-// that adding this feature drifts and changes nothing for an existing user.
 func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	out := userDataFor(t)
 	if !strings.HasPrefix(
@@ -105,9 +101,6 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	}
 }
 
-// The anti-race requirement, asserted directly: the disks are set up before the config is written,
-// and the config before the agent starts. The disk block ends by running a oneshot unit
-// synchronously, so under set -e the agent is never reached on a node whose disks did not come up.
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 
@@ -131,7 +124,6 @@ func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	}
 }
 
-// RKE2 runs the kubelet as a child of the agent, so the agent is the only unit to order against.
 func TestUserDataOrdersAgainstTheAgentUnit(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 	if !strings.Contains(out, "/etc/systemd/system/rke2-agent.service.d/10-karpenter-disks.conf") {
@@ -142,8 +134,6 @@ func TestUserDataOrdersAgainstTheAgentUnit(t *testing.T) {
 	}
 }
 
-// The config is written inside a heredoc delimited by EOF, so a bare EOF line anywhere in the disk
-// block would truncate the user-data and the node would never join.
 func TestUserDataHeredocsAreNotShadowed(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 	if got := strings.Count(out, "\nEOF\n"); got != 1 {
@@ -152,7 +142,7 @@ func TestUserDataHeredocsAreNotShadowed(t *testing.T) {
 			got,
 		)
 	}
-	// The token has to survive all of this, since it is what actually joins the cluster.
+
 	if !strings.Contains(out, "secret-join-token") {
 		t.Error("the join token is missing from the rendered user-data")
 	}

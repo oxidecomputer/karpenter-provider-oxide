@@ -37,7 +37,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: OxideNodeClass is the Schema for the OxideNodeClass API
+        description: OxideNodeClass is an Oxide Karpenter node class.
         properties:
           apiVersion:
             description: |-
@@ -57,109 +57,57 @@ spec:
           metadata:
             type: object
           spec:
-            description: |-
-              OxideNodeClassSpec is the top level specification for the Oxide Karpenter Provider.
-              This will contain configuration necessary to launch instances on Oxide.
+            description: OxideNodeClassSpec is the top level specification for the
+              Oxide Karpenter Provider.
             properties:
               affinity:
                 description: Affinity controls which Oxide affinity and anti-affinity
                   groups launched instances join.
                 properties:
                   affinityGroupSelector:
-                    description: |-
-                      AffinityGroupSelector selects existing affinity groups that every launched instance joins.
-                      Affinity groups are an experimental Oxide API.
-
-                      Excluded from the nodeclass hash for the same reason AntiAffinityGroupSelector is.
+                    description: AffinityGroupSelector selects existing affinity groups
+                      that every launched instance joins.
                     items:
-                      description: |-
-                        AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.
-
-                        Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
-                        the selectors, which validate at reconcile instead.
+                      description: AffinityGroupSelector selects affinity or anti-affinity
+                        groups by ID or by name.
                       properties:
                         id:
                           description: ID is the exact group UUID.
                           type: string
                         name:
-                          description: |-
-                            Name is the name of a group. A name without a "*" must match exactly, ignoring case.
-
-                            A name containing "*" selects every group whose name matches, where each "*" stands for any
-                            run of characters including none. So "karpenter-*" selects both "karpenter-spread-a" and
-                            "karpenter-spread-b".
-
-                            Unlike an image selector, where a wildcard picks a single winner, every matching group is
-                            joined. A wildcard therefore makes the set of groups a function of the project's contents
-                            rather than of the nodeclass alone: a group created in the project whose name matches an
-                            existing selector joins the set, and because an instance can only join a group at launch,
-                            every node then drifts and is replaced so it can join. That is a fleet replacement triggered
-                            from outside Kubernetes.
+                          description: Name is the name of a group.
                           type: string
                       type: object
                     type: array
                   antiAffinityGroupSelector:
-                    description: |-
-                      AntiAffinityGroupSelector selects existing anti-affinity groups that every launched instance
-                      joins.
-
-                      Excluded from the nodeclass hash because whether nodes are replaced when this changes is
-                      decided by comparing resolved groups, not by hashing the spec: a selector rewritten to name
-                      the group it already matched has changed nothing about where an instance sits. See IsDrifted.
+                    description: AntiAffinityGroupSelector selects existing anti-affinity
+                      groups that every launched instance joins.
                     items:
-                      description: |-
-                        AffinityGroupSelector selects affinity or anti-affinity groups by ID or by name.
-
-                        Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
-                        the selectors, which validate at reconcile instead.
+                      description: AffinityGroupSelector selects affinity or anti-affinity
+                        groups by ID or by name.
                       properties:
                         id:
                           description: ID is the exact group UUID.
                           type: string
                         name:
-                          description: |-
-                            Name is the name of a group. A name without a "*" must match exactly, ignoring case.
-
-                            A name containing "*" selects every group whose name matches, where each "*" stands for any
-                            run of characters including none. So "karpenter-*" selects both "karpenter-spread-a" and
-                            "karpenter-spread-b".
-
-                            Unlike an image selector, where a wildcard picks a single winner, every matching group is
-                            joined. A wildcard therefore makes the set of groups a function of the project's contents
-                            rather than of the nodeclass alone: a group created in the project whose name matches an
-                            existing selector joins the set, and because an instance can only join a group at launch,
-                            every node then drifts and is replaced so it can join. That is a fleet replacement triggered
-                            from outside Kubernetes.
+                          description: Name is the name of a group.
                           type: string
                       type: object
                     type: array
                   managed:
-                    description: |-
-                      Managed asks Karpenter to own one group for this nodeclass that every launched instance joins.
-                      It is created when the nodeclass is reconciled and deleted when the nodeclass is. Its name is
-                      derived from the nodeclass name and from the fields below, so that changing either produces a
-                      new group rather than an edit the Oxide API cannot make.
-
-                      Excluded from the nodeclass hash for the same reason the selectors are: whether nodes are
-                      replaced when this changes is decided by comparing resolved groups, not by hashing the spec.
-                      A hash cannot tell a group being added from one being removed, and only the first replaces
-                      nodes. See IsDrifted.
+                    description: Managed asks Karpenter to own one group for this
+                      nodeclass that every launched instance joins.
                     properties:
                       policy:
                         default: allow
-                        description: |-
-                          Policy is what the rack does when the request cannot be satisfied. Allow places the instance
-                          anyway; fail refuses the launch, which is a hazard worth opting into rather than defaulting
-                          to, since a refusal for want of a satisfiable placement is not a refusal any smaller instance
-                          shape would avoid.
+                        description: Policy is what the rack does when the request
+                          cannot be satisfied.
                         enum:
                         - allow
                         - fail
                         type: string
                       type:
-                        description: |-
-                          Type is whether the managed group co-locates instances on a sled (Affinity) or spreads them
-                          across sleds (AntiAffinity). Affinity groups are an experimental Oxide API.
+                        description: Type selects affinity or anti-affinity placement.
                         enum:
                         - Affinity
                         - AntiAffinity
@@ -169,30 +117,24 @@ spec:
                     type: object
                 type: object
               bootstrap:
-                description: |-
-                  Bootstrap selects and configures the mechanism nodes use to join the cluster.
-                  Exactly one provider may be set.
+                description: Bootstrap selects and configures the mechanism nodes
+                  use to join the cluster.
                 properties:
                   kubeadm:
-                    description: |-
-                      KubeadmBootstrap configures joining nodes with kubeadm. Discovery information is read from the
-                      kube-public/cluster-info ConfigMap and a short-lived bootstrap token is minted per NodeClaim,
-                      so no long-lived join credential needs to be configured here.
+                    description: KubeadmBootstrap configures joining nodes with kubeadm.
                     properties:
                       configVersion:
                         default: kubeadm.k8s.io/v1beta4
-                        description: |-
-                          ConfigVersion is the kubeadm configuration API version used to render the JoinConfiguration.
-                          v1beta4 requires Kubernetes 1.31 or newer.
+                        description: ConfigVersion is the kubeadm configuration API
+                          version used to render the JoinConfiguration.
                         enum:
                         - kubeadm.k8s.io/v1beta3
                         - kubeadm.k8s.io/v1beta4
                         type: string
                       tokenTTL:
                         default: 15m
-                        description: |-
-                          TokenTTL is how long the per-node bootstrap token remains valid. The token only needs to
-                          survive until the node completes TLS bootstrap, so this should stay short.
+                        description: TokenTTL is how long the per-node bootstrap token
+                          remains valid.
                         type: string
                     type: object
                   rke2:
@@ -235,24 +177,11 @@ spec:
                   type: object
                 type: array
               ephemeralIPs:
-                description: |-
-                  EphemeralIPs are the external addresses attached to every launched instance. An ephemeral
-                  address is allocated when the instance is created and released when it is destroyed.
-
-                  Oxide allows at most one ephemeral address per IP version, so at most two entries, and the
-                  versions must differ. Unset means launched nodes get no external address.
-
-                  Excluded from the nodeclass hash for the same reason ImageSelector is: what a pool reference
-                  resolves to is a function of the silo as well as of the nodeclass, so drift is decided by
-                  comparing resolved pools rather than by hashing the spec.
+                description: EphemeralIPs are the external addresses attached to every
+                  launched instance.
                 items:
-                  description: |-
-                    EphemeralIP is one external address attached to an instance at launch.
-
-                    The two fields are the two ways Oxide's PoolSelector can name a pool, and at least one is
-                    required: ipVersion alone is PoolSelectorAuto, which takes the silo's default pool for that
-                    version; pool alone is PoolSelectorExplicit. Setting both is allowed and is checked for
-                    agreement when the nodeclass is reconciled, since only the resolved pool knows its version.
+                  description: EphemeralIP is one external address attached to an
+                    instance at launch.
                   properties:
                     ipVersion:
                       description: IPVersion is the address family this entry allocates.
@@ -261,16 +190,13 @@ spec:
                       - v6
                       type: string
                     pool:
-                      description: |-
-                        Pool is the IP pool to allocate from. When unset the silo's default pool for ipVersion is
-                        used. A pool is linked to a silo rather than owned by a project, so no project is named.
+                      description: Pool is the IP pool to allocate from.
                       properties:
                         id:
                           description: ID is the exact IP pool UUID.
                           type: string
                         name:
-                          description: 'Name is the exact name of an IP pool. No wildcards:
-                            a reference resolves to one pool.'
+                          description: Name is the exact name of an IP pool.
                           type: string
                       type: object
                       x-kubernetes-validations:
@@ -284,321 +210,167 @@ spec:
                 maxItems: 2
                 type: array
               imageSelector:
-                description: |-
-                  ImageSelector is used to select an image to launch nodes with.
-                  If multiple images match then the most recently uploaded image is selected.
-                  Selectors are OR'd together, but terms within a selector are AND'd together
-
-                  Excluded from the nodeclass hash for the reason every selector is: what a selector matches is a
-                  function of the project as well as of the nodeclass, so drift is decided by comparing resolved
-                  state rather than by hashing the terms. A selector rewritten to name the image it already
-                  matched has changed nothing about the running nodes, and a new image uploaded into an unchanged
-                  wildcard has. See IsDrifted.
+                description: ImageSelector is used to select an image to launch nodes
+                  with.
                 items:
                   properties:
                     id:
-                      description: ID is the exact image UUID
+                      description: ID is the exact image UUID.
                       type: string
                     name:
-                      description: |-
-                        Name is the name of an image. A name without a "*" must match exactly, ignoring case.
-
-                        A name containing "*" selects every image whose name matches, where each "*" stands for any
-                        run of characters including none. So "rke2-ubuntu-*" and "rke2-*" both select
-                        "rke2-ubuntu-1780929039", and "*-ubuntu-*" selects it as well. Unlike a version, a name is
-                        matched character by character, so a wildcard does not have to fall on a "-" boundary.
-
-                        When a wildcard matches several images the most recently uploaded one is launched.
+                      description: Name is the name of an image.
                       type: string
                     os:
-                      description: OS is the operating system of the image
+                      description: OS is the image operating system.
                       type: string
                     project:
-                      description: |-
-                        Project where the image is located.
-                        If the project is not specified, then we query for Silo level images
-                        that are not linked to a project.
+                      description: Project where the image is located.
                       type: string
                     version:
-                      description: |-
-                        Version is the version of the image or OS. Oxide image versions are free-form, so a version
-                        without a "*" is matched literally and case-insensitively.
-
-                        A version containing "*" is instead matched a segment at a time, where segments are separated
-                        by ".", "-", "_", or whitespace, and a leading "v" is ignored on both sides. A "*" matches
-                        exactly one segment, except as the last segment of the version, where it matches one or more
-                        remaining segments. So "1.2.*" selects "1.2.3" but not "1.2" or "1.20"; "1.*" selects both
-                        "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
-
-                        When a wildcard matches several images the most recently uploaded one is launched.
+                      description: Version is the version of the image or OS.
                       type: string
                   type: object
                 type: array
               kubeletArgs:
-                description: |-
-                  KubeletArgs are extra kubelet arguments in "key=value" form applied to launched nodes,
-                  in addition to the args Karpenter requires.
+                description: KubeletArgs are extra kubelet arguments in "key=value"
+                  form applied to launched nodes.
                 items:
                   type: string
                 type: array
               server:
-                description: |-
-                  Server is the endpoint nodes use to join the cluster. When empty it is discovered from the
-                  default/kubernetes EndpointSlice. Each bootstrap provider renders the discovered address in
-                  the form it needs, so the port differs by provider: RKE2 joins on the supervisor port (9345)
-                  while kubeadm joins on the kube-apiserver port (6443).
+                description: Server is the endpoint nodes use to join the cluster.
                 type: string
               sshKeySelector:
-                description: |-
-                  SSHKeySelector is used to select SSH keys that will be copied to the node
-
-                  Excluded from the nodeclass hash for the same reason ImageSelector is.
+                description: SSHKeySelector selects SSH keys to copy to the node.
                 items:
                   properties:
                     id:
-                      description: ID is the exact SSH Key ID
+                      description: ID is the exact SSH key ID.
                       type: string
                     name:
-                      description: Name is the exact name of an SSH Key
+                      description: Name is the exact SSH key name.
                       type: string
                   type: object
                 type: array
               storage:
-                description: |-
-                  Storage is the disks every instance launched from this nodeclass is created with: the boot
-                  disk, and any additional sets of data disks.
-
-                  A value rather than a pointer, and required: a nodeclass has always needed a boot disk size,
-                  so making the whole stanza optional would buy nothing but a nil check in every reader.
-
-                  Everything here except the nested source selectors is fixed into an instance at launch: a disk
-                  cannot be resized, re-sourced or re-mounted afterwards, so a change to any of it is
-                  drift by definition.
-
-                  Excluded from the reflected part of the nodeclass hash all the same, and folded in as an
-                  explicit fingerprint instead. Reflection cannot be used here because the sizes are
-                  resource.Quantity, which keeps its value in unexported fields and its formatting in an exported
-                  one, so a reflected hash would see how a size was written rather than what it is. Tagging the
-                  individual sizes does not work either: hashstructure only honours hash:"ignore" on fields of the
-                  struct it is handed, not on fields of structs nested inside it, so a tag down here would be
-                  silently ineffective. See Hash and storageFingerprint.
+                description: Storage is the disks every instance launched from this
+                  nodeclass is created with.
                 properties:
                   boot:
-                    description: |-
-                      Boot is the disk the instance boots from. Its image comes from spec.imageSelector rather than
-                      from here: the boot image is what the whole nodeclass is built around, it is what
-                      nodeClaim.Status.ImageID records, and it is what image drift is decided on.
+                    description: Boot is the disk the instance boots from.
                     properties:
                       size:
                         anyOf:
                         - type: integer
                         - type: string
-                        description: |-
-                          Size is the boot disk's capacity. It must be at least as large as the image it is created
-                          from, which is checked when the nodeclass is reconciled rather than here, because only the
-                          resolved image knows how large it is.
+                        description: Size is the boot disk's capacity.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                     required:
                     - size
                     type: object
                   diskSets:
-                    description: |-
-                      DiskSets are additional disks attached to every instance, in sets of identically configured
-                      disks.
-
-                      Order is not significant to what the guest sees, but it does decide the disk names, so
-                      reordering a nodeclass's diskSets changes the names of the disks the next launch creates. That
-                      is deliberately not drift: the names are internal and every launch renders its own, so the
-                      nodeclass hash is unchanged by a reorder even though the names are not.
+                    description: DiskSets are additional disks attached to every instance,
+                      in sets of identically configured disks.
                     items:
-                      description: |-
-                        DiskSet is a group of identically configured disks attached to every launched instance.
-
-                        mountPath and mountDir are two mutually exclusive fields rather than one field with two meanings.
-                        mountPath is a literal mount point; mountDir is a parent directory, and disk k lands at
-                        <mountDir>/<name>-<k>. Naming the two cases is what makes the incoherent combination
-                        unrepresentable: the local static provisioner discovers the *contents* of its hostDir, so a
-                        hostDir that is itself a symlink to a raw block device discovers nothing. It also means there is
-                        no discontinuity in what a path means as count grows from one to two.
+                      description: DiskSet is a group of identically configured disks
+                        attached to every launched instance.
                       properties:
                         count:
                           default: 1
-                          description: |-
-                            Count is how many disks the set has. Every disk in the set has the same size, type, source and
-                            filesystem; what differs is where it is mounted.
+                          description: Count is how many disks the set has.
                           format: int32
                           maximum: 7
                           minimum: 1
                           type: integer
                         filesystem:
-                          description: |-
-                            Filesystem is what the guest formats each disk with. None leaves the disk as a raw block
-                            device: nothing is created on it and nothing is mounted, which is what a
-                            consumer that manages its own on-disk format wants.
-
-                            Deliberately without a CRD default even though an unset filesystem means ext4. A default
-                            applies unconditionally, and a disk created from an image or a snapshot must never be
-                            formatted, so a defaulted ext4 would be an instruction to destroy the image the user asked
-                            for, and CRDs have no conditional default. Unset is therefore resolved to ext4 only where
-                            formatting is meaningful, and the effective value is published on the status so it is still
-                            readable off the object.
+                          description: Filesystem is what the guest formats each disk
+                            with.
                           enum:
                           - ext4
                           - xfs
                           - None
                           type: string
                         imageSelector:
-                          description: |-
-                            ImageSelector selects the image each disk in the set is created from. Only for Distributed
-                            sets: the Oxide API has no disk source for a local disk at all.
-
-                            Resolved per set, so two sets carrying the same selector resolve once between them. A set whose
-                            selector matches nothing holds the nodeclass un-Ready rather than launching a disk with an
-                            empty source.
-
-                            Excluded from the nodeclass hash for the reason every selector is: what it matches is a
-                            function of the project as well as of the nodeclass, so its drift is decided by comparing
-                            resolved state. Excluded by storageFingerprint simply not covering it, rather than by a tag,
-                            which at this depth would do nothing.
+                          description: ImageSelector selects the image each disk in
+                            the set is created from.
                           items:
                             properties:
                               id:
-                                description: ID is the exact image UUID
+                                description: ID is the exact image UUID.
                                 type: string
                               name:
-                                description: |-
-                                  Name is the name of an image. A name without a "*" must match exactly, ignoring case.
-
-                                  A name containing "*" selects every image whose name matches, where each "*" stands for any
-                                  run of characters including none. So "rke2-ubuntu-*" and "rke2-*" both select
-                                  "rke2-ubuntu-1780929039", and "*-ubuntu-*" selects it as well. Unlike a version, a name is
-                                  matched character by character, so a wildcard does not have to fall on a "-" boundary.
-
-                                  When a wildcard matches several images the most recently uploaded one is launched.
+                                description: Name is the name of an image.
                                 type: string
                               os:
-                                description: OS is the operating system of the image
+                                description: OS is the image operating system.
                                 type: string
                               project:
-                                description: |-
-                                  Project where the image is located.
-                                  If the project is not specified, then we query for Silo level images
-                                  that are not linked to a project.
+                                description: Project where the image is located.
                                 type: string
                               version:
-                                description: |-
-                                  Version is the version of the image or OS. Oxide image versions are free-form, so a version
-                                  without a "*" is matched literally and case-insensitively.
-
-                                  A version containing "*" is instead matched a segment at a time, where segments are separated
-                                  by ".", "-", "_", or whitespace, and a leading "v" is ignored on both sides. A "*" matches
-                                  exactly one segment, except as the last segment of the version, where it matches one or more
-                                  remaining segments. So "1.2.*" selects "1.2.3" but not "1.2" or "1.20"; "1.*" selects both
-                                  "1.4" and "1.4.2"; and "24.04 *" selects "24.04 2026-05-09".
-
-                                  When a wildcard matches several images the most recently uploaded one is launched.
+                                description: Version is the version of the image or
+                                  OS.
                                 type: string
                             type: object
                           type: array
                         layout:
                           default: Individual
-                          description: |-
-                            Layout is how the set's disks are presented to the guest. Individual, the only value, gives one
-                            filesystem per disk, which is what the local static provisioner consumes.
+                          description: Layout is how the set's disks are presented
+                            to the guest.
                           enum:
                           - Individual
                           type: string
                         mountDir:
-                          description: |-
-                            MountDir is the parent directory the set's disks are placed beneath: disk k is mounted at
-                            <mountDir>/<name>-<k>, counting from zero, or for a raw block set is linked there instead.
-                            That is the layout the local static provisioner's hostDir expects. Mutually exclusive with
-                            MountPath.
+                          description: MountDir is the parent directory the set's
+                            disks are placed beneath.
                           maxLength: 253
                           pattern: ^/[^/]+(/[^/]+)*$
                           type: string
                         mountPath:
                           description: MountPath is the single mount point for a set
-                            of one disk. Mutually exclusive with MountDir.
+                            of one disk.
                           maxLength: 253
                           pattern: ^/[^/]+(/[^/]+)*$
                           type: string
                         name:
-                          description: |-
-                            Name identifies the set. It appears in the disk names Karpenter creates and in the directory
-                            each disk is mounted under, so it is constrained to what is legal in both.
-
-                            The minimum of three characters is not cosmetic. It is what makes every disk name at least 20
-                            bytes long, and 20 bytes is exactly what the guest sees of a disk name as its NVMe serial
-                            number. A shorter name would be padded by the NVMe layer, which the guest would then have to
-                            know to strip. See pkg/providers/storage.
+                          description: Name identifies the set.
                           maxLength: 20
                           minLength: 3
                           pattern: ^[a-z]([a-z0-9-]*[a-z0-9])?$
                           type: string
                         readOnly:
-                          description: |-
-                            ReadOnly asks the rack to attach the disks read-only, which is only meaningful for a disk
-                            created from an image or a snapshot. It is a property of the attachment rather than of the
-                            guest's mount: the guest cannot write to it whatever it does with the mount options.
-
-                            Note that the disks of a set are still deleted with the node. A snapshot-sourced set reads
-                            like "restore this dataset onto every node", and the per-node copy does not outlive the node.
+                          description: ReadOnly attaches sourced disks read-only.
                           type: boolean
                         size:
                           anyOf:
                           - type: integer
                           - type: string
-                          description: |-
-                            Size is the capacity of each disk in the set, not of the set as a whole. A set of four 500Gi
-                            disks provisions 2Ti.
+                          description: Size is the capacity of each disk in the set,
+                            not of the set as a whole.
                           pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           x-kubernetes-int-or-string: true
                         snapshotSelector:
-                          description: |-
-                            SnapshotSelector selects the snapshot each disk in the set is created from.
-
-                            Excluded from the nodeclass hash for the same reason ImageSelector is.
+                          description: SnapshotSelector selects the snapshot each
+                            disk in the set is created from.
                           items:
-                            description: |-
-                              SnapshotSelector selects a snapshot by ID or by name.
-
-                              It has no OS or version term, unlike ImageSelector, because oxide.Snapshot has no such fields: a
-                              snapshot in the Oxide API is an ID, a name, a project, the disk it came from, a size and a state,
-                              and there is nothing else to match on.
-
-                              Deliberately without CEL requiring exactly one of id/name, matching ImageSelector and the rest of
-                              the selectors, which validate at reconcile instead.
+                            description: SnapshotSelector selects a snapshot by ID
+                              or by name.
                             properties:
                               id:
                                 description: ID is the exact snapshot UUID.
                                 type: string
                               name:
-                                description: |-
-                                  Name is the name of a snapshot. A name without a "*" must match exactly, ignoring case; a name
-                                  containing "*" selects every snapshot whose name matches, where each "*" stands for any run of
-                                  characters including none. Matched character by character, the same way an image name is.
-
-                                  When a wildcard matches several snapshots the most recently created one is used.
+                                description: Name is the name of a snapshot.
                                 type: string
                               project:
-                                description: |-
-                                  Project where the snapshot is located. Unlike an image, a snapshot is always in a project:
-                                  there is no silo-level snapshot, so an empty project means the project Karpenter runs in.
+                                description: Project where the snapshot is located.
                                 type: string
                             type: object
                           type: array
                         type:
                           default: Distributed
-                          description: |-
-                            Type is whether the set's disks are Distributed, replicated across the rack by Crucible and
-                            able to outlive the sled, or Local, sitting on the sled the instance is placed on.
-
-                            Local disks have a fixed 4 KiB block size, cannot be created from an image or a snapshot, and
-                            do not outlive the instance. They are also provisioned differently: a local disk's capacity
-                            belongs to one sled, so it is created by the instance create itself rather than ahead of it.
-                            See pkg/providers/instance.
+                          description: Type selects Distributed or Local disks.
                           enum:
                           - Distributed
                           - Local
@@ -656,50 +428,39 @@ spec:
                     (has(y.mountPath) ? y.mountPath : y.mountDir) == (has(x.mountPath)
                     ? x.mountPath : x.mountDir)))'
               subnetSelector:
-                description: |-
-                  SubnetSelector is used to select subnets to launch nodes into.
-                  Multiple subnets can match. Node launches will use subnets with available IP space.
-
-                  Excluded from the nodeclass hash for the same reason ImageSelector is.
+                description: SubnetSelector is used to select subnets to launch nodes
+                  into.
                 items:
                   properties:
                     id:
-                      description: ID is the exact subnet ID
+                      description: ID is the exact subnet ID.
                       type: string
                     name:
-                      description: Name is the exact name of a subnet
+                      description: Name is the exact subnet name.
                       type: string
                     project:
                       description: Project where the subnet is located.
                       type: string
                     vpcID:
-                      description: VPCID is the exact VPC ID
+                      description: VPCID is the exact VPC ID.
                       type: string
                     vpcName:
-                      description: VPCName is the exact name of the VPC
+                      description: VPCName is the exact VPC name.
                       type: string
                   type: object
                 type: array
               userData:
-                description: |-
-                  UserData to be applied to the provisioned nodes.
-                  It must be in the appropriate format based on the machine image in use. Karpenter will merge certain fields into
-                  this UserData to ensure nodes are being provisioned with the correct configuration.
+                description: UserData to be applied to the provisioned nodes.
                 type: string
             required:
             - storage
             type: object
           status:
-            description: OxideNodeClassStatus contains the resolved state of the OxideNodeClass
+            description: OxideNodeClassStatus is the resolved node class state.
             properties:
               affinityGroups:
-                description: |-
-                  AffinityGroups contain the resolved groups that every instance launched from this nodeclass
-                  joins. It is only published when every selector resolved, so a group that has gone missing
-                  holds the previous set rather than silently shrinking it.
-
-                  This list is the desired set: the single source of truth for what a launch joins, what drift
-                  compares against, and what memberships are allowed to persist.
+                description: AffinityGroups contain the resolved groups that every
+                  instance launched from this nodeclass joins.
                 items:
                   description: OxideAffinityGroup is one resolved Oxide affinity or
                     anti-affinity group.
@@ -707,15 +468,10 @@ spec:
                     id:
                       type: string
                     managed:
-                      description: |-
-                        Managed marks the one group Karpenter owns for this nodeclass, and so the only one it will
-                        ever delete.
+                      description: Managed marks a provider-owned group.
                       type: boolean
                     name:
-                      description: |-
-                        Name is the group's name at the time it resolved. The ID is the identity: a group deleted and
-                        recreated under the same name is a different group that the running instances are not members
-                        of, and comparing IDs is what makes that visible.
+                      description: Name is the group's name at the time it resolved.
                       type: string
                     policy:
                       description: Policy is what the rack does when the group's constraint
@@ -742,9 +498,8 @@ spec:
                       resolved from kube-public/cluster-info.
                     properties:
                       caCertHashes:
-                        description: |-
-                          CACertHashes pin the cluster CA during token-based discovery, in "sha256:<hex>" form over the
-                          CA certificate's SubjectPublicKeyInfo.
+                        description: CACertHashes pin the cluster CA during token-based
+                          discovery.
                         items:
                           type: string
                         type: array
@@ -755,7 +510,7 @@ spec:
                     type: object
                 type: object
               conditions:
-                description: Conditions contains signals for health and readiness
+                description: Conditions contains health and readiness signals.
                 items:
                   description: Condition aliases the upstream type and adds additional
                     helper methods
@@ -812,9 +567,8 @@ spec:
                   type: object
                 type: array
               ephemeralIPs:
-                description: |-
-                  EphemeralIPs contain the resolved pool each launched instance takes an external address from,
-                  in the order spec.ephemeralIPs declares them.
+                description: EphemeralIPs contain the resolved pool each launched
+                  instance takes an external address from.
                 items:
                   description: OxideEphemeralIP is one resolved entry of spec.ephemeralIPs.
                   properties:
@@ -823,10 +577,8 @@ spec:
                         from the pool when the spec named one.
                       type: string
                     poolID:
-                      description: |-
-                        PoolID and PoolName are empty when the entry takes the silo's default pool: the default is
-                        resolved by Nexus at launch, so naming a pool here would record a guess that a change of
-                        silo default would silently invalidate.
+                      description: PoolID and PoolName are empty when the entry takes
+                        the silo's default pool.
                       type: string
                     poolName:
                       type: string
@@ -835,11 +587,8 @@ spec:
                   type: object
                 type: array
               images:
-                description: |-
-                  Images contain selected images to use for the boot disk of launched nodes, most recently
-                  uploaded first. Nodes always launch with the first entry; the remaining entries are the
-                  runners-up a wildcard version selector also matched, and are reported only so the selection
-                  can be understood. The list is truncated, so it is not necessarily every match.
+                description: Images contain selected images to use for the boot disk
+                  of launched nodes, most recently uploaded first.
                 items:
                   properties:
                     id:
@@ -851,9 +600,7 @@ spec:
                     project:
                       type: string
                     sizeBytes:
-                      description: |-
-                        SizeBytes is the image's size, which is what makes "this disk is smaller than the image it is
-                        created from" checkable when the nodeclass is reconciled rather than at launch.
+                      description: SizeBytes is the image size.
                       format: int64
                       type: integer
                     timeCreated:
@@ -871,25 +618,21 @@ spec:
                   type: object
                 type: array
               kubeletArgs:
-                description: KubeletArgs contain user-defined and system default kubelet
-                  args that are applied to launched nodes
+                description: KubeletArgs are applied to launched nodes.
                 items:
                   type: string
                 type: array
               nodeTaints:
-                description: NodeTaints contain user-defined and system default node
-                  taints that are applied to launched nodes
+                description: NodeTaints are applied to launched nodes.
                 items:
                   type: string
                 type: array
               server:
-                description: |-
-                  Server is the user-defined or system discovered endpoint that nodes will use to join the cluster.
-                  It is rendered by the configured bootstrap provider, so its form and port are provider-specific.
+                description: Server is the user-defined or system discovered endpoint
+                  that nodes will use to join the cluster.
                 type: string
               sshKeys:
-                description: SSHKeys contain selected ssh keys to copy to launched
-                  nodes
+                description: SSHKeys contains the selected SSH keys.
                 items:
                   properties:
                     id:
@@ -902,37 +645,21 @@ spec:
                   type: object
                 type: array
               storage:
-                description: |-
-                  Storage is the resolved disk layout of a launched instance: the source each diskSet's disks are
-                  created from, and where each one lands in the guest.
-
-                  Published because several of these values are resolved rather than written -- the filesystem
-                  when the spec leaves it unset, and the mount point of each disk in a set with a mountDir -- so
-                  this is what makes the effective layout readable off the object rather than re-derived. It is
-                  also what a launch reads to decide which image or snapshot a data disk is created from, which
-                  is why it holds its previous value on an incomplete resolution rather than shrinking.
+                description: Storage is the resolved disk layout of a launched instance.
                 properties:
                   bootSizeBytes:
-                    description: |-
-                      BootSizeBytes is the boot disk's size as a byte count, rather than as the quantity it was
-                      written as.
+                    description: BootSizeBytes is the boot disk size in bytes.
                     format: int64
                     type: integer
                   diskSets:
                     description: DiskSets is the resolved form of spec.storage.diskSets,
                       in the same order.
                     items:
-                      description: |-
-                        DiskSetStatus is one resolved disk set.
-
-                        It deliberately carries no disk names. A disk's name is minted per-NodeClaim, so it is a property
-                        of a launch rather than of the nodeclass, and there is nothing about it a reconcile of the
-                        nodeclass could resolve.
+                      description: DiskSetStatus is one resolved disk set.
                       properties:
                         blockLinks:
-                          description: |-
-                            BlockLinks is where each of a raw block set's devices is linked, in ordinal order. Empty for a
-                            set with a filesystem.
+                          description: BlockLinks is where each of a raw block set's
+                            devices is linked, in ordinal order.
                           items:
                             type: string
                           type: array
@@ -942,15 +669,13 @@ spec:
                           format: int32
                           type: integer
                         filesystem:
-                          description: |-
-                            Filesystem is the effective value: ext4 where the spec left it unset and formatting applies,
-                            and empty for a set created from an image or a snapshot, which is never formatted.
+                          description: 'Filesystem is the effective value: ext4 where
+                            the spec left it unset and formatting applies.'
                           type: string
                         images:
-                          description: |-
-                            Images and Snapshots are the resolved sources, most recent first and truncated the same way
-                            Status.Images is. Only the first is ever used; the rest are reported so a wildcard selector can
-                            be understood from the nodeclass alone.
+                          description: Images and Snapshots are the resolved sources,
+                            most recent first and truncated the same way Status.Images
+                            is.
                           items:
                             properties:
                               id:
@@ -962,9 +687,7 @@ spec:
                               project:
                                 type: string
                               sizeBytes:
-                                description: |-
-                                  SizeBytes is the image's size, which is what makes "this disk is smaller than the image it is
-                                  created from" checkable when the nodeclass is reconciled rather than at launch.
+                                description: SizeBytes is the image size.
                                 format: int64
                                 type: integer
                               timeCreated:
@@ -984,11 +707,8 @@ spec:
                         layout:
                           type: string
                         mountPoints:
-                          description: |-
-                            MountPoints is where each of the set's disks is mounted, in ordinal order. It is the resolved
-                            answer to mountPath versus mountDir, so nothing has to re-derive it to configure a consumer
-                            such as the local static provisioner's hostDir. Empty for a raw block set, which is not
-                            mounted.
+                          description: MountPoints is where each of the set's disks
+                            is mounted, in ordinal order.
                           items:
                             type: string
                           type: array
@@ -1001,29 +721,21 @@ spec:
                           type: integer
                         snapshots:
                           items:
-                            description: |-
-                              OxideSnapshot is one resolved snapshot.
-
-                              It carries no OS or version, unlike OxideImage, because the Oxide API's snapshot has neither.
+                            description: OxideSnapshot is one resolved snapshot.
                             properties:
                               diskID:
-                                description: |-
-                                  DiskID is the disk the snapshot was taken of, reported so a snapshot can be traced back to
-                                  where it came from without a second API call.
+                                description: DiskID is the snapshot's source disk.
                                 type: string
                               id:
                                 type: string
                               name:
                                 type: string
                               project:
-                                description: |-
-                                  Project is the project the snapshot is in. A snapshot is always in one: there is no silo-level
-                                  snapshot the way there is a silo-level image.
+                                description: Project is the project the snapshot is
+                                  in.
                                 type: string
                               sizeBytes:
-                                description: |-
-                                  SizeBytes is what makes "this diskSet is smaller than its source" checkable when the nodeclass
-                                  is reconciled rather than at launch.
+                                description: SizeBytes is the snapshot size.
                                 format: int64
                                 type: integer
                               timeCreated:
@@ -1048,8 +760,7 @@ spec:
                     type: array
                 type: object
               subnets:
-                description: Subnets contain selected subnets for launching nodes
-                  into
+                description: Subnets contains the selected subnets.
                 items:
                   properties:
                     id:

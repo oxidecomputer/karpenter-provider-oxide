@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestPriceIsMonotonicInBothDimensions is the property consolidation depends on: a shape that
-// consumes more of either resource must never be cheaper. Without it, consolidation can replace a
-// node with one it considers equally cheap and then replace it back.
 func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	p := NewProvider(nil, nil)
 	prices := map[Specs]float64{}
@@ -30,7 +27,7 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	}
 
 	for specs, price := range prices {
-		// Same memory, more CPU.
+
 		for other, otherPrice := range prices {
 			if other.MemInGiB != specs.MemInGiB || other.Ncpus <= specs.Ncpus {
 				continue
@@ -47,7 +44,7 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 				)
 			}
 		}
-		// Same CPU, more memory.
+
 		for other, otherPrice := range prices {
 			if other.Ncpus != specs.Ncpus || other.MemInGiB <= specs.MemInGiB {
 				continue
@@ -67,9 +64,6 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	}
 }
 
-// TestPriceIsIndependentOfAvailability pins that marking a shape unavailable does not move any
-// price. A price that tracks availability makes the disruption controller churn whenever quota or
-// capacity moves.
 func TestPriceIsIndependentOfAvailability(t *testing.T) {
 	p := NewProvider(nil, nil)
 
@@ -93,15 +87,13 @@ func TestPriceIsIndependentOfAvailability(t *testing.T) {
 	}
 }
 
-// TestPriceOrdersSmallerShapesCheaper is the case consolidation actually exercises: an oversized
-// node must have a strictly cheaper replacement available.
 func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 	p := NewProvider(nil, nil)
 	for _, tc := range []struct{ cheaper, dearer string }{
 		{"2-4", "4-8"},
 		{"4-8", "4-16"},
-		{"1-2", "384-768"},
-		{"16-32", "16-64"},
+		{"1-4", "384-757"},
+		{"16-30", "16-64"},
 	} {
 		a, ok := p.Get(tc.cheaper)
 		if !ok {

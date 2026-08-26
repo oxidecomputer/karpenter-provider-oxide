@@ -22,8 +22,6 @@ const (
 	sshKeyIDB = "55555555-0000-4000-8000-000000000002"
 )
 
-// fakeAPI is the Oxide SSH key API, counting the views so that a cache hit can be asserted as the
-// absence of a call.
 type fakeAPI struct {
 	views int
 }
@@ -102,8 +100,6 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// A zero TTL makes every reading immediately due, which is the same code path as a reading that has
-// aged out without a test having to wait for it.
 func TestResolvePastTheTTLViewsAgain(t *testing.T) {
 	api := &fakeAPI{}
 	provider := NewProvider(api.server(t), 0)
@@ -152,8 +148,6 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	}
 }
 
-// A key that cannot be looked up is an error rather than a miss: an SSH key selector names one key,
-// so there is no reading of it under which the key is simply absent.
 func TestAKeyThatCannotBeViewedIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -185,8 +179,7 @@ func TestDriftReason(t *testing.T) {
 			desired:  []v1alpha1.OxideSSHKey{{ID: sshKeyID}},
 		},
 		{
-			// Both directions: a key added has to reach the node, and a running instance offers no
-			// way to put it there.
+
 			name:     "a key added to the set replaces the nodes without it",
 			recorded: new(sshKeyID),
 			desired:  []v1alpha1.OxideSSHKey{{ID: sshKeyID}, {ID: sshKeyIDB}},
@@ -199,8 +192,7 @@ func TestDriftReason(t *testing.T) {
 			want:     providers.DriftReasonSSHKey,
 		},
 		{
-			// An empty annotation is a launch that selected no keys, which is a comparison that can
-			// be made. An absent one is a launch from before the record existed, which is not.
+
 			name:     "a launch that recorded no keys and a nodeclass selecting none agree",
 			recorded: new(""),
 		},

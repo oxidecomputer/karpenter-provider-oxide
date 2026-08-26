@@ -12,13 +12,8 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// version is the hash version every stamp written by this controller carries.
 const version = v1alpha1.OxideNodeClassHashVersion
 
-// hashNodeClass is a nodeclass with something in the hashed part of its spec, so that a stamp is
-// distinguishable from the hash of an empty spec.
-// defaultNodeClass is the nodeclass name these cases share, so that what varies between them is only
-// the configuration being hashed.
 const defaultNodeClass = "default"
 
 func hashNodeClass(annotations map[string]string) *v1alpha1.OxideNodeClass {
@@ -28,7 +23,6 @@ func hashNodeClass(annotations map[string]string) *v1alpha1.OxideNodeClass {
 	}
 }
 
-// hashNodeClaim is a NodeClaim of that nodeclass, carrying whatever launch record the case is about.
 func hashNodeClaim(name string, annotations map[string]string) *karpv1.NodeClaim {
 	return &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: annotations},
@@ -51,7 +45,6 @@ func hashClientFor(t *testing.T, objects ...client.Object) client.Client {
 		Build()
 }
 
-// reconcileHash runs one reconcile, since every case here is about what one leaves behind.
 func reconcileHash(
 	t *testing.T,
 	kubeClient client.Client,
@@ -77,8 +70,6 @@ func annotationsOf(t *testing.T, kubeClient client.Client, name string) map[stri
 	return nodeClaim.Annotations
 }
 
-// The stamp is what drift is decided against, so it has to appear on a nodeclass that has never
-// carried one, and it has to be the hash of the current spec.
 func TestHashReconcileStampsTheNodeClass(t *testing.T) {
 	nodeClass := hashNodeClass(nil)
 	kubeClient := hashClientFor(t, nodeClass)
@@ -101,10 +92,6 @@ func TestHashReconcileStampsTheNodeClass(t *testing.T) {
 	}
 }
 
-// The migration case, and the one that matters most: a nodeclass reconciled for the first time by a
-// version that hashes at all. Its existing nodes recorded no hash, and stamping the nodeclass without
-// stamping them would leave a fleet that can never be compared. Adopting the current hash is what
-// gives them static drift from here on without replacing any of them now.
 func TestHashReconcileAdoptsExistingNodeClaims(t *testing.T) {
 	nodeClass := hashNodeClass(nil)
 	nodeClaim := hashNodeClaim("node-1", nil)
@@ -121,8 +108,6 @@ func TestHashReconcileAdoptsExistingNodeClaims(t *testing.T) {
 	}
 }
 
-// A NodeClaim already found drifted keeps the hash it has. It was judged while the two were
-// comparable, and re-stamping it would erase a finding this version has no way to reproduce.
 func TestHashReconcileLeavesDriftedNodeClaimsAlone(t *testing.T) {
 	nodeClass := hashNodeClass(nil)
 	nodeClaim := hashNodeClaim("node-1", map[string]string{
@@ -138,15 +123,12 @@ func TestHashReconcileLeavesDriftedNodeClaimsAlone(t *testing.T) {
 	if got := annotations[v1alpha1.AnnotationOxideNodeClassHash]; got != "stale" {
 		t.Errorf("NodeClaim hash annotation = %q, want the drifted node's own %q", got, "stale")
 	}
-	// The version still moves, so the node is not re-examined at every reconcile for a mismatch that
-	// is never going to be resolved.
+
 	if got := annotations[v1alpha1.AnnotationOxideNodeClassHashVersion]; got != version {
 		t.Errorf("NodeClaim hash version annotation = %q, want %q", got, version)
 	}
 }
 
-// Once the nodeclass is at the current version, a spec edit only moves its own stamp. Re-stamping the
-// nodes here would be re-stamping away the very drift the edit is supposed to produce.
 func TestHashReconcileDoesNotRestampAtTheCurrentVersion(t *testing.T) {
 	nodeClass := hashNodeClass(map[string]string{
 		v1alpha1.AnnotationOxideNodeClassHash:        "previous",
@@ -165,8 +147,6 @@ func TestHashReconcileDoesNotRestampAtTheCurrentVersion(t *testing.T) {
 	}
 }
 
-// A NodeClaim belonging to some other nodeclass, or to another provider's nodeclass that happens to
-// share the name, is none of this controller's business.
 func TestHashReconcileIgnoresOtherNodeClaims(t *testing.T) {
 	nodeClass := hashNodeClass(nil)
 	otherName := hashNodeClaim("node-1", nil)
@@ -184,7 +164,6 @@ func TestHashReconcileIgnoresOtherNodeClaims(t *testing.T) {
 	}
 }
 
-// A nodeclass being deleted is taking its nodes with it, so there is nothing a stamp would inform.
 func TestHashReconcileSkipsADeletingNodeClass(t *testing.T) {
 	nodeClass := hashNodeClass(nil)
 	now := metav1.Now()

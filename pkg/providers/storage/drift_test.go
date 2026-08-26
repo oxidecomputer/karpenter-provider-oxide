@@ -10,7 +10,6 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// sourcedNodeClass is a nodeclass with one image-sourced diskSet resolved to the given image ID.
 func sourcedNodeClass(t *testing.T, resolvedImageID string) *v1alpha1.OxideNodeClass {
 	t.Helper()
 	nc := &v1alpha1.OxideNodeClass{
@@ -67,16 +66,14 @@ func TestDriftReason(t *testing.T) {
 			want:      string(providers.DriftReasonDiskSetSource),
 		},
 		{
-			// Launched before this provider recorded anything. Comparing against nothing would
-			// replace a fleet on an upgrade of Karpenter itself.
+
 			name:      "no record at all",
 			claim:     claimWith(t, nil),
 			nodeClass: sourcedNodeClass(t, "image-b"),
 			want:      "",
 		},
 		{
-			// Replacing the node now would launch a replacement that cannot launch, since the disk has
-			// no source to be created from.
+
 			name: "the source has not resolved",
 			claim: claimWith(
 				t,
@@ -86,8 +83,7 @@ func TestDriftReason(t *testing.T) {
 			want:      "",
 		},
 		{
-			// Adding a set is a spec change, which the nodeclass hash has already reported. Reporting
-			// it here as well would tell an operator the wrong reason.
+
 			name:      "the set was added after the node launched",
 			claim:     claimWith(t, map[string]string{v1alpha1.AnnotationDiskSetSources: ""}),
 			nodeClass: sourcedNodeClass(t, "image-b"),
@@ -105,8 +101,6 @@ func TestDriftReason(t *testing.T) {
 	}
 }
 
-// A set of blank disks has no source that could move, and its geometry is covered by the nodeclass
-// hash, so it must never report source drift.
 func TestBlankDiskSetNeverDriftsOnSource(t *testing.T) {
 	nc := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -130,8 +124,6 @@ func TestBlankDiskSetNeverDriftsOnSource(t *testing.T) {
 	}
 }
 
-// The empty value has to survive a round trip, since it is what distinguishes a set with no source
-// from a set with no record.
 func TestDiskSetSourceRecordRoundTrip(t *testing.T) {
 	sources := map[string]string{"blank": "", "restored": "image-a"}
 	encoded := v1alpha1.EncodeDiskSetSources(sources)
@@ -148,7 +140,7 @@ func TestDiskSetSourceRecordRoundTrip(t *testing.T) {
 	if decoded["restored"] != "image-a" {
 		t.Errorf("ParseDiskSetSources()[restored] = %q, want %q", decoded["restored"], "image-a")
 	}
-	// Sorted, so the same set never looks like a change because a map iterated differently.
+
 	if again := v1alpha1.EncodeDiskSetSources(sources); again != encoded {
 		t.Errorf("EncodeDiskSetSources() is not stable: %q then %q", encoded, again)
 	}

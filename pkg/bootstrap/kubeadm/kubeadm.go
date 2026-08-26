@@ -1,10 +1,4 @@
-// Package kubeadm joins nodes to a kubeadm-managed cluster.
-//
-// Discovery information comes from the kube-public/cluster-info ConfigMap, which is world-readable
-// by design and holds the cluster CA plus the kube-apiserver endpoint. Rather than distributing a
-// long-lived join credential, a bootstrap token is minted per NodeClaim as a Secret in kube-system
-// with a short TTL, handed to exactly one node through user-data, and left to expire. The cluster CA
-// is pinned by hash so the joining node authenticates the control plane it is told to trust.
+// Package kubeadm bootstraps kubeadm nodes.
 package kubeadm
 
 import (
@@ -31,33 +25,26 @@ import (
 )
 
 const (
-	// clusterInfoNamespace and clusterInfoName identify the ConfigMap kubeadm publishes for
-	// unauthenticated discovery. It is intentionally readable by anonymous users.
 	clusterInfoNamespace = "kube-public"
 	clusterInfoName      = "cluster-info"
-	// clusterInfoKubeconfigKey is the key holding the discovery kubeconfig.
+
 	clusterInfoKubeconfigKey = "kubeconfig"
 
-	// tokenNamespace is where the kube-apiserver's bootstrap token authenticator looks for tokens.
-	// This location is fixed by Kubernetes and is not configurable.
 	tokenNamespace = "kube-system"
-	// tokenSecretPrefix is the mandatory name prefix for bootstrap token Secrets.
+
 	tokenSecretPrefix = "bootstrap-token-"
-	// tokenSecretType is the mandatory type for bootstrap token Secrets.
+
 	tokenSecretType = corev1.SecretTypeBootstrapToken
-	// nodeBootstrapGroup is the group kubeadm's node-bootstrapper RBAC is bound to. Without it the
-	// joining node cannot create its own CSR.
+
 	nodeBootstrapGroup = "system:bootstrappers:kubeadm:default-node-token"
 
-	// defaultTokenTTL bounds the window in which a leaked token is usable.
 	defaultTokenTTL = 15 * time.Minute
-	// defaultAPIServerPort is used when neither cluster-info nor discovery yields a port.
+
 	defaultAPIServerPort = 6443
 
-	// tokenIDLength and tokenSecretLength are fixed by the bootstrap token format, "[a-z0-9]{6}.[a-z0-9]{16}".
 	tokenIDLength     = 6
 	tokenSecretLength = 16
-	// tokenAlphabet is the only alphabet the bootstrap token format permits.
+
 	tokenAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 	configVersionV1beta3 = "kubeadm.k8s.io/v1beta3"
@@ -73,9 +60,6 @@ EOF
 kubeadm join --config /etc/kubernetes/karpenter-join.yaml
 `
 
-	// consumerUnit is the unit that must not start before the data disks are mounted. kubeadm join
-	// starts the kubelet through systemd, and the drop-in is written before the join runs, so systemd
-	// picks it up when the unit is first loaded.
 	consumerUnit = "kubelet.service"
 )
 
@@ -83,12 +67,8 @@ var userDataTemplate = template.Must(template.New("userdata").Parse(userDataTemp
 
 // Bootstrapper implements bootstrap.Bootstrapper for kubeadm.
 type Bootstrapper struct {
-	// reader is deliberately the manager's uncached reader. Reading cluster-info through the cached
-	// client would make controller-runtime start an informer that lists and watches every ConfigMap
-	// in the cluster, which would require far broader RBAC than reading one ConfigMap by name.
 	reader client.Reader
-	// writer creates bootstrap token Secrets. Writes never go through the cache, so this grants no
-	// read access to kube-system.
+
 	writer client.Writer
 }
 
@@ -100,9 +80,7 @@ func (b *Bootstrapper) Name() string {
 	return v1alpha1.BootstrapKindKubeadm
 }
 
-// Resolve reads cluster-info and records the endpoint and CA pins nodes will use to discover the
-// control plane. No token is minted here; tokens are per-node and short-lived, so they are created
-// in UserData instead.
+// Resolve reads cluster-info and records the endpoint and CA pins nodes will use to discover the control plane.
 func (b *Bootstrapper) Resolve(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -110,16 +88,13 @@ func (b *Bootstrapper) Resolve(
 ) error {
 	clusterInfo, err := b.clusterInfo(ctx)
 	if err != nil {
-		// cluster-info is expected to exist on every kubeadm cluster, so treat this as user-visible
-		// misconfiguration rather than a transient failure to retry against.
+
 		nodeClass.StatusConditions().
 			SetFalse(v1alpha1.ConditionTypeClusterInfoAvailable, "ClusterInfoUnavailable", err.Error())
 		return nil
 	}
 	nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeClusterInfoAvailable)
 
-	// Prefer the endpoint cluster-info advertises: it is what the control plane says it is reachable
-	// at, which may differ from an individual apiserver pod address in the EndpointSlice.
 	server := cluster.ServerOverride
 	if server == "" {
 		server = clusterInfo.endpoint
@@ -143,9 +118,7 @@ func (b *Bootstrapper) Resolve(
 	return nil
 }
 
-// UserData mints a short-lived bootstrap token for this NodeClaim and renders a JoinConfiguration
-// that uses it. The token is created here rather than during Resolve so that each node gets its own
-// credential and so that no token exists while no node is waiting to consume it.
+// UserData mints a short-lived bootstrap token for this NodeClaim and renders a JoinConfiguration that uses it.
 func (b *Bootstrapper) UserData(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -191,14 +164,12 @@ func (b *Bootstrapper) UserData(
 	return rendered.String(), nil
 }
 
-// clusterInfoData is the discovery information parsed out of kube-public/cluster-info.
 type clusterInfoData struct {
 	endpoint     string
 	clusterName  string
 	caCertHashes []string
 }
 
-// clusterInfo reads and parses the cluster-info ConfigMap.
 func (b *Bootstrapper) clusterInfo(ctx context.Context) (*clusterInfoData, error) {
 	configMap := &corev1.ConfigMap{}
 	objKey := client.ObjectKey{Namespace: clusterInfoNamespace, Name: clusterInfoName}
@@ -226,8 +197,6 @@ func (b *Bootstrapper) clusterInfo(ctx context.Context) (*clusterInfoData, error
 		return nil, fmt.Errorf("unable to parse the cluster-info kubeconfig: %w", err)
 	}
 
-	// The discovery kubeconfig carries exactly one cluster, but its name is not fixed, so take the
-	// first entry rather than looking one up by name.
 	for name, cluster := range kubeconfig.Clusters {
 		if cluster == nil {
 			continue
@@ -245,7 +214,6 @@ func (b *Bootstrapper) clusterInfo(ctx context.Context) (*clusterInfoData, error
 	return nil, fmt.Errorf("cluster-info kubeconfig contains no clusters")
 }
 
-// apiServerEndpoint reduces a server URL to the "host:port" form kubeadm discovery expects.
 func apiServerEndpoint(server string) string {
 	if server == "" {
 		return ""
@@ -260,9 +228,6 @@ func apiServerEndpoint(server string) string {
 	return parsed.Host
 }
 
-// caCertHashes computes the "sha256:<hex>" pins kubeadm uses to verify the control plane during
-// token discovery. The hash covers the certificate's SubjectPublicKeyInfo, so it survives CA
-// certificate renewal that reuses the same key.
 func caCertHashes(caCertData []byte) ([]string, error) {
 	var hashes []string
 	for block, rest := pem.Decode(caCertData); block != nil; block, rest = pem.Decode(rest) {
@@ -282,16 +247,6 @@ func caCertHashes(caCertData []byte) ([]string, error) {
 	return hashes, nil
 }
 
-// createToken mints a bootstrap token Secret scoped to a single node join.
-//
-// The token is granted both bootstrap usages. usage-bootstrap-authentication lets the node
-// authenticate to the API server, and usage-bootstrap-signing makes the control plane's
-// bootstrapsigner controller publish a "jws-kubeconfig-<tokenID>" entry in cluster-info. Token
-// discovery requires that signature unconditionally: kubeadm rejects a cluster-info that carries no
-// JWS for the token ID it was given, before it ever gets as far as checking the pinned CA hashes.
-//
-// The Secret is never read back, and expired tokens are garbage collected by the control plane's
-// tokencleaner controller, so the controller needs no read or delete access to kube-system Secrets.
 func (b *Bootstrapper) createToken(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -339,22 +294,18 @@ func (b *Bootstrapper) createToken(
 	return fmt.Sprintf("%s.%s", tokenID, tokenSecret), nil
 }
 
-// randomString returns a cryptographically random string over the bootstrap token alphabet.
 func randomString(length int) (string, error) {
 	out := make([]byte, length)
 	if _, err := rand.Read(out); err != nil {
 		return "", fmt.Errorf("unable to generate a random bootstrap token: %w", err)
 	}
-	// len(tokenAlphabet) is 36 and does not divide 256, so the modulo below is very slightly biased.
-	// Over 22 characters of a token that lives for minutes this is not a meaningful reduction in
-	// entropy, and rejection sampling is not worth the complexity here.
+
 	for i, b := range out {
 		out[i] = tokenAlphabet[int(b)%len(tokenAlphabet)]
 	}
 	return string(out), nil
 }
 
-// joinConfiguration renders the kubeadm JoinConfiguration document.
 func (b *Bootstrapper) joinConfiguration(
 	nodeClass *v1alpha1.OxideNodeClass,
 	req bootstrap.Request,
@@ -398,8 +349,6 @@ func (b *Bootstrapper) joinConfiguration(
 	return string(configYAML), nil
 }
 
-// nodeTaints projects taints down to the three fields kubeadm accepts. Marshaling corev1.Taint
-// directly would also emit its zero TimeAdded field, which kubeadm rejects as unknown.
 func nodeTaints(taints []corev1.Taint) []map[string]string {
 	out := make([]map[string]string, 0, len(taints))
 	for _, taint := range taints {
@@ -412,8 +361,6 @@ func nodeTaints(taints []corev1.Taint) []map[string]string {
 	return out
 }
 
-// kubeletExtraArgs converts "key=value" args into the shape the given kubeadm config version wants.
-// v1beta4 takes a list of name/value pairs so that an argument can be repeated; v1beta3 takes a map.
 func kubeletExtraArgs(args []string, configVersion string) any {
 	if len(args) == 0 {
 		return nil
@@ -434,13 +381,6 @@ func kubeletExtraArgs(args []string, configVersion string) any {
 	return out
 }
 
-// userData is what the user-data template is rendered from.
-//
-// DiskSetup is spliced in after "set -euo pipefail" and before the configuration is written, which is
-// what guarantees the disks are mounted before the node joins: the block ends by running a oneshot
-// unit synchronously, so under set -e the join is never reached on a node whose disks did not come up.
-// It is empty for a nodeclass with no diskSets, which renders the script this template rendered
-// before disk support existed.
 type userData struct {
 	DiskSetup string
 	Config    string

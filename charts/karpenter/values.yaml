@@ -14,29 +14,24 @@ serviceAccount:
   # -- Specifies if a ServiceAccount should be created.
   create: true
   # -- The name of the ServiceAccount to use.
-  # If not set and create is true, a name is generated using the fullname template.
   name: ""
   # -- Additional annotations for the ServiceAccount.
   annotations: {}
 # -- Specifies additional rules for the core ClusterRole.
 additionalClusterRoleRules: []
-# -- Bootstrap provider configuration. Only enable the providers actually in use: each one is granted
-# its own namespaced Role, so a disabled provider's permissions are never created at all.
+# -- Bootstrap provider configuration.
 bootstrap:
   rke2:
     # -- Enable RBAC for the RKE2 bootstrap provider.
     enabled: true
-    # -- The Secret holding the RKE2 agent join token. The controller is granted get on this one
-    # Secret by name, so this must match spec.bootstrap.rke2.tokenRef on the OxideNodeClass.
+    # -- The Secret holding the RKE2 agent join token.
     tokenSecret:
-      # -- Namespace of the token Secret. Defaults to the release namespace.
+      # -- Namespace of the token Secret.
       namespace: ""
       # -- Name of the token Secret.
       name: rancher-agent-token
   kubeadm:
-    # -- Enable RBAC for the kubeadm bootstrap provider. This grants get on the
-    # kube-public/cluster-info ConfigMap and create (but not read) on kube-system Secrets, so that
-    # short-lived bootstrap tokens can be minted per node.
+    # -- Enable RBAC for the kubeadm bootstrap provider.
     enabled: false
 serviceMonitor:
   # -- Specifies whether a ServiceMonitor should be created.
@@ -67,7 +62,7 @@ podSecurityContext:
 priorityClassName: system-cluster-critical
 # -- Override the default termination grace period for the pod.
 terminationGracePeriodSeconds:
-# -- Bind the pod to the host network. This is required when using a custom CNI.
+# -- Bind the pod to the host network.
 hostNetwork: false
 # -- Configure the DNS Policy for the pod.
 dnsPolicy: Default
@@ -76,8 +71,7 @@ dnsConfig: {}
 # -- Node selectors to schedule the pod to nodes with labels.
 nodeSelector:
   kubernetes.io/os: linux
-# -- Affinity rules for scheduling the pod. If an explicit label selector is not provided for pod
-# affinity or pod anti-affinity one will be created from the pod selector labels.
+# -- Affinity rules for scheduling the pod.
 affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -88,9 +82,7 @@ affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       - topologyKey: "kubernetes.io/hostname"
-# -- Topology spread constraints to increase the controller resilience by distributing pods across
-# the cluster zones. If an explicit label selector is not provided one will be created from the pod
-# selector labels.
+# -- Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones.
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: topology.kubernetes.io/zone
@@ -105,7 +97,7 @@ controller:
   image:
     # -- Repository path to the controller image.
     repository: ghcr.io/oxidecomputer/karpenter
-    # -- Tag of the controller image. Defaults to the chart's appVersion.
+    # -- Tag of the controller image.
     tag: ""
     # -- SHA256 digest of the controller image.
     digest: ""
@@ -132,54 +124,57 @@ settings:
     host: ""
     # -- Oxide project that Karpenter provisions instances into.
     project: ""
-    # -- Secret in the release namespace holding the Oxide API token. The token is referenced rather
-    # than templated so it is never written into the Helm release.
+    # -- Secret in the release namespace holding the Oxide API token.
     tokenSecret:
       name: oxide-api-token
       key: token
-  # -- Silo quota configuration. Constrains the instance types Karpenter offers to those the silo has
-  # quota headroom for, so the scheduler does not pick a shape the API will refuse.
-  quota:
-    # -- Enable silo quota awareness. This reads /v1/utilization, which is silo-scoped and needs no
-    # permissions beyond launching instances, so it is on by default. If the read fails, instance
-    # types are left unconstrained and a launch that exceeds the quota fails at the API instead;
-    # provisioning is never blocked by an unreadable quota.
+    # -- Identity this cluster records on every Oxide resource it creates.
+    clusterID: ""
+  # -- Launch deadlines.
+  launch:
+    # -- Overall bound on a single launch, across every Oxide API call it makes.
+    deadline: 10m
+    # -- How long a disk may sit in the creating state.
+    diskCreatingDeadline: 2m
+    # -- How long an instance may sit in the creating state.
+    instanceCreatingDeadline: 2m
+    # -- Node registration deadline for a placed instance.
+    instanceStartingDeadline: 5m
+    # -- How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in.
+    instanceStoppingDeadline: 3m
+  # -- Orphan reaper.
+  reaper:
+    # -- Enable the orphan reaper.
     enabled: true
-    # -- How often the silo's quota is re-read. This is a single API call, and what it measures changes
-    # whenever anything in the silo starts or stops.
+    # -- How often the project is rescanned.
+    period: 1m
+    # -- How long a resource must look orphaned before it is deleted.
+    quarantine: 5m
+  # -- Instance type catalog generation.
+  instanceTypes:
+    # -- Percentage increase between successive CPU and memory values in the generated catalog.
+    incrementPercent: 10
+  # -- Silo quota configuration.
+  quota:
+    # -- Enable silo quota awareness.
+    enabled: true
+    # -- How often the silo's quota is re-read.
     refreshPeriod: 1m
-  # -- Sled inventory configuration. Records which physical sled each node landed on, as labels and
-  # annotations on the Node and NodeClaim, and uses the same rack reading to stop offering instance
-  # types no sled has room for. Provisioning still works whether this is enabled, disabled, or
-  # failing: a snapshot that stops refreshing is ignored, and unplaceable shapes are then learned
-  # from refused launches instead.
+  # -- Sled inventory configuration.
   inventory:
-    # -- Enable the sled inventory controllers. This requires an Oxide token with fleet-level read
-    # access to the system API (/v1/system/hardware/sleds), which is a much broader grant than
-    # provisioning instances into a single project. Leave this disabled unless the placement labels
-    # are wanted. If enabled with a token that cannot read the system API, the controller logs the
-    # failure and applies no labels rather than failing.
+    # -- Enable the sled inventory controllers.
     enabled: false
-    # -- How often the sled inventory is re-read from the Oxide API. Building it costs one API call
-    # per sled in the rack, so lowering this raises fleet API load proportionally. A reading is
-    # trusted for twice this long; past that it is ignored rather than allowed to constrain
-    # provisioning on stale information.
+    # -- How often the sled inventory is re-read from the Oxide API.
     refreshPeriod: 5m
-    # -- How long a node may sit on a sled that is being taken out of service (expunged, or closed to
-    # new placements) before Karpenter drains it and provisions a replacement. Replacement ALSO
-    # requires settings.featureGates.nodeRepair, and is subject to core's node repair guardrail that
-    # blocks repair while more than 20% of a NodePool's nodes are unhealthy. Set to 0 to record sled
-    # health without ever replacing nodes for it.
+    # -- Time before replacing a node on an unhealthy sled.
     repairTolerationDuration: 30m
-  # -- The maximum length of a batch window. The longer this is, the more pods we can consider for
-  # provisioning at one time which usually results in fewer but larger nodes.
+  # -- The maximum length of a batch window.
   batchMaxDuration: 10s
-  # -- The maximum amount of time with no new pending pods that if exceeded ends the current batching
-  # window.
+  # -- The maximum amount of time with no new pending pods that if exceeded ends the current batching window.
   batchIdleDuration: 1s
-  # -- How the Karpenter scheduler should treat preferences. Can be one of 'Ignore' and 'Respect'.
+  # -- How the Karpenter scheduler should treat preferences.
   preferencePolicy: Respect
-  # -- How the Karpenter scheduler treats min values. Options are 'Strict' and 'BestEffort'.
+  # -- How the Karpenter scheduler treats min values.
   minValuesPolicy: Strict
   # -- Feature gate configuration values.
   featureGates:

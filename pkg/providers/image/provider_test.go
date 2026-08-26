@@ -55,8 +55,6 @@ func TestDescribeSelectors(t *testing.T) {
 	}
 }
 
-// fakeAPI is the Oxide image API, serving one project's images and counting what was asked of it, so
-// that a cache hit can be asserted as the absence of a call rather than as the presence of an answer.
 type fakeAPI struct {
 	images []oxide.Image
 	lists  int
@@ -107,8 +105,6 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// image is one image in the fake project, created at the given offset from a fixed instant so that
-// the ordering a resolution produces is a fact about the test rather than about when it ran.
 func image(name, id string, createdMinutes int) oxide.Image {
 	created := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC).
 		Add(time.Duration(createdMinutes) * time.Minute)
@@ -156,8 +152,6 @@ func TestResolveReturnsTheMatchedImagesNewestFirst(t *testing.T) {
 	}
 }
 
-// A resolution that found nothing reports every selector, since with no images at all every one of
-// them missed. That is what the ImagesResolved condition is rendered from.
 func TestResolveReportsTheSelectorsWhenNothingMatched(t *testing.T) {
 	api := &fakeAPI{}
 	provider := NewProvider(api.server(t), time.Minute)
@@ -175,8 +169,6 @@ func TestResolveReportsTheSelectorsWhenNothingMatched(t *testing.T) {
 	}
 }
 
-// Reconciles arriving inside the coalescing window cost one API call between them, which is the whole
-// reason the provider exists rather than the reconcile calling the API directly.
 func TestResolveServesACacheHit(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
@@ -194,14 +186,11 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// A reading past the coalescing window is made again, which is what lets a newly uploaded image
-// matching a wildcard be picked up by the next resync rather than by an edit.
 func TestResolvePastTheTTLListsAgain(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
-	// A zero TTL makes every reading immediately due, which is the same code path as a reading that
-	// has aged out without a test having to wait for it.
+
 	provider := NewProvider(api.server(t), 0)
 	class := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"})
 
@@ -215,8 +204,6 @@ func TestResolvePastTheTTLListsAgain(t *testing.T) {
 	}
 }
 
-// An edited selector is a different question, so it gets its own reading. This is the whole of cache
-// invalidation on a spec edit: nothing has to notice the edit.
 func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
@@ -236,8 +223,6 @@ func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 	}
 }
 
-// Two nodeclasses selecting the same images ask one question, so they share one reading rather than
-// each listing the project.
 func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
@@ -245,8 +230,7 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	provider := NewProvider(api.server(t), time.Hour)
 
 	first := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"}, v1alpha1.ImageSelector{OS: "ubuntu"})
-	// The same selectors, written the other way round: the key is the set of questions, not the order
-	// they were typed in.
+
 	second := nodeClass(
 		v1alpha1.ImageSelector{OS: "ubuntu"},
 		v1alpha1.ImageSelector{Name: "rke2-*"},
@@ -265,8 +249,6 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	}
 }
 
-// The cache serves a copy, so a caller publishing a resolution into a nodeclass it then patches
-// cannot reach into the reading the next caller will be served.
 func TestResolveDoesNotHandOutTheCachedSlice(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
@@ -316,9 +298,7 @@ func TestDriftReason(t *testing.T) {
 			},
 		},
 		{
-			// A resolution that found nothing is already reported as ImagesResolved being false.
-			// Replacing the fleet over it would take every node down to launch replacements that
-			// cannot launch.
+
 			name:     "an empty resolved list is not drift",
 			launched: "33333333-0000-4000-8000-000000000001",
 		},

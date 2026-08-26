@@ -49,12 +49,6 @@ var (
 	LabelNodeClass   = apis.Group + "/oxidenodeclass"
 
 	// Sled placement labels, written to Nodes by the optional inventory controller.
-	//
-	// These describe where a node physically landed, which the scheduler does not know and cannot
-	// ask for: an instance is placed by the provision saga after the create call returns. So they are
-	// deliberately not offering requirements and nothing selects on them at provisioning time. They
-	// exist to be read after the fact, whether by an operator, by a metrics pipeline joining nodes to
-	// hardware, or by a pod topology spread that wants sleds as its failure domain.
 	LabelSledID          = apis.Group + "/sled-id"
 	LabelSledRackID      = apis.Group + "/rack-id"
 	LabelSledSerial      = apis.Group + "/sled-serial"
@@ -62,8 +56,7 @@ var (
 	LabelSledPolicy      = apis.Group + "/sled-policy"
 	LabelSledProvisiable = apis.Group + "/sled-provision-policy"
 
-	// SledLabels is every label the inventory controller owns. It is the set the controller removes
-	// from a node it can no longer place, so that a stale sled is never left asserted on a node.
+	// SledLabels is every label the inventory controller owns.
 	SledLabels = []string{
 		LabelSledID,
 		LabelSledRackID,
@@ -73,29 +66,18 @@ var (
 		LabelSledProvisiable,
 	}
 
-	// Sled placement annotations. These carry the detail that is either too long, too structured or
-	// too numeric to be worth selecting on, so it is recorded rather than made queryable.
+	// Sled placement annotations.
 	AnnotationSledBaseboardPart     = apis.Group + "/sled-baseboard-part"
 	AnnotationSledBaseboardRevision = apis.Group + "/sled-baseboard-revision"
 	AnnotationSledHardwareThreads   = apis.Group + "/sled-usable-hardware-threads"
 	AnnotationSledPhysicalRAM       = apis.Group + "/sled-usable-physical-ram"
-	// AnnotationSledObservedAt is when the snapshot the placement was read from was taken, not when it
-	// was written. A reader needs to know how old the underlying observation is, and a node whose
-	// placement has not changed is not re-patched, so the write time would say nothing useful.
+	// AnnotationSledObservedAt is when the snapshot the placement was read from was taken, not when it was written.
 	AnnotationSledObservedAt = apis.Group + "/sled-observed-at"
 
-	// ConditionTypeSledUnhealthy is set on a Node when the sled underneath it is being taken out of
-	// service. True means the sled will not host this node much longer; False means it is fine.
-	//
-	// This is a Node status condition rather than a label because that is the only thing Karpenter's
-	// node repair watches: RepairPolicies is expressed as a condition type and status, so a label
-	// could never trigger remediation no matter what it said. It is set whenever inventory is enabled,
-	// and only ever acted on when the NodeRepair feature gate is also on.
+	// ConditionTypeSledUnhealthy is set on a Node when the sled underneath it is being taken out of service.
 	ConditionTypeSledUnhealthy corev1.NodeConditionType = "SledUnhealthy"
 
-	// Reasons recorded on ConditionTypeSledUnhealthy. Expunged and NonProvisionable are the two states
-	// worth replacing a node over, and they are distinguished so an operator can tell a sled being
-	// removed from the rack from one merely closed to new placements.
+	// Reasons recorded on ConditionTypeSledUnhealthy.
 	ConditionReasonSledExpunged        = "SledExpunged"
 	ConditionReasonSledNonProvisonable = "SledNonProvisionable"
 	ConditionReasonSledHealthy         = "SledInService"
@@ -109,53 +91,25 @@ var (
 		AnnotationSledObservedAt,
 	}
 
-	// AnnotationAffinityGroups is the set of Oxide groups the instance joined at launch, as
-	// "<aa|af>:<uuid>" entries, sorted and comma-separated.
-	//
-	// It is the record drift is decided against, and the only handle on a membership once the group
-	// has left the nodeclass's desired set: by then the nodeclass no longer says which kind of group
-	// it was, so the type prefix is carried here to address the right endpoint to leave it on.
+	// AnnotationAffinityGroups is the set of Oxide groups the instance joined at launch.
 	AnnotationAffinityGroups = apis.Group + "/affinity-groups"
 
 	// AnnotationSubnet is the ID of the subnet the instance's network interface was created in.
-	//
-	// One subnet, not the resolved set: a launch picks one of the selected subnets, so the set says
-	// what could have been used and only this says what was. Drift compares it back against the set,
-	// which is what makes a subnet leaving the set replace the nodes in it while a subnet joining the
-	// set replaces nothing.
 	AnnotationSubnet = apis.Group + "/subnet"
 
-	// AnnotationSSHKeys is the set of SSH key IDs copied to the instance at launch, sorted and
-	// comma-separated.
-	//
-	// Recorded by ID rather than by name because a key deleted and recreated under the same name
-	// carries different public key material, which is exactly the change worth replacing a node over.
+	// AnnotationSSHKeys is the set of SSH key IDs copied to the instance at launch, sorted and comma-separated.
 	AnnotationSSHKeys = apis.Group + "/ssh-keys"
 
-	// AnnotationEphemeralIPs is the external addresses the instance was launched with, as
-	// "<version>=<address>@<pool-uuid>" entries sorted by version and comma-separated.
-	//
-	// Keyed by IP version because that is the slot an ephemeral address occupies: Oxide gives an
-	// instance at most one per version. The pool is the one the address actually came from, read
-	// back off the instance at launch, which is the only way an entry that took the silo's default
-	// records a pool at all. Written once at launch and never re-read from the API, since listing an
-	// instance's external IPs is a call per instance per reconcile.
+	// AnnotationEphemeralIPs is the external addresses the instance was launched with.
 	AnnotationEphemeralIPs = apis.Group + "/ephemeral-ips"
 
-	// AnnotationHourlyPrice is the effective hourly price Karpenter used for the instance's offering
-	// when it launched the NodeClaim, including any NodeOverlay price override or adjustment. The
-	// units and whether the value is suitable as a billing estimate are defined by the cloud provider;
-	// Oxide's default prices are synthetic comparison costs unless an overlay replaces them.
+	// AnnotationDiskPrefix is the prefix every disk of this launch was named with, boot disk included.
+	AnnotationDiskPrefix = apis.Group + "/disk-prefix"
+
+	// AnnotationHourlyPrice records the effective hourly launch price.
 	AnnotationHourlyPrice = apis.Group + "/hourly-price"
 
-	// AnnotationDiskSetSources is the image or snapshot each diskSet's disks were created from at
-	// launch, as "<set>=<uuid>" entries, sorted and comma-separated.
-	//
-	// Keyed by diskSet name because there can be several, and the question drift asks is per set. An
-	// entry with an empty value is meaningful and is written: it is what tells a set whose disks were
-	// created blank apart from a set that had no record kept, the same distinction AnnotationSSHKeys
-	// draws. A disk cannot be re-sourced in place, so a set whose source has moved can only be
-	// followed by replacing the node.
+	// AnnotationDiskSetSources is the image or snapshot each diskSet's disks were created from at launch.
 	AnnotationDiskSetSources = apis.Group + "/disk-set-sources"
 
 	AnnotationOxideNodeClassHash             = apis.Group + "/oxidenodeclass-hash"

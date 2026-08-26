@@ -10,14 +10,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 )
 
-// resolveStorage publishes the nodeclass's resolved disk layout and sets ConditionTypeStorageResolved.
-//
-// The geometry -- sizes, counts, mount points, the effective filesystem -- is published
-// unconditionally, because it needs no API call and is worth having on the object even when a
-// selector fails. The sources are not: on an incomplete resolution the previously published layout is
-// left exactly as it was, following AffinityGroups rather than Images. Status.Storage is what a launch
-// reads to decide which image or snapshot a data disk is created from, so replacing it with a partial
-// set would launch disks from the wrong source, or from none.
 func (c *Controller) resolveStorage(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -28,9 +20,6 @@ func (c *Controller) resolveStorage(
 		DiskSets:      make([]v1alpha1.DiskSetStatus, 0, len(sets)),
 	}
 
-	// Reported rather than only refused by CEL, for the nodeclass the apiserver has not re-validated
-	// since the rule shipped. A launch would refuse it too, but with nothing on the nodeclass to say
-	// why no node ever appears.
 	if total, max := nodeClass.Spec.Storage.Disks(), v1alpha1.MaxDisks(); total > max {
 		nodeClass.StatusConditions().SetFalse(
 			v1alpha1.ConditionTypeStorageResolved,
@@ -98,8 +87,6 @@ func (c *Controller) resolveStorage(
 		resolved.DiskSets = append(resolved.DiskSets, status)
 	}
 
-	// The condition is only registered on a nodeclass with a sourced diskSet, so there is nothing to
-	// set for one whose data disks are all blank. The geometry is still published.
 	if !nodeClass.Spec.Storage.NeedsSourceResolution() {
 		nodeClass.Status.Storage = resolved
 		return nil
@@ -125,12 +112,6 @@ func (c *Controller) resolveStorage(
 	return nil
 }
 
-// tooSmallFor reports whether a set's disks are large enough for the source they are created from,
-// and the message to publish when they are not.
-//
-// A source whose size is unknown is not checked: a zero here means the resolution did not carry one,
-// not that the source is empty, and refusing a launch over a missing figure would be worse than
-// letting the Oxide API be the authority.
 func tooSmallFor(set v1alpha1.DiskSet, sourceBytes int64, kind string) (string, bool) {
 	if sourceBytes <= 0 || set.Size.Value() >= sourceBytes {
 		return "", true
@@ -144,12 +125,6 @@ func tooSmallFor(set v1alpha1.DiskSet, sourceBytes int64, kind string) (string, 
 	), false
 }
 
-// mountPoints is where each of a set's disks is mounted, in ordinal order.
-//
-// It mirrors what pkg/providers/storage computes for a launch. Duplicated deliberately rather than
-// shared: the launch's version needs an instance name to mint disk names, which a reconcile of the
-// nodeclass does not have, and the mount geometry is the half that does not depend on it. The naming
-// half, which is the part that would be dangerous to have two copies of, is not duplicated.
 func mountPoints(set v1alpha1.DiskSet) []string {
 	if set.RawBlock() {
 		return nil
@@ -160,7 +135,6 @@ func mountPoints(set v1alpha1.DiskSet) []string {
 	return targetsUnder(set)
 }
 
-// blockLinks is where each of a raw block set's devices is linked, in ordinal order.
 func blockLinks(set v1alpha1.DiskSet) []string {
 	if !set.RawBlock() {
 		return nil

@@ -16,8 +16,6 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses", "oxidenodeclasses/status"]
     verbs: ["get", "list", "watch", "create", "delete", "patch"]
-  # Read-only: OxideCapacity is a view the controller publishes about the rack and the silo, not
-  # something an admin configures. Writing to it would be overwritten on the next publish.
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidecapacities", "oxidecapacities/status"]
     verbs: ["get", "list", "watch"]

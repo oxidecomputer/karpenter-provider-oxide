@@ -10,9 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// nodeClass is a nodeclass with one diskSet per shape the table can describe: formatted and mounted
-// at a literal path, several disks beneath a directory, a raw block set, and a set created from an
-// image so that it is never formatted.
 func nodeClass(sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -38,15 +35,13 @@ func diskSet(name string, count int32, fs, mountPath, mountDir string) v1alpha1.
 
 func plan(t *testing.T, sets ...v1alpha1.DiskSet) *storage.Plan {
 	t.Helper()
-	built, err := storage.Build("inst-test", nodeClass(sets...))
+	built, err := storage.Build("inst-test", "launch-token", nodeClass(sets...))
 	if err != nil {
 		t.Fatalf("building the plan: %v", err)
 	}
 	return &built
 }
 
-// A nodeclass with no diskSets must render nothing at all, so its user-data is exactly what it was
-// before any of this existed.
 func TestScriptIsEmptyWithoutDataDisks(t *testing.T) {
 	out, err := Script(plan(t), Options{ConsumerUnits: []string{"kubelet.service"}})
 	if err != nil {
@@ -61,8 +56,6 @@ func TestScriptIsEmptyWithoutDataDisks(t *testing.T) {
 	}
 }
 
-// The user-data block is spliced into a script running under "set -euo pipefail", so it has to parse
-// as bash, and so does the body it installs.
 func TestRenderedShellParses(t *testing.T) {
 	out, err := Script(
 		plan(t,
@@ -87,9 +80,6 @@ func TestRenderedShellParses(t *testing.T) {
 	}
 }
 
-// shellcheck is the reason the body is a file rather than a Go string, so it is worth failing the
-// build over where it is installed. Skipped rather than failed where it is not, so a contributor
-// without it can still run the tests; CI has it.
 func TestShellCheck(t *testing.T) {
 	if _, err := exec.LookPath("shellcheck"); err != nil {
 		t.Skip("shellcheck is not installed")
@@ -101,8 +91,6 @@ func TestShellCheck(t *testing.T) {
 	}
 }
 
-// The script hard-codes the paths the Go constants declare, because a static file cannot read them,
-// and the fstab options name the unit. Nothing enforces either but this.
 func TestScriptAgreesWithConstants(t *testing.T) {
 	for _, want := range []string{
 		`CONF="${KARPENTER_DISK_CONF:-` + ConfigPath + `}"`,
@@ -127,10 +115,6 @@ func TestScriptAgreesWithConstants(t *testing.T) {
 	}
 }
 
-// The whole design rests on the mount units being ordered after the unit that formats the disks, and
-// on that unit being able to run before local-fs.target without a dependency cycle. Both are one
-// line each and neither fails visibly if it is dropped: systemd breaks a cycle by silently discarding
-// an ordering, which would leave a mount racing a mkfs.
 func TestUnitCanRunBeforeTheMounts(t *testing.T) {
 	for _, want := range []string{
 		"DefaultDependencies=no",
@@ -144,9 +128,6 @@ func TestUnitCanRunBeforeTheMounts(t *testing.T) {
 	}
 }
 
-// Everything the user-data installs has to survive the heredocs it is installed with, and the
-// install step has to be invoked: it is what applies the rules, splices the fstab block in and
-// mounts, and it is the first boot's ordering guarantee.
 func TestInstallerWritesEverything(t *testing.T) {
 	out, err := Script(
 		plan(t, diskSet("kubernetes", 1, v1alpha1.FilesystemExt4, "/var/lib/rancher", "")),
@@ -176,8 +157,6 @@ func TestInstallerWritesEverything(t *testing.T) {
 	}
 }
 
-// The udev rule is the load-bearing piece: it is what turns a serial into a name everything else
-// keys on. ENV{DEVTYPE}=="disk" keeps it off partitions, whose kernel names also match nvme*n*.
 func TestUdevRules(t *testing.T) {
 	built := plan(t,
 		diskSet("kubernetes", 1, v1alpha1.FilesystemExt4, "/var/lib/rancher", ""),
@@ -208,15 +187,12 @@ func TestUdevRules(t *testing.T) {
 			t.Errorf("not every rule carries %s", want)
 		}
 	}
-	// The boot disk is excluded by never being named, not by being matched and skipped.
+
 	if strings.Contains(rules, built.Boot.Serial) {
 		t.Error("the rules name the boot disk's serial")
 	}
 }
 
-// A serial carrying an fnmatch metacharacter would silently become a pattern in a udev rule and could
-// match a disk the nodeclass never named. Karpenter's names cannot contain one, which is why it is
-// worth asserting rather than assuming.
 func TestUdevRulesRefuseAGlobbingSerial(t *testing.T) {
 	built := &storage.Plan{Sets: []storage.Set{
 		{
@@ -231,8 +207,6 @@ func TestUdevRulesRefuseAGlobbingSerial(t *testing.T) {
 	}
 }
 
-// fstab is rendered once, at launch, rather than rewritten on the node every boot. That is only
-// possible because the device name is knowable here, so it is worth asserting on exactly.
 func TestFstabBlock(t *testing.T) {
 	built := plan(t,
 		diskSet("kubernetes", 1, v1alpha1.FilesystemExt4, "/var/lib/rancher", ""),
@@ -251,8 +225,6 @@ func TestFstabBlock(t *testing.T) {
 	}
 }
 
-// A read-only attachment cannot be mounted rw whatever the mount options say, so the entry has to
-// carry ro. It is known here rather than probed on the node: it is a property of the attachment.
 func TestFstabBlockMarksReadOnlyAttachments(t *testing.T) {
 	built := &storage.Plan{Sets: []storage.Set{{
 		Name: "sourced",
@@ -267,14 +239,12 @@ func TestFstabBlockMarksReadOnlyAttachments(t *testing.T) {
 	if !strings.Contains(fstab, ","+"ro ") {
 		t.Errorf("a read-only attachment is not mounted ro:\n%s", fstab)
 	}
-	// It carries no filesystem in the plan, so the entry cannot name one either.
+
 	if !strings.Contains(fstab, " "+fstabAuto+" ") {
 		t.Errorf("a sourced disk's entry does not use %q:\n%s", fstabAuto, fstab)
 	}
 }
 
-// The table is what is left for the script after udev and systemd have taken their halves: which
-// device, what to format it as, and the paths it needs for seeding and linking.
 func TestConfigTable(t *testing.T) {
 	built := plan(t,
 		diskSet("kubernetes", 1, v1alpha1.FilesystemExt4, "/var/lib/rancher", ""),
@@ -302,8 +272,6 @@ func TestConfigTable(t *testing.T) {
 		t.Errorf("table rows =\n%s\nwant\n%s", strings.Join(rows, "\n"), strings.Join(want, "\n"))
 	}
 
-	// Nothing in the table identifies a disk: that is the udev rule's job, and having it in two
-	// places is what the previous design got wrong.
 	for _, disk := range built.Data() {
 		if strings.Contains(config, disk.Serial) {
 			t.Errorf(
@@ -314,8 +282,6 @@ func TestConfigTable(t *testing.T) {
 	}
 }
 
-// A disk created from an image or a snapshot carries no filesystem in the plan, and the table has to
-// say "leave whatever is on it alone" rather than "format it as nothing".
 func TestSourcedDiskIsNeverFormatted(t *testing.T) {
 	set := diskSet("sourced", 1, "", "/mnt/sourced", "")
 	set.ImageSelector = []v1alpha1.ImageSelector{{Name: "some-image"}}
@@ -326,7 +292,7 @@ func TestSourcedDiskIsNeverFormatted(t *testing.T) {
 			Images: []v1alpha1.OxideImage{{ID: "11111111-1111-1111-1111-111111111111"}},
 		}},
 	}
-	built, err := storage.Build("inst-test", nc)
+	built, err := storage.Build("inst-test", "launch-token", nc)
 	if err != nil {
 		t.Fatalf("building the plan: %v", err)
 	}
@@ -339,9 +305,6 @@ func TestSourcedDiskIsNeverFormatted(t *testing.T) {
 	}
 }
 
-// The CRD's patterns and the storage planner both refuse these, so reaching Config with one means
-// something got past both. It has to be an error rather than an escape: a space breaks the fstab
-// entry the script writes, and a tab breaks the table's own framing.
 func TestConfigRefusesUnrepresentableValues(t *testing.T) {
 	for name, mountPoint := range map[string]string{
 		"a space":     "/mnt/with space",
@@ -366,10 +329,6 @@ func TestConfigRefusesUnrepresentableValues(t *testing.T) {
 	}
 }
 
-// The three things the script exists for. Each replaces something udev or systemd cannot do, and
-// each would fail silently and late rather than loudly: an untuned mkfs only shows up as a slow
-// first boot, a missing seed as an agent whose binaries have vanished, a missing relabel as a
-// container runtime that cannot write.
 func TestScriptKeepsWhatSystemdCannotDo(t *testing.T) {
 	for name, want := range map[string]string{
 		"tuned mkfs":  "-E nodiscard,lazy_itable_init=1,lazy_journal_init=1",
@@ -382,9 +341,6 @@ func TestScriptKeepsWhatSystemdCannotDo(t *testing.T) {
 	}
 }
 
-// The install step is what makes the first boot synchronous, and every part of it has to be there:
-// the rules are inert until udev is told to reload, and fstab is inert until systemd regenerates its
-// mount units from it.
 func TestInstallStepAppliesEverything(t *testing.T) {
 	for _, want := range []string{
 		"udevadm control --reload",

@@ -2,9 +2,6 @@ apiVersion: v2
 name: karpenter-crd
 description: A Helm chart for the Karpenter Oxide provider Custom Resource Definitions (CRDs).
 type: application
-# Placeholder versions. `make manifests` packages the chart with
-# --version/--app-version set to the release version (the git tag), so these
-# values are never the ones published.
 version: "0.0.1"
 appVersion: "0.0.1"
 keywords:

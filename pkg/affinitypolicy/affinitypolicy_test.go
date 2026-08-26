@@ -8,8 +8,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 )
 
-// trackerAt builds a tracker on a clock the test drives, with jitter switched off so waits can be
-// compared exactly.
 func trackerAt(now *time.Time) *Tracker {
 	t := NewTracker()
 	t.now = func() time.Time { return *now }
@@ -17,8 +15,6 @@ func trackerAt(now *time.Time) *Tracker {
 	return t
 }
 
-// gate drives a nodeclass past gateThreshold and returns the window it is now gated for. The clock
-// is advanced past the first, ungated window, which is what the second refusal needs to count.
 func gate(
 	t *testing.T,
 	tracker *Tracker,
@@ -77,7 +73,6 @@ func TestAttributable(t *testing.T) {
 	}
 }
 
-// The wait doubles with each window that opens with a refusal, and caps.
 func TestRecordRefusalBacksOffExponentially(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -88,24 +83,22 @@ func TestRecordRefusalBacksOffExponentially(t *testing.T) {
 		time.Minute,
 		2 * time.Minute,
 		4 * time.Minute,
-		5 * time.Minute, // capped
+		5 * time.Minute,
 		5 * time.Minute,
 	} {
 		got, gated := tracker.RecordRefusal(ctx, "default", "refused")
 		if got != want {
 			t.Errorf("refusal %d opened a %s window, want %s", i+1, got, want)
 		}
-		// The first refusal only starts a clock; every one after it gates.
+
 		if wantGated := i+1 >= gateThreshold; gated != wantGated {
 			t.Errorf("refusal %d gated = %v, want %v", i+1, gated, wantGated)
 		}
-		// Past the window, so the next refusal opens a new one.
+
 		now = now.Add(want + time.Second)
 	}
 }
 
-// Karpenter provisions in bursts, so one unsatisfiable policy produces several refusals within a
-// moment of each other. Counting each would jump straight to the cap on the first incident.
 func TestRecordRefusalDoesNotLengthenAnOpenWindow(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -122,7 +115,6 @@ func TestRecordRefusalDoesNotLengthenAnOpenWindow(t *testing.T) {
 		}
 	}
 
-	// The window elapses and the next refusal is the second, not the seventh.
 	now = now.Add(first)
 	if got, _ := tracker.RecordRefusal(ctx, "default", "refused"); got != time.Minute {
 		t.Errorf("backoff after the window = %s, want 1m", got)
@@ -150,19 +142,16 @@ func TestStateReportsTheBackoffOnlyWhileItRuns(t *testing.T) {
 		t.Errorf("remaining = %s, want %s", got, backoff)
 	}
 
-	// The wait elapses: Ready again, so one launch probes the policy.
 	now = now.Add(backoff)
 	if _, backingOff := tracker.State("default"); backingOff {
 		t.Error("still backing off after the wait elapsed")
 	}
-	// The history survives, which is what makes the next wait longer rather than resetting to base.
+
 	if got, _ := tracker.RecordRefusal(ctx, "default", "refused"); got != 2*time.Minute {
 		t.Errorf("backoff after an elapsed wait = %s, want 2m: history should survive", got)
 	}
 }
 
-// A launch that placed is the only proof the policy is satisfiable, and it contradicts everything
-// recorded before it -- including the count that would have made the next wait longer.
 func TestRecordSuccessClearsTheHistory(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -199,8 +188,6 @@ func TestHistoryAgesOut(t *testing.T) {
 	}
 }
 
-// The whole point of keying by nodeclass: one nodeclass's unsatisfiable policy says nothing about
-// another's, and must not hold it out of provisioning.
 func TestBackoffIsScopedToTheNodeclass(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -227,9 +214,6 @@ func TestForgetDropsTheHistory(t *testing.T) {
 	}
 }
 
-// One refusal is not a verdict. It opens a window the provisioner keeps retrying through, and the
-// nodeclass stays Ready for it, because holding a nodeclass out of provisioning on a single
-// possibly-misattributed refusal is the consequence worth being slow about.
 func TestOneRefusalDoesNotGate(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -246,8 +230,6 @@ func TestOneRefusalDoesNotGate(t *testing.T) {
 	}
 }
 
-// The case the threshold exists for: a launch that raced a node being deleted. The retry succeeds,
-// the history clears, and the nodeclass was never held out of provisioning at all.
 func TestARacingRefusalNeverGates(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)
@@ -256,21 +238,18 @@ func TestARacingRefusalNeverGates(t *testing.T) {
 	if _, gated := tracker.RecordRefusal(ctx, "default", "refused"); gated {
 		t.Fatal("the first refusal gated")
 	}
-	// A retry inside the window places, which is what a race looks like resolving itself.
+
 	tracker.RecordSuccess(ctx, "default")
 
 	if _, backingOff := tracker.State("default"); backingOff {
 		t.Error("backing off after the refusal turned out to be a race")
 	}
-	// And the next incident starts from scratch rather than gating immediately.
+
 	if _, gated := tracker.RecordRefusal(ctx, "default", "refused"); gated {
 		t.Error("a later first refusal gated, so the race was counted against it")
 	}
 }
 
-// A burst must not satisfy the threshold on its own. Karpenter provisions several NodeClaims at
-// once, so if each of their refusals counted, one incident would gate immediately and the grace
-// window would never do anything.
 func TestABurstDoesNotSatisfyTheThreshold(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	tracker := trackerAt(&now)

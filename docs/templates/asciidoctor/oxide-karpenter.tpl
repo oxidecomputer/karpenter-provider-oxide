@@ -10,16 +10,10 @@
 [.lead]
 Karpenter Provider Oxide launches Kubernetes nodes on an Oxide rack.
 
-`OxideNodeClass` describes the Oxide-specific configuration used by a Karpenter `NodePool`, including bootstrap, image and subnet selection, storage, SSH keys, external IPs, and affinity.
-
-NOTE: The provider API is currently `karpenter.oxide.computer/v1alpha1`.
-Treat compatibility guarantees accordingly.
-
 [id="oxide-node-class"]
 == OxideNodeClass
 
-Reference an `OxideNodeClass` from `spec.template.spec.nodeClassRef` on a Karpenter `NodePool`.
-The selected image, subnet, and other Oxide resources must already exist.
+Reference an `OxideNodeClass` from a Karpenter `NodePool`.
 
 [source,yaml]
 ----
@@ -34,29 +28,16 @@ spec:
   kubeletArgs:
     - cloud-provider=external
   bootstrap:
-    rke2:
-      tokenRef:
-        name: rancher-agent-token
-        namespace: kube-system
-        key: token
+    kubeadm: {}
   imageSelector:
-    - name: rke2-ubuntu-*
-      project: my-project
+    - id: IMAGE_ID
   subnetSelector:
     - vpcName: default
       project: my-project
 ----
 
-Selectors resolve existing Oxide resources; where a selector matches multiple images, the most recently uploaded image is used.
-Leave `server` unset to discover the Kubernetes API endpoint from the `default/kubernetes` EndpointSlice.
-Exactly one bootstrap provider, `rke2` or `kubeadm`, must be configured.
-
-See xref:{anchor_prefix}-github-com-oxidecomputer-karpenter-provider-oxide-pkg-apis-v1alpha1-oxidenodeclassspec[OxideNodeClassSpec] for every field, default, and validation rule.
-
 [id="{p}-api-reference"]
 == API reference
-
-This section is generated from the Go types and comments in `pkg/apis/v1alpha1`.
 
 .Packages
 {{- range $groupVersions }}

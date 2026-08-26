@@ -24,11 +24,9 @@ const (
 	groupID    = "22222222-0000-4000-8000-000000000002"
 )
 
-// memberAPI is enough of the Oxide API to serve a membership removal. gone makes the group answer
-// 404, which is what the group already having been deleted looks like.
 type memberAPI struct {
 	gone bool
-	// deletes are the "<group>/<instance>" pairs the controller asked to remove.
+
 	deletes []string
 }
 
@@ -62,14 +60,11 @@ func (f *memberAPI) server(t *testing.T) *oxide.Client {
 	return oxideClient
 }
 
-// testScheme is the client-go global scheme, which both this provider's types and karpenter's
-// register themselves with in their package inits.
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	return scheme.Scheme
 }
 
-// nodeClaim is a launched NodeClaim recording one anti-affinity group membership.
 func nodeClaim(groups string) *karpv1.NodeClaim {
 	claim := &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
@@ -88,9 +83,6 @@ func nodeClaim(groups string) *karpv1.NodeClaim {
 	return claim
 }
 
-// The scenario the managed group is removed from a nodeclass produces: the desired set is empty, the
-// node's membership is dropped, and the record of it has to go with it. Anything left behind is a
-// group ID asserted on a node that is not in it, which is what drift is decided against.
 func TestReconcileClearsTheAnnotationWhenNothingIsDesired(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
@@ -122,9 +114,6 @@ func TestReconcileClearsTheAnnotationWhenNothingIsDesired(t *testing.T) {
 	}
 }
 
-// The nodeclass controller deletes a managed group as soon as it is empty, so the group can be gone
-// by the time this runs. A membership that cannot be found is the state being asked for, so the
-// record still has to be cleared.
 func TestReconcileClearsTheAnnotationWhenTheGroupIsAlreadyGone(t *testing.T) {
 	api := &memberAPI{gone: true}
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
@@ -150,8 +139,6 @@ func TestReconcileClearsTheAnnotationWhenTheGroupIsAlreadyGone(t *testing.T) {
 	}
 }
 
-// A group still in the desired set is left alone. Additions are the launch's business, and this
-// controller never touches a membership the nodeclass still wants.
 func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{
@@ -190,8 +177,6 @@ func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 	}
 }
 
-// node is the registered Node for the NodeClaim, carrying whatever copy of the record core's
-// registration controller assigned onto it.
 func node(groups string) *corev1.Node {
 	n := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
@@ -203,8 +188,6 @@ func node(groups string) *corev1.Node {
 	return n
 }
 
-// clientFor builds a fake client with the spec.providerID index karpenter's operator registers on
-// Nodes, which is what NodeForNodeClaim looks a node up through.
 func clientFor(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().
@@ -230,9 +213,6 @@ func nodeAnnotation(t *testing.T, kubeClient client.Client) (string, bool) {
 	return value, ok
 }
 
-// The Node carries a copy of the record because core assigns every NodeClaim annotation onto it at
-// registration and only ever adds. So clearing the NodeClaim has to clear the Node too, or the node
-// goes on asserting a membership it no longer has.
 func TestReconcileClearsTheAnnotationFromTheNodeToo(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
@@ -250,8 +230,6 @@ func TestReconcileClearsTheAnnotationFromTheNodeToo(t *testing.T) {
 	}
 }
 
-// The state a cluster is left in by a build that cleared the NodeClaim and not the Node: nothing left
-// to remove, and a stale copy on the Node that only this controller will ever correct.
 func TestReconcileClearsAStaleNodeAnnotationWithNothingOnTheNodeClaim(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
@@ -275,7 +253,6 @@ func TestReconcileClearsAStaleNodeAnnotationWithNothingOnTheNodeClaim(t *testing
 	}
 }
 
-// A membership still wanted is left on both objects, and neither is patched.
 func TestReconcileLeavesTheNodeAloneWhenTheMembershipIsStillDesired(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{

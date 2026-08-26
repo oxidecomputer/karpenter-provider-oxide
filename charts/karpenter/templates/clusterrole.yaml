@@ -1,10 +1,3 @@
-{{/*
-Cluster-scoped permissions.
-
-These are the only rules that genuinely need cluster scope: Karpenter schedules against every pod
-and node in the cluster, and OxideNodeClass is a cluster-scoped resource. Everything the bootstrap
-providers need is namespaced and lives in role.yaml, restricted to specific objects by name.
-*/}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,7 +9,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Read
   - apiGroups: ["karpenter.sh"]
     resources: ["nodepools", "nodepools/status", "nodeclaims", "nodeclaims/status", "nodeoverlays", "nodeoverlays/status"]
     verbs: ["get", "list", "watch"]
@@ -35,7 +27,6 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch"]
-  # Write
   - apiGroups: ["karpenter.sh"]
     resources: ["nodeclaims", "nodeclaims/status", "nodeclaims/finalizers"]
     verbs: ["create", "delete", "update", "patch"]
@@ -49,9 +40,6 @@ rules:
     resources: ["nodes"]
     verbs: ["create", "patch", "delete", "update"]
   {{- if .Values.settings.inventory.enabled }}
-  # Sled inventory records sled health as a Node status condition, which is a separate subresource
-  # from the Node itself. Only granted when inventory is enabled, since nothing else here writes
-  # node status.
   - apiGroups: [""]
     resources: ["nodes/status"]
     verbs: ["patch", "update"]
@@ -96,9 +84,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # OxideNodeClass is cluster-scoped. The controller reads the spec, writes status, and owns a
-  # finalizer that holds the object until the Oxide affinity groups it created have been deleted, so
-  # it is deliberately granted patch but not create or delete on the resource users author.
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses"]
     verbs: ["get", "list", "watch", "patch", "update"]
@@ -108,8 +93,6 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses/status"]
     verbs: ["update", "patch"]
-  # OxideCapacity is the opposite: nobody authors it, the controller publishes it, so create is granted
-  # here and not to users. Delete is deliberately absent; the singleton is republished in place.
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidecapacities"]
     verbs: ["get", "list", "watch", "create"]

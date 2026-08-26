@@ -9,8 +9,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// oxideName is what the Oxide API accepts as a name: lowercase alphanumerics and hyphens, starting
-// with a letter, not ending in a hyphen, at most 63 characters.
 var oxideName = regexp.MustCompile(`^[a-z]([a-z0-9-]*[a-z0-9])?$`)
 
 func set(t *testing.T, name string, opts ...func(*v1alpha1.DiskSet)) v1alpha1.DiskSet {
@@ -41,18 +39,17 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 	}
 }
 
+const testToken = "launch-token"
+
 func mustBuild(t *testing.T, instance string, nc *v1alpha1.OxideNodeClass) Plan {
 	t.Helper()
-	plan, err := Build(instance, nc)
+	plan, err := Build(instance, testToken, nc)
 	if err != nil {
 		t.Fatalf("Build(%q) returned an unexpected error: %v", instance, err)
 	}
 	return plan
 }
 
-// Every disk name a plan can produce has to be at least as long as the serial window, because the
-// guest matches the serial as a plain string. A shorter name would be padded by the NVMe layer and
-// the guest would have to know to strip the padding.
 func TestSerialIsAlwaysExactlyTwentyBytes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -102,10 +99,8 @@ func TestSerialIsAlwaysExactlyTwentyBytes(t *testing.T) {
 	}
 }
 
-// The uniqueness byte has to sit inside the serial window at a position nothing a user writes can
-// move. This is the invariant the whole naming scheme exists to hold.
 func TestIndexAlwaysLandsInsideTheSerialWindow(t *testing.T) {
-	const indexOffset = 16 // zero-based: byte 17
+	const indexOffset = 16
 
 	for _, setName := range []string{"abc", "local-pv", strings.Repeat("z", 20)} {
 		t.Run(setName, func(t *testing.T) {
@@ -127,11 +122,8 @@ func TestIndexAlwaysLandsInsideTheSerialWindow(t *testing.T) {
 	}
 }
 
-// A collision would cost the node a disk silently, so it must be an error on the launch.
 func TestBuildRejectsCollidingSerials(t *testing.T) {
-	// Two sets whose names agree in their first two characters still differ, because the index byte
-	// precedes the name. Force a genuine collision by planning a boot disk whose name collides with
-	// a data disk instead.
+
 	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t,
 		set(t, "kubernetes", func(s *v1alpha1.DiskSet) { s.Count = 7 }),
 	))
@@ -143,7 +135,6 @@ func TestBuildRejectsCollidingSerials(t *testing.T) {
 		seen[disk.Serial] = disk.Name
 	}
 
-	// And assert the guard itself fires when handed a plan that does collide.
 	colliding := Plan{
 		Boot: Disk{Name: "boot", Serial: "same"},
 		Sets: []Set{{Disks: []Disk{{Name: "data", Serial: "same"}}}},
@@ -191,20 +182,57 @@ func TestBuildIsDeterministic(t *testing.T) {
 		t.Errorf("Build is not deterministic:\n got %q\nwant %q", got, want)
 	}
 	other := mustBuild(t, "karpenter-default-y8m3q", nc)
-	if other.DataPrefix == first.DataPrefix {
-		t.Errorf("two instances share the data prefix %q", first.DataPrefix)
+	if other.Prefix == first.Prefix {
+		t.Errorf("two instances share the disk prefix %q", first.Prefix)
 	}
 }
 
-// The boot disk deliberately keeps the instance's own name, so a teardown that has nothing but the
-// NodeClaim name can still find it.
-func TestBootDiskKeepsTheInstanceName(t *testing.T) {
-	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t))
-	if got, want := plan.Boot.Name, "karpenter-default-x7k2p"; got != want {
-		t.Errorf("boot disk name = %q, want %q", got, want)
+func TestBuildNamesDisksPerLaunchAttempt(t *testing.T) {
+	nc := nodeClass(t, set(t, "kubernetes", func(s *v1alpha1.DiskSet) { s.Count = 3 }))
+
+	first, err := Build("karpenter-default-x7k2p", "attempt-1", nc)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.HasPrefix(plan.Boot.Name, dataPrefix) {
-		t.Errorf("boot disk name %q collides with the data disk prefix", plan.Boot.Name)
+	retry, err := Build("karpenter-default-x7k2p", "attempt-2", nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if retry.Prefix == first.Prefix {
+		t.Fatalf("both attempts named their disks %q, want a prefix per attempt", first.Prefix)
+	}
+	reused := map[string]struct{}{}
+	for _, name := range first.Names() {
+		reused[name] = struct{}{}
+	}
+	for _, name := range retry.Names() {
+		if _, ok := reused[name]; ok {
+			t.Errorf("the retry would take over the first attempt's disk %q", name)
+		}
+	}
+}
+
+func TestBuildRequiresALaunchToken(t *testing.T) {
+	if _, err := Build("karpenter-default-x7k2p", "", nodeClass(t)); err == nil {
+		t.Error("Build() accepted an empty launch token, want it refused")
+	}
+}
+
+func TestBootDiskIsNamedFromTheLaunchPrefix(t *testing.T) {
+	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t, set(t, "kubernetes")))
+
+	if !strings.HasPrefix(plan.Boot.Name, plan.Prefix) {
+		t.Errorf("boot disk name %q is not under the launch prefix %q", plan.Boot.Name, plan.Prefix)
+	}
+	if strings.Contains(plan.Boot.Name, "karpenter-default-x7k2p") {
+		t.Errorf("boot disk name %q still carries the instance name", plan.Boot.Name)
+	}
+
+	for _, disk := range plan.Data() {
+		if disk.Name == plan.Boot.Name || disk.Serial == plan.Boot.Serial {
+			t.Errorf("data disk %q collides with the boot disk %q", disk.Name, plan.Boot.Name)
+		}
 	}
 }
 
@@ -282,8 +310,6 @@ func TestMountResolution(t *testing.T) {
 	}
 }
 
-// A raw block disk must never end up with a mount point, and a mounted disk must never end up with a
-// link. The renderer switches on exactly this.
 func TestRawBlockAndMountedAreMutuallyExclusive(t *testing.T) {
 	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t,
 		set(t, "raw", func(s *v1alpha1.DiskSet) {
@@ -304,7 +330,6 @@ func TestRawBlockAndMountedAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// Nested mounts have to be established outermost first or the inner mount is hidden.
 func TestMountOrderPutsParentsFirst(t *testing.T) {
 	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t,
 		set(t, "inner", func(s *v1alpha1.DiskSet) {
@@ -346,7 +371,11 @@ func TestBuildRejectsUnsafeMountTargets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Build("karpenter-default-x7k2p", nodeClass(t, tt.set)); err == nil {
+			if _, err := Build(
+				"karpenter-default-x7k2p",
+				testToken,
+				nodeClass(t, tt.set),
+			); err == nil {
 				t.Error("Build accepted an unsafe mount target")
 			}
 		})
@@ -354,7 +383,7 @@ func TestBuildRejectsUnsafeMountTargets(t *testing.T) {
 }
 
 func TestBuildRejectsTooManyDisks(t *testing.T) {
-	_, err := Build("karpenter-default-x7k2p", nodeClass(t,
+	_, err := Build("karpenter-default-x7k2p", testToken, nodeClass(t,
 		set(t, "aaa", func(s *v1alpha1.DiskSet) { s.Count = 4 }),
 		set(t, "bbb", func(s *v1alpha1.DiskSet) { s.Count = 4 }),
 	))
@@ -370,14 +399,14 @@ func TestBuildRejectsAnUnresolvedSource(t *testing.T) {
 	nc := nodeClass(t, set(t, "sourced", func(s *v1alpha1.DiskSet) {
 		s.ImageSelector = []v1alpha1.ImageSelector{{Name: "some-image"}}
 	}))
-	if _, err := Build("karpenter-default-x7k2p", nc); err == nil {
+	if _, err := Build("karpenter-default-x7k2p", testToken, nc); err == nil {
 		t.Fatal("Build accepted a sourced diskSet whose selector had not resolved")
 	}
 
 	nc.Status.Storage = &v1alpha1.StorageStatus{
 		DiskSets: []v1alpha1.DiskSetStatus{{Name: "sourced"}},
 	}
-	if _, err := Build("karpenter-default-x7k2p", nc); err == nil {
+	if _, err := Build("karpenter-default-x7k2p", testToken, nc); err == nil {
 		t.Fatal("Build accepted a sourced diskSet that resolved to no images")
 	}
 }
@@ -393,7 +422,7 @@ func TestBuildRejectsADiskSmallerThanItsSource(t *testing.T) {
 			Images: []v1alpha1.OxideImage{{ID: "img", SizeBytes: 100 << 30}},
 		}},
 	}
-	_, err := Build("karpenter-default-x7k2p", nc)
+	_, err := Build("karpenter-default-x7k2p", testToken, nc)
 	if err == nil {
 		t.Fatal("Build accepted a disk smaller than the image it is created from")
 	}
@@ -402,8 +431,6 @@ func TestBuildRejectsADiskSmallerThanItsSource(t *testing.T) {
 	}
 }
 
-// Local disks are excluded from the storage quota pre-check, because the Oxide API gives no way to
-// know whether they are charged to it, and over-counting refuses launches the rack would accept.
 func TestDistributedBytesExcludesLocalDisks(t *testing.T) {
 	plan := mustBuild(t, "karpenter-default-x7k2p", nodeClass(t,
 		set(t, "distributed", func(s *v1alpha1.DiskSet) {

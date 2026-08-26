@@ -33,9 +33,6 @@ const (
 	groupIDB  = "77777777-0000-4000-8000-000000000002"
 )
 
-// testDrifters is the drifter set main.go wires, in the same order, since which reason wins when
-// several apply is that order. Constructed with no Oxide client because deciding drift never calls
-// the API: it compares the launch record against the nodeclass's published status.
 func testDrifters() []providers.Drifter {
 	return []providers.Drifter{
 		image.NewProvider(nil, 0),
@@ -46,9 +43,6 @@ func testDrifters() []providers.Drifter {
 	}
 }
 
-// launched is a NodeClaim carrying the full launch record a current launch leaves behind, matching
-// the nodeclass built by resolved(). Each case then perturbs one side of one comparison, so what a
-// test is about is the difference from this pair rather than the whole of both.
 func launched(hash string) *karpv1.NodeClaim {
 	return &karpv1.NodeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -76,8 +70,6 @@ func launched(hash string) *karpv1.NodeClaim {
 	}
 }
 
-// resolved is the nodeclass the launch above came from: stamped with its hash, and publishing exactly
-// the resolved state the record names.
 func resolved(hash string) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -287,8 +279,6 @@ func TestIsDrifted(t *testing.T) {
 	}
 }
 
-// A nodeclass that has been deleted is on its way to taking its nodes with it, so there is nothing to
-// compare and nothing a replacement would achieve.
 func TestIsDriftedWithoutANodeClass(t *testing.T) {
 	c := &OxideCloudProvider{
 		kubeClient: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
@@ -304,9 +294,6 @@ func TestIsDriftedWithoutANodeClass(t *testing.T) {
 	}
 }
 
-// The hash covers what a launch fixes into an instance, and nothing that is only selected. A selector
-// rewritten to name the resource it already matched must not read as a spec edit, or every nodeclass
-// tidied up in place would replace its fleet.
 func TestHashIgnoresSelectors(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -330,8 +317,6 @@ func TestHashIgnoresSelectors(t *testing.T) {
 	}
 }
 
-// Every field the hash does cover, one at a time, since a field silently left out of it is a spec
-// edit that replaces nothing and reports nothing.
 func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -466,16 +451,11 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 	}
 }
 
-// resourceQuantity keeps the disk cases readable; a parse failure here is a broken test rather than a
-// condition worth handling.
 func resourceQuantity(value string) *resource.Quantity {
 	quantity := resource.MustParse(value)
 	return &quantity
 }
 
-// The boot disk size has to hash as the size it is rather than as the way it was written, since a
-// quantity that has been through the API server comes back carrying a format the author never chose.
-// Otherwise the same nodeclass hashes two ways and every node reads as drifted.
 func TestHashIsStableAcrossQuantityFormats(t *testing.T) {
 	binary := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -500,9 +480,6 @@ func TestHashIsStableAcrossQuantityFormats(t *testing.T) {
 	}
 }
 
-// Reordering diskSets changes the disk names a launch mints, but it does not change anything about
-// the node those disks make, so it must not replace the fleet. This is the asymmetry the storage
-// fingerprint is built around, and it is easy to break by switching to a reflected hash.
 func TestHashIgnoresDiskSetOrder(t *testing.T) {
 	first := v1alpha1.DiskSet{
 		Name: "aaa", Type: v1alpha1.DiskSetTypeDistributed, Count: 1,
@@ -529,9 +506,6 @@ func TestHashIgnoresDiskSetOrder(t *testing.T) {
 	}
 }
 
-// A nodeclass that has been through the API server must hash the same as the one that was written,
-// or every node reads as drifted the first time the object is re-read. resource.Quantity is the trap
-// here: it comes back carrying a format the author never chose.
 func TestHashSurvivesARoundTrip(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{

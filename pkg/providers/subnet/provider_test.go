@@ -23,8 +23,6 @@ const (
 	subnetIDB = "44444444-0000-4000-8000-000000000002"
 )
 
-// fakeAPI is the Oxide subnet and VPC API, counting what was asked of it so that a cache hit can be
-// asserted as the absence of a call.
 type fakeAPI struct {
 	subnets  []oxide.VpcSubnet
 	lists    int
@@ -76,8 +74,6 @@ func fakeSubnets() []oxide.VpcSubnet {
 	}
 }
 
-// byVPCID is a selector naming the VPC by ID, so that the VPC's name has to be recovered from the
-// API rather than being taken from the selector.
 func byVPCID() *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -98,8 +94,7 @@ func TestResolveReturnsTheSubnetsWithTheirVPCName(t *testing.T) {
 		t.Fatalf("Resolve() matched %d subnets, want 2", len(got.Resolved))
 	}
 	for _, resolved := range got.Resolved {
-		// A launch creates the interface against a VPC by name, so a subnet resolved without one
-		// would resolve into a nodeclass that cannot launch.
+
 		if resolved.VPCName != "prod" {
 			t.Errorf(
 				"Resolve() subnet %q VPC name = %q, want the VPC's name",
@@ -110,7 +105,6 @@ func TestResolveReturnsTheSubnetsWithTheirVPCName(t *testing.T) {
 	}
 }
 
-// A selector that names the VPC already knows the name, so nothing has to look it up.
 func TestASelectorNamingTheVPCNeedsNoLookup(t *testing.T) {
 	api := &fakeAPI{subnets: fakeSubnets()}
 	provider := NewProvider(api.server(t), time.Hour)
@@ -146,12 +140,9 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// The VPC name is cached by ID, so re-resolving the subnets does not re-read the VPC. This is the
-// call that used to be made once per resolved subnet per reconcile.
 func TestTheVPCNameIsLookedUpOncePerVPC(t *testing.T) {
 	api := &fakeAPI{subnets: fakeSubnets()}
-	// A zero TTL on the resolution forces the subnets to be listed again every time, which is what
-	// makes this a claim about the VPC name cache rather than about the subnet one.
+
 	provider := NewProvider(api.server(t), 0)
 	provider.vpcName = newVPCNameCache(time.Hour)
 	class := byVPCID()
@@ -172,8 +163,6 @@ func TestTheVPCNameIsLookedUpOncePerVPC(t *testing.T) {
 	}
 }
 
-// An edited selector is a different question, so it gets its own reading rather than the previous
-// answer. This is the whole of cache invalidation on a spec edit.
 func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 	api := &fakeAPI{subnets: fakeSubnets()}
 	provider := NewProvider(api.server(t), time.Hour)
@@ -222,8 +211,7 @@ func TestDriftReason(t *testing.T) {
 			desired:  []v1alpha1.OxideSubnet{{ID: subnetID}},
 		},
 		{
-			// Membership, not equality: a launch picks one of the selected subnets, so every node is
-			// in a different subnet from some of its peers by design.
+
 			name:     "a subnet added to the set drifts nothing",
 			recorded: subnetID,
 			desired:  []v1alpha1.OxideSubnet{{ID: subnetID}, {ID: subnetIDB}},

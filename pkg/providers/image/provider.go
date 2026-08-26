@@ -1,10 +1,4 @@
-// Package image resolves a nodeclass's image selectors into the images it would launch from, and
-// decides whether a node running an older one has drifted.
-//
-// Resolution is cached because the selectors are re-evaluated on every reconcile and two nodeclasses
-// selecting the same images should not each list the project's images. The cache does not decide how
-// soon a newly uploaded image is picked up -- its window is shorter than the resync, so every resync
-// lists again; see providers.CoalesceWindow.
+// Package image resolves image selectors and drift.
 package image
 
 import (
@@ -34,21 +28,12 @@ type Provider struct {
 	cache *resolver.Cache[[]v1alpha1.OxideImage]
 }
 
-// NewProvider returns a provider that re-resolves a nodeclass's images once its reading is older
-// than ttl.
-//
-// No project is taken, unlike the other providers: an image selector carries its own project, and an
-// image with no project is a silo image, so there is nothing left for a provider-wide project to
-// scope.
+// NewProvider returns a provider that re-resolves a nodeclass's images once its reading is older than ttl.
 func NewProvider(ox *oxide.Client, ttl time.Duration) *Provider {
 	return &Provider{ox: ox, cache: resolver.NewCache[[]v1alpha1.OxideImage]("image", ttl)}
 }
 
 // Resolve returns the images the nodeclass's selectors match, newest first.
-//
-// The whole matched set is returned rather than only the image that will launch. Which images lost
-// is what makes a wildcard selector auditable from the nodeclass, and the caller decides how many of
-// them are worth the object size.
 func (p *Provider) Resolve(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -56,13 +41,7 @@ func (p *Provider) Resolve(
 	return p.ResolveSelectors(ctx, nodeClass.Spec.ImageSelector)
 }
 
-// ResolveSelectors is Resolve for a selector list that is not the nodeclass's boot image selector,
-// which is what a diskSet carries.
-//
-// Taking the selectors rather than the nodeclass is what keeps the cache key over exactly the
-// question being asked: a fingerprint must never be taken over a whole nodeclass, and there can be
-// several diskSets each with their own selector. It also means two selectors that happen to be
-// identical share one cache entry and one listing between them.
+// ResolveSelectors is Resolve for a selector list that is not the nodeclass's boot image selector.
 func (p *Provider) ResolveSelectors(
 	ctx context.Context,
 	selectors []v1alpha1.ImageSelector,
@@ -81,43 +60,36 @@ func (p *Provider) ResolveSelectors(
 		return Result{}, err
 	}
 	result := Result{
-		// Cloned because the cache keeps serving this reading and the caller publishes it into an
-		// object it then patches. Single-digit slices, so the copy costs nothing worth reasoning
-		// about, whereas handing out the cache's own backing array does.
+
 		Resolved: slices.Clone(entry.Value),
 		Age:      entry.Age(time.Now()),
 		Stale:    entry.Stale,
 	}
-	// Nothing here records which selector matched which image, so a resolution that found nothing
-	// reports every selector as unmatched: with no images at all, every one of them missed.
+
 	if len(result.Resolved) == 0 {
 		result.Unmatched = selectors
 	}
 	return result, nil
 }
 
-// resolve evaluates the selectors against the Oxide API. An ID, or a name with no "*", is looked up
-// directly because that is the only form the API can resolve; everything else is matched against a
-// listing.
 func (p *Provider) resolve(
 	ctx context.Context,
 	imageSelectors []v1alpha1.ImageSelector,
 ) ([]v1alpha1.OxideImage, error) {
 	var resolvedImages []oxide.Image
 	var listImageSelector []v1alpha1.ImageSelector
-	// Check for direct query images via name or ID
+
 	for _, imageSelector := range imageSelectors {
 		nameOrID := ""
 		project := imageSelector.Project
 		if imageSelector.ID != "" {
 			nameOrID = imageSelector.ID
-			// project cannot be used to query if ID is used
+
 			project = ""
 		} else if imageSelector.Name != "" && !strings.Contains(imageSelector.Name, "*") {
 			nameOrID = imageSelector.Name
 		} else {
-			// A wildcard name is not a name the API can look up, so it is resolved by listing and
-			// matching like the other non-exact terms.
+
 			listImageSelector = append(listImageSelector, imageSelector)
 			continue
 		}
@@ -139,8 +111,6 @@ func (p *Provider) resolve(
 		resolvedImages = append(resolvedImages, *image)
 	}
 
-	// No listImageSelector has an ID or an exact name, else it would have been looked up via a direct query (ImageView).
-	// To efficiently make API calls, we now group by project.
 	projectToSelectors := lo.GroupBy(
 		listImageSelector,
 		func(selector v1alpha1.ImageSelector) string { return selector.Project },
@@ -170,8 +140,6 @@ func (p *Provider) resolve(
 	}
 	resolvedImages = lo.Uniq(resolvedImages)
 
-	// Sort by TimeCreate in descending order
-	// Secondary sort is on ID which is guaranteed to be unique
 	slices.SortStableFunc(resolvedImages, func(a, b oxide.Image) int {
 		if b.TimeCreated.Compare(*a.TimeCreated) == 0 {
 			return strings.Compare(b.Id, a.Id)
@@ -192,8 +160,7 @@ func (p *Provider) resolve(
 	}), nil
 }
 
-// DescribeSelectors renders image selectors back as the terms they were written with, so the
-// ImagesResolved condition can say what was looked for rather than only that nothing was found.
+// DescribeSelectors renders image selectors back as the terms they were written with.
 func DescribeSelectors(selectors []v1alpha1.ImageSelector) string {
 	if len(selectors) == 0 {
 		return "no image selectors are configured"
@@ -219,16 +186,7 @@ func DescribeSelectors(selectors []v1alpha1.ImageSelector) string {
 	return "no images matched " + strings.Join(described, " or ")
 }
 
-// DriftReason compares the image the instance booted from against the one the nodeclass would launch
-// now, which is the first of the resolved images.
-//
-// Only the first: the runners-up are reported so a wildcard selector can be understood, not because a
-// node is entitled to any of them. Nodes are consequently rolled onto a newly uploaded image that a
-// wildcard matches, which is the point of writing a wildcard rather than pinning a version.
-//
-// An empty resolved list is not drift. It is a resolution that found nothing, already reported as
-// ImagesResolved being false, and replacing the fleet over it would take every node down to launch
-// replacements that cannot launch.
+// DriftReason compares the image the instance booted from against the one the nodeclass would launch now.
 func (p *Provider) DriftReason(
 	nodeClaim *karpv1.NodeClaim,
 	nodeClass *v1alpha1.OxideNodeClass,

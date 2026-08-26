@@ -18,14 +18,7 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// HashController stamps the nodeclass with the hash of its launch-time configuration, which is the
-// value a NodeClaim's own recorded hash is compared against to decide static drift.
-//
-// Separate from the reconciler that resolves status because the two must not share a fate. A launch
-// records the hash it computed from the nodeclass it read, so if the nodeclass's own annotation could
-// only be written by a reconcile that also had to reach the Oxide API and the cluster's
-// EndpointSlices, then any failure in those would leave the stamp behind the spec -- and every node
-// launched in the meantime would read as drifted from a nodeclass that had simply not caught up.
+// HashController stamps the nodeclass with the hash of its launch-time configuration.
 type HashController struct {
 	kubeClient client.Client
 }
@@ -44,20 +37,12 @@ func (h *HashController) Reconcile(
 ) (reconcile.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", h.Name()))
 
-	// A nodeclass on its way out has no configuration worth stamping, and its nodes are going with
-	// it. Drift on a node that is already being torn down changes nothing about what happens to it.
 	if !nodeClass.DeletionTimestamp.IsZero() {
 		return reconcile.Result{}, nil
 	}
 
 	stored := nodeClass.DeepCopy()
 
-	// Before the new stamp is written, not after. A NodeClaim carrying a hash from a different
-	// version cannot be compared against this one -- the same configuration hashes differently
-	// across versions -- so it is brought up to the current version first. That covers the initial
-	// rollout as well as a version bump: a nodeclass with no annotations at all is at "", so every
-	// node that predates this controller adopts the current hash rather than reading as drifted
-	// against a value it never had the chance to record.
 	if nodeClass.Annotations[v1alpha1.AnnotationOxideNodeClassHashVersion] != v1alpha1.OxideNodeClassHashVersion {
 		if err := h.updateNodeClaimHashes(ctx, nodeClass); err != nil {
 			return reconcile.Result{}, err
@@ -77,12 +62,6 @@ func (h *HashController) Reconcile(
 	return reconcile.Result{}, nil
 }
 
-// updateNodeClaimHashes brings every NodeClaim of this nodeclass onto the current hash version.
-//
-// The hash a NodeClaim recorded at an older version says nothing about whether its configuration
-// still matches, so it is replaced with the nodeclass's current hash rather than compared against it.
-// A NodeClaim that is already marked drifted keeps what it has: it was found drifted while the two
-// were comparable, and re-stamping it now would erase a finding this version cannot reproduce.
 func (h *HashController) updateNodeClaimHashes(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -116,8 +95,6 @@ func (h *HashController) updateNodeClaimHashes(
 	return nil
 }
 
-// ownedBy is whether a NodeClaim was launched from this nodeclass. The group is checked as well as
-// the name, since nothing stops another provider's nodeclass from sharing a name with this one.
 func ownedBy(nodeClaim *karpv1.NodeClaim, nodeClass *v1alpha1.OxideNodeClass) bool {
 	ref := nodeClaim.Spec.NodeClassRef
 	if ref == nil {

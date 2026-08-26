@@ -16,8 +16,6 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// nodeClass is a kubeadm nodeclass with discovery information already resolved, since UserData
-// refuses to render without it.
 func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 	t.Helper()
 	return &v1alpha1.OxideNodeClass{
@@ -44,7 +42,7 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 	t.Helper()
 	nc := nodeClass(t, sets...)
-	// The bootstrapper mints a bootstrap-token Secret, so the fake client is both reader and writer.
+
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 
 	req := bootstrap.Request{
@@ -52,7 +50,7 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 		Hostname:  "karpenter-default-x7k2p",
 	}
 	if len(sets) > 0 {
-		plan, err := storage.Build("karpenter-default-x7k2p", nc)
+		plan, err := storage.Build("karpenter-default-x7k2p", "launch-token", nc)
 		if err != nil {
 			t.Fatalf("unable to build a plan: %v", err)
 		}
@@ -74,7 +72,6 @@ func localPVSet(t *testing.T) v1alpha1.DiskSet {
 	}
 }
 
-// A nodeclass with no diskSets must render the script it rendered before disk support existed.
 func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	out := userDataFor(t)
 	if !strings.HasPrefix(
@@ -91,7 +88,6 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	}
 }
 
-// The same anti-race requirement as RKE2: disks before the config, config before the join.
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 
@@ -115,8 +111,6 @@ func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	}
 }
 
-// kubeadm starts the kubelet through systemd, so the drop-in goes on kubelet.service. Writing it
-// before the join is what makes systemd pick it up when the unit is first loaded.
 func TestUserDataOrdersAgainstTheKubeletUnit(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 	dropIn := strings.Index(out, "/etc/systemd/system/kubelet.service.d/10-karpenter-disks.conf")
@@ -131,8 +125,6 @@ func TestUserDataOrdersAgainstTheKubeletUnit(t *testing.T) {
 	}
 }
 
-// The join configuration is written inside a heredoc delimited by EOF, so a bare EOF line in the
-// disk block would truncate the user-data and the node would never join.
 func TestUserDataHeredocsAreNotShadowed(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 	if got := strings.Count(out, "\nEOF\n"); got != 1 {

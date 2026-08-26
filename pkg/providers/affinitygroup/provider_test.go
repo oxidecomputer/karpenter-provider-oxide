@@ -58,11 +58,7 @@ const (
 	project  = "prod"
 )
 
-// fakeAPI is both halves of the Oxide group API -- affinity and anti-affinity -- counting what was
-// asked of it so that a cache hit can be asserted as the absence of a call.
 type fakeAPI struct {
-	// antiAffinity are the project's anti-affinity groups, which is the non-experimental half and
-	// the one every case here uses.
 	antiAffinity []oxide.AntiAffinityGroup
 	lists        int
 	views        int
@@ -89,8 +85,6 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			}
 			writeJSON(t, w, http.StatusNotFound, map[string]string{"error_code": "ObjectNotFound"})
 
-		// Both kinds are resolved and swept, so the experimental affinity half is asked about too.
-		// It has nothing in it in these cases.
 		case r.Method == http.MethodGet && strings.Contains(path, "affinity-groups"):
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
 
@@ -124,9 +118,6 @@ func fakeGroups() []oxide.AntiAffinityGroup {
 	}
 }
 
-// selecting is a nodeclass selecting anti-affinity groups by the given names, and nothing else. A
-// wildcard is used so the resolution goes through the list rather than a direct view, which is the
-// path that costs an API call worth caching.
 func selecting(names ...string) *v1alpha1.OxideNodeClass {
 	class := &v1alpha1.OxideNodeClass{
 		ObjectMeta: metav1.ObjectMeta{Name: defaultNodeClass},
@@ -141,7 +132,6 @@ func selecting(names ...string) *v1alpha1.OxideNodeClass {
 	return class
 }
 
-// A nodeclass configuring no affinity at all resolves to nothing without asking the API anything.
 func TestResolveWithNoAffinityAsksNothing(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
 	provider := NewProvider(api.server(t), project, time.Hour)
@@ -160,8 +150,6 @@ func TestResolveWithNoAffinityAsksNothing(t *testing.T) {
 	}
 }
 
-// Every group a wildcard matches is joined rather than one winner being picked, because an instance
-// can belong to many groups.
 func TestResolveMatchesEveryGroupAWildcardSelects(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
 	provider := NewProvider(api.server(t), project, time.Hour)
@@ -176,14 +164,12 @@ func TestResolveMatchesEveryGroupAWildcardSelects(t *testing.T) {
 	if !got.Complete() {
 		t.Errorf("Resolve() reason = %q, want a completed resolution", got.Reason)
 	}
-	// Sorted by ID so that a set that has not changed does not look like it has.
+
 	if got.Resolved[0].ID != groupID || got.Resolved[1].ID != groupIDB {
 		t.Errorf("Resolve() = %v, want the groups sorted by ID", got.Resolved)
 	}
 }
 
-// A selector matching nothing is reported on the nodeclass rather than shrinking the desired set,
-// since eviction is driven by that set and a group that is simply missing is an operator's to fix.
 func TestASelectorThatMatchedNothingIsReportedRatherThanPublished(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
 	provider := NewProvider(api.server(t), project, time.Hour)
@@ -228,8 +214,6 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// A zero TTL makes every reading immediately due, which is the same code path as a reading that has
-// aged out without a test having to wait for it.
 func TestResolvePastTheTTLListsAgain(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
 	provider := NewProvider(api.server(t), project, 0)
@@ -278,8 +262,6 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	}
 }
 
-// The project is part of the question: the same name in two projects is two different groups, so a
-// reading taken in one must not answer the other.
 func TestTheProjectIsPartOfTheKey(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
 	client := api.server(t)
@@ -312,23 +294,20 @@ func TestDriftReason(t *testing.T) {
 			desired:  []v1alpha1.OxideAffinityGroup{{ID: groupID}},
 		},
 		{
-			// A group is joined at launch, where placement is decided, so joining one afterwards is
-			// not something a running instance can do.
+
 			name:     "a group added to the set replaces the nodes not in it",
 			recorded: []string{groupID},
 			desired:  []v1alpha1.OxideAffinityGroup{{ID: groupID}, {ID: groupIDB}},
 			want:     providers.DriftReasonAffinityGroup,
 		},
 		{
-			// Additions only: the affinity controller takes the instance out of a group that is no
-			// longer wanted, in place.
+
 			name:     "a group removed from the set drifts nothing",
 			recorded: []string{groupID, groupIDB},
 			desired:  []v1alpha1.OxideAffinityGroup{{ID: groupID}},
 		},
 		{
-			// The empty set drifts exactly when something is desired, which is what makes a node
-			// launched before the feature existed drift once groups are configured and not before.
+
 			name:    "a node that recorded no groups drifts as soon as one is desired",
 			desired: []v1alpha1.OxideAffinityGroup{{ID: groupID}},
 			want:    providers.DriftReasonAffinityGroup,

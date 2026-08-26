@@ -45,8 +45,6 @@ func TestPlacementForFlattensInServiceSled(t *testing.T) {
 	}
 }
 
-// The provision policy only exists inside the in_service variant of the policy union, so an expunged
-// sled must report the policy kind and nothing more rather than picking up a stray value.
 func TestPlacementForExpungedSledHasNoProvisionPolicy(t *testing.T) {
 	got := placementFor(oxide.Sled{
 		Id:     "sled-1",
@@ -65,9 +63,6 @@ func TestPlacementForExpungedSledHasNoProvisionPolicy(t *testing.T) {
 	}
 }
 
-// The pointer form of the union variant has to unwrap identically: which one the SDK hands back
-// depends on how the response was decoded, and reading only the value form would silently lose the
-// provision policy.
 func TestPlacementForUnwrapsPointerVariant(t *testing.T) {
 	got := placementFor(oxide.Sled{
 		Policy: oxide.SledPolicy{
@@ -103,15 +98,13 @@ func TestPlacementUnhealthy(t *testing.T) {
 			wantUnhealthy: true, wantReason: ReasonNonProvisionable,
 		},
 		{
-			// Expunged wins so that the reason names the more severe state rather than whichever check
-			// happened to run first.
+
 			name: "an expunged sled reports expunged over non-provisionable", policy: "expunged",
 			provisionPolicy: "non_provisionable",
 			wantUnhealthy:   true, wantReason: ReasonExpunged,
 		},
 		{
-			// The whole point of failing closed: an unrecognised value must never be grounds for
-			// deleting a node, and both of these are open enums that can gain values.
+
 			name: "an unrecognised policy is healthy", policy: "some_future_policy",
 			provisionPolicy: "some_future_provision_policy", state: "some_future_state",
 		},
@@ -143,8 +136,6 @@ func TestPlacementUnhealthy(t *testing.T) {
 	}
 }
 
-// A caller must be able to tell "the mapping is unavailable" from "this instance is on no sled". The
-// first says nothing about the instance; the second means it is gone.
 func TestPlacementForReportsMissingSnapshotDistinctly(t *testing.T) {
 	p := NewProvider(nil, "project", time.Minute)
 
@@ -158,7 +149,6 @@ func TestPlacementForReportsMissingSnapshotDistinctly(t *testing.T) {
 		t.Error("SnapshotAge reported a snapshot before any refresh")
 	}
 
-	// With a snapshot in hand, an instance that is not in it is a plain miss and not an error.
 	p.snap = &snapshot{placements: map[string]Placement{}, takenAt: time.Now()}
 	placement, found, err := p.PlacementFor("instance-1")
 	if err != nil {
@@ -169,14 +159,10 @@ func TestPlacementForReportsMissingSnapshotDistinctly(t *testing.T) {
 	}
 }
 
-// Refresh is called from every reconcile that cannot place a node, so the floor is what keeps a
-// cluster full of unplaceable nodes from walking the rack once per node per attempt.
 func TestRefreshRateLimitsUnforcedCalls(t *testing.T) {
 	p := NewProvider(nil, "project", time.Hour)
 	p.lastAttempt = time.Now()
 
-	// A nil client would panic if the call went through to the API, so reaching this without one
-	// proves the floor short-circuited first.
 	refreshed, err := p.Refresh(t.Context(), false)
 	if err != nil {
 		t.Errorf("Refresh returned %v, want no error when skipped", err)
@@ -186,9 +172,6 @@ func TestRefreshRateLimitsUnforcedCalls(t *testing.T) {
 	}
 }
 
-// The rate limit floor and the freshness window are both derived from the one period an operator
-// sets, so the relationship between them is worth pinning: refresh more often than the period, and
-// believe a reading for longer than it.
 func TestRefreshIntervalsAreDerivedFromThePeriod(t *testing.T) {
 	p := NewProvider(nil, "project", 8*time.Minute)
 
@@ -200,8 +183,6 @@ func TestRefreshIntervalsAreDerivedFromThePeriod(t *testing.T) {
 	}
 }
 
-// The rack has never been read, so nothing may be concluded about what fits. An empty reading here
-// would suppress every offering the provider has.
 func TestCapacityBeforeAnyRefreshIsUnknown(t *testing.T) {
 	p := NewProvider(nil, "project", time.Minute)
 
@@ -210,9 +191,6 @@ func TestCapacityBeforeAnyRefreshIsUnknown(t *testing.T) {
 	}
 }
 
-// Guest memory comes out of the VMM reservoir, not out of physical RAM, so a sled offers less memory
-// than it has. CPUs are the hardware totals unreduced, because that is what Omicron compares a
-// placement against: the control plane's zones reduce a sled's memory but not the threads it hands out.
 func TestCapacityOfDeratesMemoryButNotCPUs(t *testing.T) {
 	const oneTiB = 1024 * (1 << 30)
 	got := capacityOf(Placement{UsableHardwareThreads: 128, UsablePhysicalRam: oneTiB})
@@ -228,9 +206,6 @@ func TestCapacityOfDeratesMemoryButNotCPUs(t *testing.T) {
 	}
 }
 
-// The estimate is allowed to be wrong, but only in the direction that costs a refused launch. Claiming
-// more memory than the sled physically has would be wrong in the direction nothing recovers from, and a
-// sled small enough to round oddly must not turn into a claim of room that is not there.
 func TestCapacityOfNeverExceedsPhysicalRAM(t *testing.T) {
 	for _, ram := range []uint64{0, 1, 99, 1 << 20, 512 * (1 << 30), 1024 * (1 << 30)} {
 		if got := capacityOf(Placement{UsablePhysicalRam: ram}).Memory; got > ram {
@@ -239,7 +214,6 @@ func TestCapacityOfNeverExceedsPhysicalRAM(t *testing.T) {
 	}
 }
 
-// Bigger sleds offer more, which is what ranks the rack's sleds in the order an operator expects.
 func TestCapacityOfGrowsWithRAM(t *testing.T) {
 	half := capacityOf(Placement{UsablePhysicalRam: 512 * (1 << 30)}).Memory
 	whole := capacityOf(Placement{UsablePhysicalRam: 1024 * (1 << 30)}).Memory
@@ -249,8 +223,6 @@ func TestCapacityOfGrowsWithRAM(t *testing.T) {
 	}
 }
 
-// A sled being drained or expunged has free resources and will still refuse every placement, so it
-// must not contribute headroom.
 func TestProvisionableFollowsSledPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -283,8 +255,6 @@ func TestProvisionableFollowsSledPolicy(t *testing.T) {
 	}
 }
 
-// An instance with no virtual machine on the sled is holding none of it, and counting it as spoken
-// for would understate the rack.
 func TestHoldsCountsOnlyResidentInstances(t *testing.T) {
 	cpus, memory := 8, 16*(1<<30)
 
@@ -308,7 +278,6 @@ func TestHoldsCountsOnlyResidentInstances(t *testing.T) {
 		}
 	}
 
-	// The size fields are pointers on this API, and a missing one must not invent usage.
 	sizeless := holds(oxide.SledInstance{State: oxide.InstanceStateRunning})
 	if sizeless != (capacity.Resources{}) {
 		t.Errorf("holds(sizeless) = %+v, want nothing held", sizeless)

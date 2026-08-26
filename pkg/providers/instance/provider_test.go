@@ -15,15 +15,11 @@ import (
 
 const giB = 1 << 30
 
-// fakeAPI is enough of the Oxide instance API to drive a teardown: a view, a stop, a delete, and the
-// disk calls that follow. Every route can be overridden per test, and what it does not implement it
-// answers 404 for, which is what a resource that is already gone looks like.
 type fakeAPI struct {
 	instance *oxide.Instance
-	// stopped is what a view returns after the instance has been asked to stop. Nil means the view
-	// keeps returning the original instance, which is how an instance that will not stop looks.
+
 	stopped *oxide.Instance
-	// deleteStatus is the status the instance delete answers with. Zero means 204.
+
 	deleteStatus int
 
 	stops   int
@@ -62,7 +58,6 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			f.instance = nil
 			w.WriteHeader(http.StatusNoContent)
 
-		// Disks are deleted by name here, and there are none to find.
 		case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
 			notFound(t, w)
 
@@ -97,21 +92,12 @@ func notFound(t *testing.T, w http.ResponseWriter) {
 	})
 }
 
-// launchAPI is enough of the Oxide API to drive a launch: a boot disk create and view, an instance
-// create, and the deletes a failed launch cleans up with. Each create can be made to fail with a
-// given error code, which is how the two insufficient capacity refusals this package exists to tell
-// apart are reproduced.
 type launchAPI struct {
-	// diskCreateError and instanceCreateError are Oxide error codes to refuse the respective create
-	// with. Empty means the create succeeds.
 	diskCreateError     string
 	instanceCreateError string
-	// existing is a disk already present under the boot disk name, which is what an earlier attempt
-	// that died between creating the disk and creating the instance leaves behind.
+
 	existing *oxide.Disk
-	// startError is an Oxide error code to refuse the instance start with. Empty means it succeeds.
-	// This is where a rack with no room for the shape refuses, since the start is what places the
-	// instance.
+
 	startError string
 
 	disks           map[string]*oxide.Disk
@@ -120,26 +106,25 @@ type launchAPI struct {
 	instanceCreates int
 	starts          int
 	diskDeletes     []string
-	// startRequested is what the instance create's body asked for in its start field, or nil if it
-	// left the field out and so accepted the API's default of starting the instance.
+
 	startRequested *bool
-	// attachedBootDisk is the name the instance create was asked to attach, and is empty if it was
-	// asked to create the boot disk instead.
+
 	attachedBootDisk string
-	// antiAffinityRequested is the anti-affinity groups the instance create asked to join, which the
-	// API takes at create time.
+
 	antiAffinityRequested []oxide.NameOrId
-	// affinityJoins are the affinity groups joined by their own call, in the order they were asked
-	// for, and joinsAfterStart counts the ones that arrived after the placement had been made.
+
 	affinityJoins   []string
 	joinsAfterStart int
-	// affinityJoinError is an Oxide error code to refuse an affinity group join with. Empty means
-	// every join succeeds.
+
 	affinityJoinError string
+
+	stuckDisk bool
+
+	createdRunState oxide.InstanceState
+
+	instanceCreateTimeout bool
 }
 
-// serveDisks answers the boot disk routes, and reports whether it handled the request. Split out from
-// the handler below so that neither is a switch big enough to be hard to read.
 func (f *launchAPI) serveDisks(
 	t *testing.T,
 	w http.ResponseWriter,
@@ -166,11 +151,15 @@ func (f *launchAPI) serveDisks(
 			apiError(t, w, http.StatusBadRequest, "ObjectAlreadyExists")
 			return true
 		}
+		state := oxide.DiskState{Value: &oxide.DiskStateDetached{}}
+		if f.stuckDisk {
+			state = oxide.DiskState{Value: &oxide.DiskStateCreating{}}
+		}
 		disk := &oxide.Disk{
 			Id:    fmt.Sprintf("d15c0000-0000-4000-8000-%012d", f.diskCreates),
 			Name:  body.Name,
 			Size:  body.Size,
-			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+			State: state,
 		}
 		f.disks[name] = disk
 		f.disks[disk.Id] = disk
@@ -232,13 +221,19 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 				apiError(t, w, http.StatusInsufficientStorage, f.instanceCreateError)
 				return
 			}
-			// Created stopped, which is what a create that is asked to start nothing answers with.
+			if f.instanceCreateTimeout {
+
+				hangUp(t, w)
+				return
+			}
+
 			f.instance = runningInstance()
 			f.instance.RunState = oxide.InstanceStateStopped
+			if f.createdRunState != "" {
+				f.instance.RunState = f.createdRunState
+			}
 			writeJSON(t, w, http.StatusCreated, f.instance)
 
-		// Affinity groups have no create-time field, so they are joined by their own call. It has to
-		// land before the start, which is where the placement the membership shapes is made.
 		case r.Method == http.MethodPost && strings.HasPrefix(path, "affinity-groups/"):
 			group := strings.TrimPrefix(path, "affinity-groups/")
 			group = group[:strings.Index(group, "/")]
@@ -255,7 +250,6 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 				"value": map[string]string{"id": "instance", "name": "karpenter-node"},
 			})
 
-		// The placement decision, and so the call a rack with no room refuses.
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
 			f.starts++
 			if f.startError != "" {
@@ -265,9 +259,6 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 			f.instance.RunState = oxide.InstanceStateStarting
 			writeJSON(t, w, http.StatusAccepted, f.instance)
 
-		// The teardown a launch that is giving up cleans itself up with. The instance is stopped by
-		// the time this is reached, which is a state the delete is accepted in, so there is no stop
-		// to serve.
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
 
@@ -296,13 +287,26 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 	return client
 }
 
+func hangUp(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal(
+			"the test server does not support hijacking, which this fake needs to drop a request",
+		)
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatalf("unable to hijack the connection: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func apiError(t *testing.T, w http.ResponseWriter, status int, code string) {
 	t.Helper()
 	writeJSON(t, w, status, map[string]string{"error_code": code, "message": code})
 }
 
-// launchParams is the create a caller hands in: a boot disk to be made along with the instance, which
-// is the shape the provider splits apart.
 func launchParams() oxide.InstanceCreateParams {
 	return oxide.InstanceCreateParams{
 		Body: &oxide.InstanceCreate{
@@ -329,10 +333,6 @@ func launchParams() oxide.InstanceCreateParams {
 	}
 }
 
-// The instance is created stopped and started by a separate call, which is what makes placement a
-// question the API answers before returning. A create that starts the instance does not wait for it
-// to be placed, so the refusal a launch exists to catch would arrive after the call had already
-// reported success, leaving it to be inferred from a run state that means two different things.
 func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
@@ -341,8 +341,7 @@ func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
-	// Explicitly false rather than absent: the API's default is to start the instance, so leaving
-	// the field out is the same request this is here to avoid making.
+
 	if api.startRequested == nil || *api.startRequested {
 		t.Errorf("the create asked for start=%v, want an explicit false", api.startRequested)
 	}
@@ -354,10 +353,6 @@ func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	}
 }
 
-// The start is where a rack with no room for the shape refuses, and it says so synchronously. The
-// launch is over at that point, so nothing it created may be left behind: Karpenter reschedules an
-// insufficient capacity failure onto a NodeClaim under a different name, which never comes back for
-// this instance or its boot disk.
 func TestCreateReportsACapacityRefusalFromTheStart(t *testing.T) {
 	api := &launchAPI{startError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
@@ -366,8 +361,7 @@ func TestCreateReportsACapacityRefusalFromTheStart(t *testing.T) {
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("error is %v, want insufficient capacity", err)
 	}
-	// A refusal to place says nothing about storage, and reporting both would have the caller take
-	// a shape out of consideration for a limit it did not hit.
+
 	if errors.Is(err, ErrInsufficientStorage) {
 		t.Errorf("a refusal to place the instance was also reported as a storage refusal: %v", err)
 	}
@@ -379,8 +373,6 @@ func TestCreateReportsACapacityRefusalFromTheStart(t *testing.T) {
 	}
 }
 
-// Nothing waits for the guest to boot. Placement is what the launch establishes, and the start has
-// established it by the time Create returns, so a launch costs three calls and no polling.
 func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
@@ -398,9 +390,6 @@ func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 	}
 }
 
-// The split itself: the disk is made on its own and the instance create only attaches it. Without
-// this the instance create is what allocates the disk's regions, and a storage refusal is
-// indistinguishable from a sled that had no room.
 func TestCreateProvisionsTheBootDiskBeforeTheInstance(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
@@ -423,10 +412,6 @@ func TestCreateProvisionsTheBootDiskBeforeTheInstance(t *testing.T) {
 	}
 }
 
-// A rack with nowhere to put the disk's regions has to be reported as its own thing. Reporting it as
-// insufficient capacity would have the caller mark the instance shape unavailable, which is untrue:
-// Crucible places regions on three sleds picked independently of the instance, so no shape was ever
-// the constraint.
 func TestCreateReportsAStorageRefusalSeparately(t *testing.T) {
 	api := &launchAPI{diskCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
@@ -448,9 +433,6 @@ func TestCreateReportsAStorageRefusalSeparately(t *testing.T) {
 	}
 }
 
-// The other half of the same guarantee, and the reason the boot disk is cleaned up here: the shape
-// could not be placed, so Karpenter reschedules onto a NodeClaim under a different name that will
-// never come looking for this disk.
 func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	api := &launchAPI{instanceCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
@@ -472,9 +454,6 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	}
 }
 
-// Splitting the create adds a window where the disk exists and the instance does not, which is
-// exactly what a retried NodeClaim runs into. Adopting the disk is what keeps that from failing the
-// launch, and from leaking a disk per attempt.
 func TestCreateAdoptsABootDiskLeftBehind(t *testing.T) {
 	api := &launchAPI{
 		existing: &oxide.Disk{
@@ -508,8 +487,6 @@ func runningInstance() *oxide.Instance {
 	}
 }
 
-// The whole point of the release notification: once the rack says the instance is gone, its CPU and
-// memory are back and whoever is tracking capacity gets told exactly how much.
 func TestDeleteReportsTheCapacityItReleased(t *testing.T) {
 	stopped := runningInstance()
 	stopped.RunState = oxide.InstanceStateStopped
@@ -536,9 +513,6 @@ func TestDeleteReportsTheCapacityItReleased(t *testing.T) {
 	}
 }
 
-// A delete that was asked for but not carried out frees nothing. Reporting it would have the caller
-// reopen shapes against capacity the rack is still holding, which is the exact mistake the
-// notification exists to avoid.
 func TestDeleteReportsNothingUntilTheRackConfirms(t *testing.T) {
 	stopped := runningInstance()
 	stopped.RunState = oxide.InstanceStateStopped
@@ -568,9 +542,6 @@ func TestDeleteReportsNothingUntilTheRackConfirms(t *testing.T) {
 	}
 }
 
-// Karpenter retries a delete until it is told the instance is gone, and an instance that was already
-// gone when this call started was released by whoever removed it. Reporting it again would reopen
-// shapes on the strength of capacity that was freed long ago.
 func TestDeleteReportsNothingForAnInstanceAlreadyGone(t *testing.T) {
 	api := &fakeAPI{}
 
@@ -592,8 +563,6 @@ func TestDeleteReportsNothingForAnInstanceAlreadyGone(t *testing.T) {
 	}
 }
 
-// The provider has to work without anybody listening, since the notification is an optimization and
-// not part of tearing an instance down.
 func TestDeleteWorksWithoutAReleaseCallback(t *testing.T) {
 	stopped := runningInstance()
 	stopped.RunState = oxide.InstanceStateStopped
@@ -613,9 +582,6 @@ func TestDeleteWorksWithoutAReleaseCallback(t *testing.T) {
 	}
 }
 
-// Affinity group memberships are added between the create and the start, because the start is what
-// chooses a sled. A membership added after it would be recorded against a placement it did not
-// influence, which is a preference silently not honoured rather than one the rack refused.
 func TestCreateJoinsAffinityGroupsBeforeTheStart(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
@@ -639,8 +605,6 @@ func TestCreateJoinsAffinityGroupsBeforeTheStart(t *testing.T) {
 	}
 }
 
-// A membership an earlier attempt at this launch already added is not a failure: this call is asking
-// for a state, not for a transition.
 func TestCreateTreatsAnExistingAffinityMembershipAsSuccess(t *testing.T) {
 	api := &launchAPI{affinityJoinError: "ObjectAlreadyExists"}
 	p := NewProvider(api.server(t), "project", nil)
@@ -657,9 +621,6 @@ func TestCreateTreatsAnExistingAffinityMembershipAsSuccess(t *testing.T) {
 	}
 }
 
-// A join that fails ends the launch, and takes the instance and its boot disk with it. Nothing else
-// comes back for them: the caller is being told the launch failed and will never reference either
-// again.
 func TestCreateAbandonsTheInstanceWhenAnAffinityJoinFails(t *testing.T) {
 	api := &launchAPI{affinityJoinError: "Internal"}
 	p := NewProvider(api.server(t), "project", nil)
@@ -682,8 +643,6 @@ func TestCreateAbandonsTheInstanceWhenAnAffinityJoinFails(t *testing.T) {
 	}
 }
 
-// Anti-affinity groups take the opposite route: the API has a create-time field for them, which is
-// free, atomic, and already in place before the start makes the placement decision.
 func TestCreatePassesAntiAffinityGroupsToTheCreate(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)

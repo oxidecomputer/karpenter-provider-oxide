@@ -1,7 +1,4 @@
-// Package bootstrap defines the contract between the provider-agnostic Karpenter machinery and the
-// mechanism a launched node uses to join the cluster. The nodeclass controller and the cloud
-// provider only ever talk to a Bootstrapper; everything RKE2- or kubeadm-specific lives behind it
-// in pkg/rke2 and pkg/kubeadm respectively.
+// Package bootstrap configures how nodes join the cluster.
 package bootstrap
 
 import (
@@ -14,18 +11,13 @@ import (
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// Cluster is the provider-agnostic view of the control plane that the nodeclass controller
-// discovers once and hands to whichever Bootstrapper is configured. Providers join on different
-// ports, so the host and port are kept separate rather than pre-formatted into a URL.
+// Cluster is the provider-agnostic view of the control plane that the nodeclass controller discovers once.
 type Cluster struct {
-	// Host is the address of the kube-apiserver, either user-supplied or discovered from the
-	// default/kubernetes EndpointSlice.
+	// Host is the kube-apiserver address.
 	Host string
-	// Port is the kube-apiserver port from the same source. Providers that join on their own port,
-	// such as RKE2's supervisor, ignore it.
+	// Port is the kube-apiserver port from the same source.
 	Port int32
-	// ServerOverride is the verbatim spec.server value when the user set one. A provider that can
-	// use it as-is should prefer it over rendering Host and Port itself.
+	// ServerOverride is the verbatim spec.server value when the user set one.
 	ServerOverride string
 }
 
@@ -33,40 +25,25 @@ type Cluster struct {
 type Request struct {
 	// NodeClaim is the claim being fulfilled.
 	NodeClaim *karpcorev1.NodeClaim
-	// NodeTaints are the taints the node must register with, including Karpenter's unregistered
-	// taint. They are resolved per-NodeClaim rather than per-nodeclass.
+	// NodeTaints are the taints the node must register with, including Karpenter's unregistered taint.
 	NodeTaints []corev1.Taint
 	// Hostname is the hostname the instance will be created with.
 	Hostname string
-	// Storage is the resolved disk layout for this node: the Oxide disk names the launch is creating,
-	// the NVMe serials they will present in the guest, and where each one is to end up. Nil when the
-	// nodeclass configures no diskSets.
-	//
-	// Carried per-Request rather than resolved onto the nodeclass status because disk names are
-	// minted per-NodeClaim: they embed this instance's fingerprint and ordinals, so no two nodes of a
-	// nodeclass share them and there is nothing about them a reconcile of the nodeclass could
-	// resolve.
+	// Storage is the resolved disk layout for this node: the Oxide disk names the launch is creating.
 	Storage *storage.Plan
 }
 
 // Bootstrapper joins nodes to the cluster for a single bootstrap provider.
-//
-// Resolve runs in the nodeclass reconcile loop and is responsible for provider-specific status and
-// conditions. UserData runs per-NodeClaim at instance creation time and may have side effects, such
-// as minting a short-lived credential, so it must not be called speculatively.
 type Bootstrapper interface {
 	// Name is the bootstrap kind this implementation handles, matching a v1alpha1.BootstrapKind*.
 	Name() string
-	// Resolve fills in the provider-specific parts of nodeClass.Status and sets the conditions the
-	// provider owns. It returns an error only for failures that should requeue the nodeclass;
-	// user-facing misconfiguration is reported through conditions instead.
+	// Resolve fills in the provider-specific parts of nodeClass.Status and sets the conditions the provider owns.
 	Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, cluster Cluster) error
 	// UserData renders the user-data used to join a single node to the cluster.
 	UserData(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, req Request) (string, error)
 }
 
-// Bootstrappers is the set of available implementations keyed by kind. It is assembled by the
-// controller entrypoint so that pkg/bootstrap stays free of imports on its implementations.
+// Bootstrappers is the set of available implementations keyed by kind.
 type Bootstrappers map[string]Bootstrapper
 
 // New builds a registry from the given implementations.

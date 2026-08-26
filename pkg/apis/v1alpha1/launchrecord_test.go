@@ -6,9 +6,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-// The value has to be a function of the set alone. A resolution that came back in a different order,
-// or that listed the same resource twice, is not a change to what the node was launched with, and an
-// annotation that said otherwise would replace the node over it.
 func TestEncodeIDs(t *testing.T) {
 	tests := []struct {
 		name string

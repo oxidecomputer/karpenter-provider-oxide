@@ -1,5 +1,4 @@
-// Package rke2 joins nodes to an RKE2 cluster by writing an agent config.yaml through user-data and
-// starting rke2-agent.
+// Package rke2 bootstraps RKE2 agents.
 package rke2
 
 import (
@@ -17,8 +16,6 @@ import (
 )
 
 const (
-	// supervisorDefaultPort is the port agents use to join an RKE2 cluster. It is not discoverable
-	// through the Kubernetes API, so it is assumed unless the user overrides spec.server outright.
 	supervisorDefaultPort = 9345
 
 	userDataTemplateText = `#!/usr/bin/env bash
@@ -31,8 +28,6 @@ EOF
 systemctl start rke2-agent.service
 `
 
-	// consumerUnit is the unit that must not start before the data disks are mounted. RKE2 runs the
-	// kubelet as a child of the agent, so the agent is the only consumer to order against.
 	consumerUnit = "rke2-agent.service"
 )
 
@@ -58,9 +53,6 @@ func (n nodeTaints) MarshalYAML() (any, error) {
 
 // Bootstrapper implements bootstrap.Bootstrapper for RKE2.
 type Bootstrapper struct {
-	// reader is deliberately the manager's uncached reader. Reading the token through the cached
-	// client would make controller-runtime start an informer that lists and watches every Secret in
-	// the cluster, which would require far broader RBAC than reading one Secret by name.
 	reader client.Reader
 }
 
@@ -72,8 +64,7 @@ func (b *Bootstrapper) Name() string {
 	return v1alpha1.BootstrapKindRKE2
 }
 
-// Resolve renders the supervisor URL agents join through and reports whether the configured agent
-// token Secret is readable.
+// Resolve finds the RKE2 supervisor and agent token.
 func (b *Bootstrapper) Resolve(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -82,8 +73,7 @@ func (b *Bootstrapper) Resolve(
 	if cluster.ServerOverride != "" {
 		nodeClass.Status.Server = cluster.ServerOverride
 	} else {
-		// Agents join through the supervisor, not the kube-apiserver, so the discovered apiserver
-		// port is deliberately discarded in favour of the supervisor port.
+
 		nodeClass.Status.Server = fmt.Sprintf("https://%s:%d", cluster.Host, supervisorDefaultPort)
 	}
 
@@ -92,8 +82,6 @@ func (b *Bootstrapper) Resolve(
 		return nil
 	}
 
-	// Surface an unreadable or malformed token as a condition rather than an error: it is user
-	// misconfiguration that requeueing will not fix.
 	secret := &corev1.Secret{}
 	tokenSecretObjKey := client.ObjectKey{Namespace: tokenRef.Namespace, Name: tokenRef.Name}
 	if err := b.reader.Get(ctx, tokenSecretObjKey, secret); err != nil {
@@ -146,7 +134,6 @@ func (b *Bootstrapper) UserData(
 	return rendered.String(), nil
 }
 
-// token reads the long-lived agent join token from the referenced Secret.
 func (b *Bootstrapper) token(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -172,13 +159,6 @@ func (b *Bootstrapper) token(
 	return string(token), nil
 }
 
-// userData is what the user-data template is rendered from.
-//
-// DiskSetup is spliced in after "set -euo pipefail" and before the configuration is written, which is
-// what guarantees the disks are mounted before the node joins: the block ends by running a oneshot
-// unit synchronously, so under set -e the join is never reached on a node whose disks did not come up.
-// It is empty for a nodeclass with no diskSets, which renders the script this template rendered
-// before disk support existed.
 type userData struct {
 	DiskSetup string
 	Config    string

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -15,12 +16,16 @@ import (
 	affinitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/affinity"
 	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
+	launchcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/launch"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/nodeclass"
+	reapercontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/reaper"
 	utilizationcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/utilization"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
@@ -45,70 +50,46 @@ func main() {
 	}
 }
 
-// Oxide API configuration. The token is read from the environment so it can be sourced from a
-// Secret rather than being baked into the image.
 const (
 	envOxideHost    = "OXIDE_HOST"
 	envOxideToken   = "OXIDE_TOKEN"
 	envOxideProject = "OXIDE_PROJECT"
 
-	// Sled inventory configuration. Inventory reads the fleet-scoped system API, which is a far
-	// broader grant than provisioning into a single project, so it is off by default.
+	envInstanceTypeIncrementPercent = "OXIDE_INSTANCE_TYPE_INCREMENT_PERCENT"
+
+	envClusterID = "OXIDE_CLUSTER_ID"
+
+	envLaunchDeadline                 = "OXIDE_LAUNCH_DEADLINE"
+	envLaunchDiskCreatingDeadline     = "OXIDE_LAUNCH_DISK_CREATING_DEADLINE"
+	envLaunchInstanceCreatingDeadline = "OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE"
+	envLaunchInstanceStartingDeadline = "OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE"
+	envLaunchInstanceStoppingDeadline = "OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE"
+
+	envReaperEnabled    = "OXIDE_REAPER_ENABLED"
+	envReaperPeriod     = "OXIDE_REAPER_PERIOD"
+	envReaperQuarantine = "OXIDE_REAPER_QUARANTINE"
+
 	envInventoryEnabled                  = "OXIDE_INVENTORY_ENABLED"
 	envInventoryRefreshPeriod            = "OXIDE_INVENTORY_REFRESH_PERIOD"
 	envInventoryRepairTolerationDuration = "OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION"
 
-	// Silo quota configuration. Unlike inventory this reads a silo-scoped endpoint that needs no
-	// permissions beyond launching instances, so it defaults to on.
 	envQuotaEnabled       = "OXIDE_QUOTA_ENABLED"
 	envQuotaRefreshPeriod = "OXIDE_QUOTA_REFRESH_PERIOD"
 )
 
-// defaultQuotaRefreshPeriod is how often the silo's quota is re-read.
-//
-// This is one API call, and what it measures moves whenever anything in the silo starts or stops, so
-// it is polled far more often than the sled inventory. It is not the only line of defense: a launch
-// that exceeds the quota is still refused by the API and diagnosed from the snapshot, so a stale
-// reading costs a wasted launch rather than a wrong decision.
 const defaultQuotaRefreshPeriod = time.Minute
 
-// defaultInventoryRefreshPeriod is how often the sled inventory is re-read. Building it costs a call
-// per sled, and what it observes (which sled an instance is on, and that sled's state and policy)
-// changes on the timescale of migrations and hardware maintenance, so minutes is the right order.
 const defaultInventoryRefreshPeriod = 5 * time.Minute
 
-// capacityPublishPeriod is how often the capacity view is rendered.
-//
-// It is not a refresh: everything it reports is already in memory, so this only decides how quickly a
-// change shows up in the object and the metrics. Writes are skipped when nothing has changed, so a
-// short period costs a render rather than API traffic, and being able to watch a backoff count down is
-// worth more than the render costs.
 const capacityPublishPeriod = 15 * time.Second
 
-// defaultInventoryRepairTolerationDuration is how long a node is left on a sled that is going out of
-// service before Karpenter replaces it.
-//
-// This is deliberately not short. A sled is expunged or closed to new placements by an operator, not
-// by a health check, so the condition is not acute and there is nothing to race; what a short duration
-// would buy is churn if a policy is flipped and flipped back. It is long enough to be an obvious
-// deliberate act and short enough to finish inside a maintenance window.
 const defaultInventoryRepairTolerationDuration = 30 * time.Minute
 
-// apiRequestTimeout bounds a single Oxide API request. The SDK's own default is ten minutes, which
-// is long enough that a request the control plane never answers reads as a hang rather than a
-// failure.
-//
-// Bounding it matters more here than the per-request cost suggests, because a launch that blocks
-// leaves its NodeClaim without a provider ID, and Karpenter treats a NodeClaim in that state as an
-// unsynced cluster: provisioning and disruption both stop cluster-wide until it resolves. A wedged
-// disk create is therefore not one failed launch but a scheduler that has stopped, so the timeout is
-// set well inside the time a launch is given to register rather than beyond it.
-//
-// Thirty seconds is above what these calls take when the rack is answering -- a launch's disk create
-// and instance create are seconds each -- so this fires on a control plane that has stopped
-// answering, not on a slow one. The call that trips it fails the launch, which Karpenter retries on
-// a fresh NodeClaim.
-const apiRequestTimeout = 30 * time.Second
+const apiRequestTimeout = 60 * time.Second
+
+const defaultReaperPeriod = time.Minute
+
+const defaultReaperQuarantine = 5 * time.Minute
 
 func run() error {
 	ctx, karpcore := karpentercore.NewOperator()
@@ -135,18 +116,11 @@ func run() error {
 		return err
 	}
 
-	// The registry is assembled here so that pkg/bootstrap does not have to import its own
-	// implementations. Adding a bootstrap provider means adding it to this list.
-	// Reads go through the uncached API reader so that fetching a single Secret or ConfigMap by name
-	// does not make the manager list and watch every one of them in the cluster.
 	bootstrappers := bootstrap.New(
 		rke2.NewBootstrapper(karpcore.GetAPIReader()),
 		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient()),
 	)
 
-	// Resolved before the cloud provider is built because the cloud provider has to advertise its
-	// repair policies at construction time, and there is a policy to advertise only when inventory is
-	// enabled.
 	inventoryCfg, err := inventoryConfigFromEnv()
 	if err != nil {
 		return err
@@ -156,65 +130,74 @@ func run() error {
 		sledProvider = sled.NewProvider(ox, project, inventoryCfg.refreshPeriod)
 	}
 
-	// Quota awareness needs no permissions beyond launching instances, since a silo can read its own
-	// utilization, so it is on unless explicitly switched off. A quota that cannot be read constrains
-	// nothing rather than blocking launches, so the failure mode of leaving it on is the same as
-	// turning it off.
 	quotaCfg, err := quotaConfigFromEnv()
 	if err != nil {
 		return err
 	}
 	var quotas *utilization.Provider
 	if quotaCfg.enabled {
-		// The on-demand floor is tighter than the poll interval so that a burst of refused launches
-		// re-reads the quota promptly, without every one of them issuing its own read.
+
 		quotas = utilization.NewProvider(ox, quotaCfg.refreshPeriod/4)
 	}
 
-	// Built here rather than inside the cloud provider because two things need it: the cloud provider
-	// decides launches with it, and the capacity controller publishes what it currently believes.
-	//
-	// Both dependencies are passed as interfaces, so a nil provider has to be dropped rather than handed
-	// over: a typed nil inside a non-nil interface would satisfy the nil check and then panic.
-	instanceTypes := instancetype.NewProvider(
+	shapeCfg, err := shapeConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	instanceTypes, err := instancetype.NewProviderWithShapeConfig(
 		quotaProvider(quotas),
 		inventoryProvider(sledProvider),
+		shapeCfg,
 	)
+	if err != nil {
+		return err
+	}
 
-	// Shared between the launch path, which records refusals into it, and the nodeclass controller,
-	// which publishes them as the condition that holds a backing-off nodeclass out of provisioning.
 	affinityPolicy := affinitypolicy.NewTracker()
 
-	// The resource providers are built once and handed to both consumers, which is what makes their
-	// caches shared: two nodeclasses selecting the same images ask one question and get one answer.
-	// The nodeclass controller resolves through them and publishes the result to status; the cloud
-	// provider only asks them about drift, against the status the controller published.
-	// All six get the same window, and it is not configurable. It is not a freshness knob -- freshness
-	// is providers.ResolveInterval, and every resync re-reads every resource -- so there is nothing
-	// here an operator would want to tune per resource, and a window longer than the resync would
-	// quietly turn back into the second, longer poll interval this replaced.
 	images := image.NewProvider(ox, providers.CoalesceWindow)
 	subnets := subnet.NewProvider(ox, providers.CoalesceWindow)
 	sshKeys := sshkey.NewProvider(ox, providers.CoalesceWindow)
 	ipPools := ippool.NewProvider(ox, providers.CoalesceWindow)
 	affinityGroups := affinitygroup.NewProvider(ox, project, providers.CoalesceWindow)
-	// Given the project, unlike the image provider: there is no silo-level snapshot in the Oxide API,
-	// so a selector that names no project means the one Karpenter runs in.
+
 	snapshots := snapshot.NewProvider(ox, project, providers.CoalesceWindow)
+
+	clusterUID, err := ownership.ClusterUID(ctx, karpcore.GetAPIReader(), os.Getenv(envClusterID))
+	if err != nil {
+		return err
+	}
+
+	deadlines, err := deadlinesFromEnv()
+	if err != nil {
+		return err
+	}
+
+	instanceProvider := instance.NewProvider(
+		ox,
+		project,
+		func(ctx context.Context, released instance.Released) {
+			instanceTypes.RecordCapacityReleased(ctx, instancetype.Specs{
+				Ncpus: released.Ncpus,
+
+				MemInGiB: int(released.Memory / cloudprovider.GiB),
+			})
+		},
+		instance.WithDeadlines(deadlines),
+	)
 
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
 		karpcore.GetClient(),
 		ox,
 		project,
+		clusterUID,
+		instanceProvider,
 		instanceTypes,
 		karpcore.InstanceTypeStore,
 		affinityPolicy,
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
-		// In resolution order. Which reason wins when several apply is this order, and it is asserted
-		// by pkg/cloudprovider's tests.
-		// Ordered as the nodeclass controller resolves them, with the disk set drifter after images so
-		// that a boot image change is reported as ImageDrift rather than as disk drift.
+
 		[]providers.Drifter{
 			images, storage.NewDrifter(), subnets, sshKeys, ipPools, affinityGroups,
 		},
@@ -251,22 +234,37 @@ func run() error {
 			affinityPolicy,
 			bootstrappers,
 		),
-		// Separate from the reconciler above so that the hash a nodeclass publishes cannot be held
-		// back by a failure to reach the Oxide API. A launch records the hash it computed, so a stamp
-		// lagging the spec reads as every node launched in the meantime having drifted.
+
 		nodeclass.NewHashController(karpcore.GetClient()),
-		// Registered unconditionally. The refusal history it reports is there whether or not inventory
-		// and quota awareness are, and a view that disappeared when they were switched off would be
-		// missing exactly when an operator is trying to work out why nothing is scaling.
+
 		capacitycontroller.NewController(
 			karpcore.GetClient(),
 			instanceTypes,
 			capacityPublishPeriod,
 		),
-		// Registered unconditionally, and inert on a NodeClaim with no recorded group memberships,
-		// which is every one of them until a nodeclass opts into spec.affinity.
+
 		affinitycontroller.NewController(karpcore.GetClient(), ox),
+
+		launchcontroller.NewController(karpcore.GetClient(), ox, deadlines),
 	)
+
+	reaperCfg, err := reaperConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	if reaperCfg.enabled {
+		controllers = append(controllers, reapercontroller.NewController(
+			karpcore.GetClient(),
+
+			karpcore.GetAPIReader(),
+			ox,
+			project,
+			clusterUID,
+			instanceProvider,
+			reaperCfg.period,
+			reaperCfg.quarantine,
+		))
+	}
 
 	if inventoryCfg.enabled {
 		controllers = append(controllers,
@@ -286,14 +284,112 @@ func run() error {
 	return nil
 }
 
-// quotaConfig is the silo quota configuration, resolved once at startup.
+func shapeConfigFromEnv() (instancetype.ShapeConfig, error) {
+	cfg := instancetype.DefaultShapeConfig()
+	raw := os.Getenv(envInstanceTypeIncrementPercent)
+	if raw == "" {
+		return cfg, nil
+	}
+
+	increment, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return instancetype.ShapeConfig{}, fmt.Errorf(
+			"%s is not a valid percentage: %w", envInstanceTypeIncrementPercent, err,
+		)
+	}
+	cfg.IncrementPercent = increment
+	if err := cfg.Validate(); err != nil {
+		return instancetype.ShapeConfig{}, fmt.Errorf(
+			"invalid %s: %w", envInstanceTypeIncrementPercent, err,
+		)
+	}
+	return cfg, nil
+}
+
+func deadlinesFromEnv() (instance.Deadlines, error) {
+	deadlines := instance.DefaultDeadlines()
+
+	for _, field := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{envLaunchDeadline, &deadlines.Launch},
+		{envLaunchDiskCreatingDeadline, &deadlines.DiskCreating},
+		{envLaunchInstanceCreatingDeadline, &deadlines.InstanceCreating},
+		{envLaunchInstanceStartingDeadline, &deadlines.InstanceStarting},
+		{envLaunchInstanceStoppingDeadline, &deadlines.InstanceStopping},
+	} {
+		raw := os.Getenv(field.name)
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return instance.Deadlines{}, fmt.Errorf(
+				"%s is not a valid duration: %w", field.name, err,
+			)
+		}
+		*field.target = parsed
+	}
+
+	if err := deadlines.Validate(); err != nil {
+		return instance.Deadlines{}, fmt.Errorf("invalid launch deadlines: %w", err)
+	}
+	return deadlines, nil
+}
+
+type reaperConfig struct {
+	enabled    bool
+	period     time.Duration
+	quarantine time.Duration
+}
+
+func reaperConfigFromEnv() (reaperConfig, error) {
+	cfg := reaperConfig{
+		enabled:    true,
+		period:     defaultReaperPeriod,
+		quarantine: defaultReaperQuarantine,
+	}
+
+	if raw := os.Getenv(envReaperEnabled); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return reaperConfig{}, fmt.Errorf(
+				"%s is not a valid boolean: %w",
+				envReaperEnabled,
+				err,
+			)
+		}
+		cfg.enabled = enabled
+	}
+	for _, field := range []struct {
+		name   string
+		target *time.Duration
+	}{
+		{envReaperPeriod, &cfg.period},
+		{envReaperQuarantine, &cfg.quarantine},
+	} {
+		raw := os.Getenv(field.name)
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return reaperConfig{}, fmt.Errorf("%s is not a valid duration: %w", field.name, err)
+		}
+		if parsed <= 0 {
+			return reaperConfig{}, fmt.Errorf("%s must be positive, got %s", field.name, parsed)
+		}
+		*field.target = parsed
+	}
+	return cfg, nil
+}
+
 type quotaConfig struct {
 	enabled       bool
 	refreshPeriod time.Duration
 }
 
-// quotaConfigFromEnv reads the quota configuration. Unlike inventory this defaults to on: reading the
-// silo's own utilization needs no permissions beyond what launching an instance already requires.
 func quotaConfigFromEnv() (quotaConfig, error) {
 	cfg := quotaConfig{enabled: true, refreshPeriod: defaultQuotaRefreshPeriod}
 
@@ -321,11 +417,6 @@ func quotaConfigFromEnv() (quotaConfig, error) {
 	return cfg, nil
 }
 
-// quotaProvider adapts a possibly-nil provider to the interface the instance type provider takes.
-//
-// A *utilization.Provider that is nil cannot simply be passed: assigning it to a non-nil interface
-// value would make every nil check downstream pass and then panic on the first call. Returning an
-// untyped nil is the only thing that reads as "no quota provider".
 func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
 	if quotas == nil {
 		return nil
@@ -333,14 +424,6 @@ func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
 	return quotas
 }
 
-// inventoryProvider adapts a possibly-nil sled provider to the interface the instance type provider
-// takes, for the same reason quotaProvider does: an untyped nil is the only value that reads as "there
-// is no inventory".
-//
-// This is the one place the two halves of inventory meet. The controllers read the rack for
-// observability, and handing the same snapshot to the instance type provider turns it into a
-// scheduling input: shapes no sled has room for stop being offered at all. With inventory off, that
-// input is simply absent and the provider decides from what the rack refuses, as it always has.
 func inventoryProvider(sledProvider *sled.Provider) instancetype.InventoryProvider {
 	if sledProvider == nil {
 		return nil
@@ -348,25 +431,13 @@ func inventoryProvider(sledProvider *sled.Provider) instancetype.InventoryProvid
 	return sledProvider
 }
 
-// inventoryConfig is the sled inventory configuration, resolved once at startup.
 type inventoryConfig struct {
 	enabled       bool
 	refreshPeriod time.Duration
-	// repairTolerationDuration is how long a node is allowed to sit on a sled that is going out of
-	// service before Karpenter replaces it. Zero disables replacement while leaving the rest of
-	// inventory on.
+
 	repairTolerationDuration time.Duration
 }
 
-// inventoryConfigFromEnv reads the inventory configuration.
-//
-// Inventory is opt-in because reading it needs fleet-level access to the Oxide system API, which an
-// operator may not want to hand to Karpenter. Nothing in the provider reads what it writes, so leaving
-// it off is a supported configuration rather than a degraded one.
-//
-// A malformed duration is the one thing here worth refusing to start over. Everything else inventory
-// can get wrong at runtime degrades to "no placement labels", but a bad duration is a static mistake
-// in the operator's own configuration, and silently substituting a default would hide it.
 func inventoryConfigFromEnv() (inventoryConfig, error) {
 	cfg := inventoryConfig{
 		refreshPeriod:            defaultInventoryRefreshPeriod,
@@ -390,9 +461,7 @@ func inventoryConfigFromEnv() (inventoryConfig, error) {
 			must:    "be positive",
 		},
 		{
-			// Zero is meaningful here: it turns replacement off and leaves the labels, conditions and
-			// annotations in place, which is the configuration for wanting the observability without the
-			// disruption.
+
 			name:    envInventoryRepairTolerationDuration,
 			target:  &cfg.repairTolerationDuration,
 			allowed: func(d time.Duration) bool { return d >= 0 },
@@ -418,12 +487,6 @@ func inventoryConfigFromEnv() (inventoryConfig, error) {
 	return cfg, nil
 }
 
-// repairPolicies is what the cloud provider advertises to Karpenter's node repair.
-//
-// It is empty unless inventory is enabled, since nothing else sets the condition it names, and empty
-// is also what stops core from registering its health controller for this provider at all. Node repair
-// additionally requires Karpenter's own NodeRepair feature gate, so acting on the condition takes both
-// this and that gate; the condition itself is recorded either way as sled health.
 func (c inventoryConfig) repairPolicies() []karpcloudprovider.RepairPolicy {
 	if !c.enabled || c.repairTolerationDuration == 0 {
 		return nil

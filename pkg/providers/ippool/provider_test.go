@@ -22,8 +22,6 @@ const (
 	ipPoolIDB = "66666666-0000-4000-8000-000000000002"
 )
 
-// fakeAPI is the Oxide IP pool API, counting the calls so that a cache hit -- and an entry that
-// resolves without asking anything at all -- can be asserted as the absence of one.
 type fakeAPI struct {
 	pools []oxide.SiloIpPool
 	lists int
@@ -123,8 +121,7 @@ func TestResolve(t *testing.T) {
 			wantViews: 1,
 		},
 		{
-			// The silo's default is Nexus's to pick at launch, so there is nothing to ask about and
-			// nothing worth recording beyond the family the entry asked for.
+
 			name:         "an entry with no pool takes the silo default without an API call",
 			ephemeralIPs: []v1alpha1.EphemeralIP{{IPVersion: "v4"}},
 			want:         []v1alpha1.OxideEphemeralIP{{IPVersion: "v4"}},
@@ -160,7 +157,7 @@ func TestResolve(t *testing.T) {
 			wantViews: 1,
 		},
 		{
-			// The pair Nexus refuses at launch, caught here so it reads off the nodeclass instead.
+
 			name: "two entries resolving to one family are refused",
 			ephemeralIPs: []v1alpha1.EphemeralIP{
 				{IPVersion: "v4"},
@@ -214,8 +211,7 @@ func TestResolve(t *testing.T) {
 			if api.views != tt.wantViews {
 				t.Errorf("the API was viewed %d times, want %d", api.views, tt.wantViews)
 			}
-			// There is no listing left in this provider at all: every entry is a direct view or no
-			// call, which is what keeps a nodeclass from getting one address per pool in the silo.
+
 			if api.lists != 0 {
 				t.Errorf("the API was listed %d times, want none", api.lists)
 			}
@@ -223,8 +219,6 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-// A nodeclass declaring no ephemeral IPs has nothing to resolve, and must not reach the API to
-// discover that.
 func TestResolveWithoutEntries(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), time.Hour)
@@ -256,8 +250,6 @@ func TestResolveServesACacheHit(t *testing.T) {
 	}
 }
 
-// A zero TTL makes every reading immediately due, which is the same code path as a reading that has
-// aged out without a test having to wait for it.
 func TestResolvePastTheTTLViewsAgain(t *testing.T) {
 	api := &fakeAPI{pools: fakePools()}
 	provider := NewProvider(api.server(t), 0)
@@ -339,8 +331,7 @@ func TestDriftReason(t *testing.T) {
 			want:     providers.DriftReasonEphemeralIP,
 		},
 		{
-			// The whole point of keying by version: the set of pool IDs is identical on both sides,
-			// and which family each one serves is not.
+
 			name:     "swapping which pool serves which family is drift",
 			recorded: new("v4=192.0.2.10@" + ipPoolID + ",v6=2001:db8::1@" + ipPoolIDB),
 			desired: []v1alpha1.OxideEphemeralIP{
@@ -356,8 +347,7 @@ func TestDriftReason(t *testing.T) {
 			want:     providers.DriftReasonEphemeralIP,
 		},
 		{
-			// An entry that asked for the silo default asked for whatever the default is, so the
-			// default moving underneath a fleet is not a reason to replace it.
+
 			name:     "an entry left to the silo default compares on family alone",
 			recorded: new("v4=192.0.2.10@" + ipPoolIDB),
 			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4"}},

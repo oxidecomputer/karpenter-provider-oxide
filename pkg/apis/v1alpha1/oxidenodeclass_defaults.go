@@ -4,5 +4,5 @@ import (
 	"context"
 )
 
-// SetDefaults for the OxideNodeClass
+// SetDefaults applies OxideNodeClass defaults.
 func (in *OxideNodeClass) SetDefaults(_ context.Context) {}

@@ -114,27 +114,42 @@ spec:
             - name: MIN_VALUES_POLICY
               value: "{{ . }}"
           {{- end }}
-            # Oxide API configuration.
             - name: OXIDE_HOST
               value: {{ required "settings.oxide.host is required" .Values.settings.oxide.host | quote }}
             - name: OXIDE_PROJECT
               value: {{ required "settings.oxide.project is required" .Values.settings.oxide.project | quote }}
-            # The API token is always sourced from a Secret so it never appears in the chart release
-            # or in the Deployment spec.
             - name: OXIDE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ required "settings.oxide.tokenSecret.name is required" .Values.settings.oxide.tokenSecret.name | quote }}
                   key: {{ .Values.settings.oxide.tokenSecret.key | quote }}
-            # Silo quota. Always set, since this defaults to on and absent would mean on anyway;
-            # setting it explicitly is what lets the chart turn it off.
+            - name: OXIDE_INSTANCE_TYPE_INCREMENT_PERCENT
+              value: {{ .Values.settings.instanceTypes.incrementPercent | quote }}
+          {{- with .Values.settings.oxide.clusterID }}
+            - name: OXIDE_CLUSTER_ID
+              value: {{ . | quote }}
+          {{- end }}
+            - name: OXIDE_LAUNCH_DEADLINE
+              value: {{ .Values.settings.launch.deadline | quote }}
+            - name: OXIDE_LAUNCH_DISK_CREATING_DEADLINE
+              value: {{ .Values.settings.launch.diskCreatingDeadline | quote }}
+            - name: OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE
+              value: {{ .Values.settings.launch.instanceCreatingDeadline | quote }}
+            - name: OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE
+              value: {{ .Values.settings.launch.instanceStartingDeadline | quote }}
+            - name: OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE
+              value: {{ .Values.settings.launch.instanceStoppingDeadline | quote }}
+            - name: OXIDE_REAPER_ENABLED
+              value: {{ .Values.settings.reaper.enabled | quote }}
+            - name: OXIDE_REAPER_PERIOD
+              value: {{ .Values.settings.reaper.period | quote }}
+            - name: OXIDE_REAPER_QUARANTINE
+              value: {{ .Values.settings.reaper.quarantine | quote }}
             - name: OXIDE_QUOTA_ENABLED
               value: {{ .Values.settings.quota.enabled | quote }}
             - name: OXIDE_QUOTA_REFRESH_PERIOD
               value: {{ .Values.settings.quota.refreshPeriod | quote }}
           {{- if .Values.settings.inventory.enabled }}
-            # Sled inventory. Only set when enabled: absent means off, so a chart that never mentions
-            # inventory cannot turn it on.
             - name: OXIDE_INVENTORY_ENABLED
               value: "true"
             - name: OXIDE_INVENTORY_REFRESH_PERIOD
@@ -181,13 +196,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
-      # The template below patches .Values.affinity to add a default label selector where not specified.
       {{- $_ := include "karpenter.patchAffinity" $ }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.topologySpreadConstraints }}
-      # The template below patches .Values.topologySpreadConstraints to add a default label selector where not specified.
       {{- $_ := include "karpenter.patchTopologySpreadConstraints" $ }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}

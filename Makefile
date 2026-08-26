@@ -1,13 +1,7 @@
-# Release version: the current git tag without the "v" prefix (v0.1.2 ->
-# 0.1.2; between tags, git describe appends -<n>-g<sha>). goreleaser overrides
-# it on the make command line (see the before hook in .goreleaser.yaml) so the
-# Makefile and goreleaser always agree on one value.
 VERSION ?= $(shell git describe --tags --always | sed -e 's/^v//')
 
-# Image URL to use for make apply
-MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter
-# Image URL to use to build and push image targets for releases
-IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter
+MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter-provider-oxide
+IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter-provider-oxide
 HELM_OCI_REPO ?= ghcr.io/oxidecomputer/helm-charts
 IMAGE_TAG ?= dev
 IMG ?= $(IMAGE_REPO):$(IMAGE_TAG)
@@ -19,51 +13,29 @@ GO_TOOL := go tool -modfile=$(TOOLS_MOD)
 KARPENTER_NAMESPACE ?= kube-system
 HELM_VERSION ?= v4.2.2
 
-# Inject the release version into sigs.k8s.io/karpenter's operator.Version,
-# which karpenter reports in logs and metrics. goreleaser passes the same
-# ldflag for release builds (see .goreleaser.yaml).
 LDFLAGS ?= -ldflags=-X=sigs.k8s.io/karpenter/pkg/operator.Version=$(VERSION)
 GOFLAGS += $(LDFLAGS)
 WITH_GOFLAGS = GOFLAGS="$(GOFLAGS)"
 
-# The karpenter core module directory, which is where the karpenter.sh CRDs
-# (NodePool, NodeClaim, NodeOverlay) are vendored from during generate.
 KARPENTER_CORE_DIR = $(shell go list -m -f '{{ .Dir }}' sigs.k8s.io/karpenter)
 
-# Filename when building the binary controller only
 GOARCH ?= $(shell go env GOARCH)
 BINARY_FILENAME = karpenter-oxide-$(GOARCH)
 
-# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
 else
 GOBIN=$(shell go env GOBIN)
 endif
 
-# Setting SHELL to bash allows bash commands to be executed by recipes.
-# Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-# Every shell script in the repository: the per-boot disk setup a node runs and
-# the repo's own helpers. They are files rather than generated strings so that
-# shellcheck and `bash -n` can be pointed at them.
 SHELL_SOURCES = $(shell git ls-files --cached --others --exclude-standard '*.sh')
 
 .PHONY: all
 all: precommit
 
-# The help target prints out all targets with their descriptions organized
-# beneath their categories. The categories are represented by '##@' and the
-# target descriptions by '##'. The awk command is responsible for reading the
-# entire set of makefiles included in this invocation, looking for lines of the
-# file as xyz: ## something, and then pretty-format the target and help. Then,
-# if there's a line with ##@ something, that gets pretty-printed as a category.
-# More info on the usage of ANSI control characters for terminal formatting:
-# https://en.wikipedia.org/wiki/ANSI_escape_code#SGR_parameters
-# More info on the awk command:
-# http://linuxcommand.org/lc3_adv_awk.php
 
 .PHONY: help
 help: ## Display this help.
@@ -76,9 +48,6 @@ generate: ## Generate deepcopy code and CRDs w/ controller-gen, vendor the karpe
 	go generate ./...
 	$(CONTROLLER_GEN) object crd paths="./pkg/apis/..." \
 		output:crd:artifacts:config=pkg/apis/crds
-# The karpenter.sh CRDs are owned by karpenter core; vendor them at the version
-# in go.mod so the embedded copies the controller applies at startup and the
-# copies the CRD chart installs are the same objects.
 	cp $(KARPENTER_CORE_DIR)/pkg/apis/crds/* pkg/apis/crds
 	cp pkg/apis/crds/* charts/karpenter-crd/templates
 	$(HELM_DOCS) --chart-search-root charts
@@ -107,10 +76,6 @@ verify: release-check lint-shell ## Run linters and vetting on codebase with no 
 	$(GOLANGCI_LINT) run
 	go vet ./...
 
-# The shell a node runs is checked in as .sh rather than generated into a Go
-# string precisely so that shellcheck can see it. Skipped with a warning where
-# shellcheck is not installed; CI has it, and `go test ./pkg/bootstrap/disk`
-# runs it too when it is present.
 .PHONY: lint-shell
 lint-shell: ## Run shellcheck over the checked-in shell scripts.
 	@command -v shellcheck >/dev/null 2>&1 || { \
@@ -156,9 +121,6 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p "$(LOCALBIN)"
 
-# Put locally-installed tool binaries (populated by the `tools` target) ahead of the system
-# PATH so tools that subprocesses shell out to resolve from here rather than requiring a
-# global install.
 export PATH := $(LOCALBIN):$(PATH)
 
 ## Tool Binaries
@@ -177,8 +139,6 @@ CRD_REF_DOCS ?= $(GO_TOOL) crd-ref-docs
 tools: kubectl helm $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
 	GOBIN="$(LOCALBIN)" go install -modfile=$(TOOLS_MOD) tool
 
-# Kubernetes version used to pick the kubectl release, derived from the k8s.io/api
-# version in go.mod (i.e. v0.33.x -> 1.33).
 K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
@@ -201,10 +161,6 @@ golangci-lint:
 	@echo "Building custom golangci-lint with plugins..."
 	go tool -modfile $(TOOLS_MOD) golangci-lint custom --destination $(LOCALBIN) --name golangci-lint-custom
 
-# ko prints the pushed image reference (repo@sha256:...) on stdout; capture it
-# so downstream targets (e.g. apply) can deploy the exact image just built.
-# Recipes run in separate shells, so the handoff goes through a file with a
-# name fixed at the Make level rather than a shell variable or mktemp.
 IMAGE_REF_FILE := $(shell echo "$${TMPDIR:-/tmp}")/karpenter-oxide-image-ref
 
 .PHONY: build
@@ -236,12 +192,6 @@ ARTIFACTS ?= $(PWD)/_artifacts
 
 .PHONY: manifests
 manifests: generate
-# Package the charts at $(VERSION): helm template has no --app-version flag,
-# so the version-derived output (app.kubernetes.io/version, and the controller
-# image tag, which defaults to the chart's appVersion) can only carry the
-# release version if the manifest is rendered from a packaged chart rather than
-# the chart dir (whose Chart.yaml holds a placeholder). The rm clears stale
-# tarballs so the `make release` helm push step only sees this version's.
 	rm -rf $(ARTIFACTS)/helm
 	mkdir -p $(ARTIFACTS)/helm
 	$(HELM) package charts/karpenter \
@@ -288,10 +238,6 @@ deploy: generate ## Deploy the controller to the cluster in ~/.kube/config. Pull
 		--set controller.image.tag=$(IMAGE_TAG) \
 		--wait
 
-# Internal: deploy whatever image ref a build target captured in
-# $(IMAGE_REF_FILE). The chart renders "repository:tag[@digest]", so splitting
-# the ref on its last colon recomposes to the exact ref ko printed. Either way
-# the ref is unique per build, so every deploy rolls the pods.
 .PHONY: helm-apply
 helm-apply:
 	REF="$$(cat $(IMAGE_REF_FILE))"; \
@@ -324,14 +270,6 @@ ci-verify: precommit ## Verify fmt, linters, mod/sum files, generated CRDs, char
 		exit 1; \
 	}
 
-# Release is driven by GoReleaser (config in .goreleaser.yaml), which uses ko to
-# build and push the multi-arch images. Both CI and local runs go through these
-# targets so they share one interface. Registry auth comes from the environment
-# (`docker login ghcr.io`); in GitHub Actions that is handled by the release
-# workflow. GoReleaser also needs GITHUB_TOKEN to create the GitHub release.
-# The helm charts (packaged into _artifacts/helm by goreleaser's before hook)
-# are pushed here rather than by a goreleaser publisher, because publishers run
-# against every release extra file, not just the charts.
 
 .PHONY: release-check
 release-check: tools

@@ -27,17 +27,10 @@ import (
 )
 
 // RefreshController keeps the sled inventory snapshot from going stale.
-//
-// It exists separately from Controller so that the rack is walked on a fixed schedule rather than
-// once per node: sled state and policy change without any node changing, so something has to
-// re-read them, and letting per-node reconciles drive that would scale a fleet-wide walk with the
-// size of the cluster. Controller only refreshes to resolve a node it cannot place at all.
 type RefreshController struct {
 	sledProvider *sled.Provider
 	period       time.Duration
-	// permissionErrorLogged records that the "your token cannot read the system API" error has already
-	// been reported. It is the expected failure when inventory is enabled against a project-scoped
-	// token, and it recurs every period, so it is said loudly once and quietly after that.
+
 	permissionErrorLogged bool
 }
 
@@ -53,16 +46,6 @@ func (c *RefreshController) Name() string {
 }
 
 // Reconcile refreshes the snapshot and schedules the next refresh.
-//
-// It never returns an error. Inventory is opt-in, and everything that reads it is built to carry on
-// without it: no placement labels, and scheduling decided from what the rack refuses rather than from
-// what it has room for. A system API that cannot be reached therefore has to degrade rather than
-// surface a failure, since returning an error here would put the controller into exponential backoff
-// and report an unhealthy condition for something the provider does not need in order to launch
-// nodes.
-//
-// A snapshot that stops being refreshed also stops being believed, so a failure here cannot leave a
-// stale reading suppressing offerings. See capacity.Snapshot.Fresh.
 func (c *RefreshController) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
 
@@ -73,8 +56,7 @@ func (c *RefreshController) Reconcile(ctx context.Context) (reconciler.Result, e
 				"reason", err.Error(),
 			)
 		} else {
-			// The first failure is the useful one: it is almost always the token lacking fleet
-			// permissions, and an operator who enabled inventory needs to be told that plainly.
+
 			log.FromContext(ctx).Error(
 				err,
 				"unable to refresh the sled inventory, sled placement labels will not be applied "+

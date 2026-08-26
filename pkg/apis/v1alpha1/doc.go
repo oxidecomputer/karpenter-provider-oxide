@@ -2,7 +2,7 @@
 // +k8s:deepcopy-gen=package,register
 // +k8s:defaulter-gen=TypeMeta
 // +groupName=karpenter.oxide.computer
-package v1alpha1 // doc.go is discovered by codegen
+package v1alpha1
 
 import (
 	corev1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,10 +17,6 @@ import (
 var GroupVersion = schema.GroupVersion{Group: apis.Group, Version: "v1alpha1"}
 
 // AddToScheme registers this package's types with a scheme.
-//
-// The init below does this to the client-go global scheme, which is the one Karpenter's operator
-// builds its manager client from, so the controller needs no wiring. This exists for callers building
-// a scheme of their own, which in practice means tests.
 func AddToScheme(s *runtime.Scheme) error {
 	corev1.AddToGroupVersion(s, GroupVersion)
 	s.AddKnownTypes(GroupVersion,

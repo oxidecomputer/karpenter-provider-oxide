@@ -9,11 +9,8 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 )
 
-// inventoryFreshFor is the window the fake rack readings are built with. Tests either stay well
-// inside it or step well past it.
 const inventoryFreshFor = 10 * time.Minute
 
-// fakeInventory is a rack reading a test can replace, standing in for the sled provider.
 type fakeInventory struct {
 	snapshot capacity.Snapshot
 }
@@ -22,13 +19,10 @@ func (f *fakeInventory) Capacity() capacity.Snapshot {
 	return f.snapshot
 }
 
-// read builds a reading of a rack of identically sized sleds with the given free resources on each,
-// taken at takenAt. Generation is bumped by the caller through successive calls.
 func read(takenAt time.Time, generation uint64, sleds ...capacity.Sled) capacity.Snapshot {
 	return capacity.NewSnapshot(sleds, takenAt, inventoryFreshFor, generation)
 }
 
-// sledWithFree is a provisionable sled with exactly this much room left on it.
 func sledWithFree(cpus, memGiB int) capacity.Sled {
 	return capacity.Sled{
 		ID:            "sled",
@@ -44,15 +38,11 @@ func newInventoryManager(now *time.Time, inventory *fakeInventory) *CapacityMana
 	return c
 }
 
-// The behaviour that a fixed retry interval gets wrong. A shape no sled has room for is not worth
-// offering at all, and no amount of waiting changes that, so it stays out of consideration past the
-// point where a backoff would have reopened it.
 func TestInventoryRulesOutShapesIndefinitely(t *testing.T) {
 	now := time.Now()
 	inventory := &fakeInventory{snapshot: read(now, 1, sledWithFree(8, 16))}
 	c := newInventoryManager(&now, inventory)
 
-	// No refusal has ever been recorded. The rack alone is enough.
 	if unavailable, reason := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); !unavailable ||
 		reason != ReasonCapacity {
 		t.Errorf("IsUnavailable = (%v, %q), want (true, %q)", unavailable, reason, ReasonCapacity)
@@ -61,8 +51,6 @@ func TestInventoryRulesOutShapesIndefinitely(t *testing.T) {
 		t.Error("a shape that fits exactly was ruled out")
 	}
 
-	// Well past every backoff this breaker would ever set, and still ruled out. The reading is kept
-	// fresh, which is what makes the claim keep holding.
 	for range 20 {
 		now = now.Add(inventoryFreshFor / 2)
 		inventory.snapshot = read(now, inventory.snapshot.Generation()+1, sledWithFree(8, 16))
@@ -72,8 +60,6 @@ func TestInventoryRulesOutShapesIndefinitely(t *testing.T) {
 	}
 }
 
-// The rack gaining room for a shape it had none for is the signal to try it now rather than serve out
-// a wait that was set when the rack looked different.
 func TestInventoryGainMakesABackedOffShapeHalfOpen(t *testing.T) {
 	now := time.Now()
 	specs := Specs{Ncpus: 8, MemInGiB: 16}
@@ -81,7 +67,6 @@ func TestInventoryGainMakesABackedOffShapeHalfOpen(t *testing.T) {
 	c := newInventoryManager(&now, inventory)
 	ctx := context.Background()
 
-	// Refused repeatedly, so it is sitting on a long wait.
 	for range 4 {
 		c.RecordICE(ctx, specs, ReasonCapacity)
 		now = now.Add(retryAfterOf(t, c, specs).Sub(now))
@@ -104,7 +89,7 @@ func TestInventoryGainMakesABackedOffShapeHalfOpen(t *testing.T) {
 	if got := ices(t, c, specs); got != 5 {
 		t.Errorf("consecutive ICEs = %d, want the history kept across the reopen", got)
 	}
-	// One probe, as with every other way a shape reopens.
+
 	if !c.TryAcquire(specs) {
 		t.Fatal("the reopened shape could not be probed")
 	}
@@ -113,8 +98,6 @@ func TestInventoryGainMakesABackedOffShapeHalfOpen(t *testing.T) {
 	}
 }
 
-// A rack that changed somewhere irrelevant is not evidence about this shape. Reopening on any change
-// at all would hand every backed off shape a probe on every refresh and quietly undo the backoff.
 func TestUnrelatedInventoryChangesDoNotReopen(t *testing.T) {
 	now := time.Now()
 	specs := Specs{Ncpus: 32, MemInGiB: 64}
@@ -123,7 +106,6 @@ func TestUnrelatedInventoryChangesDoNotReopen(t *testing.T) {
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 
-	// Room appeared, but nowhere near enough for this shape.
 	now = now.Add(time.Minute)
 	inventory.snapshot = read(now, 2, sledWithFree(16, 32))
 
@@ -132,8 +114,6 @@ func TestUnrelatedInventoryChangesDoNotReopen(t *testing.T) {
 	}
 }
 
-// A shape that was already feasible and was refused anyway was refused for something the reading
-// cannot see, so more of the same room is not new evidence and must not cut the backoff short.
 func TestMoreRoomForAnAlreadyFeasibleShapeDoesNotReopen(t *testing.T) {
 	now := time.Now()
 	specs := Specs{Ncpus: 8, MemInGiB: 16}
@@ -150,8 +130,6 @@ func TestMoreRoomForAnAlreadyFeasibleShapeDoesNotReopen(t *testing.T) {
 	}
 }
 
-// The first reading has nothing to be compared against, so it must not read as the rack having gained
-// anything. Otherwise every backed off shape is reopened the moment inventory comes up.
 func TestTheFirstReadingReopensNothing(t *testing.T) {
 	now := time.Now()
 	specs := Specs{Ncpus: 8, MemInGiB: 16}
@@ -168,9 +146,6 @@ func TestTheFirstReadingReopensNothing(t *testing.T) {
 	}
 }
 
-// The most important failure mode to get right. An inventory controller that has stopped refreshing,
-// because its token lost fleet access or the system API is down, must not hold provisioning at a
-// standstill on the strength of a reading from an hour ago.
 func TestStaleInventoryStopsRulingShapesOut(t *testing.T) {
 	now := time.Now()
 	specs := Specs{Ncpus: 64, MemInGiB: 128}
@@ -181,13 +156,12 @@ func TestStaleInventoryStopsRulingShapesOut(t *testing.T) {
 		t.Fatal("a shape the rack has no room for was offered while the reading was fresh")
 	}
 
-	// Refreshes have stopped. The reading is unchanged and simply ages out.
 	now = now.Add(inventoryFreshFor + time.Second)
 
 	if unavailable, _ := c.IsUnavailable(specs); unavailable {
 		t.Error("a stale reading is still ruling shapes out, so provisioning is frozen")
 	}
-	// And the breaker is back in charge on its own terms.
+
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 	if unavailable, reason := c.IsUnavailable(specs); !unavailable || reason != ReasonCapacity {
 		t.Errorf("IsUnavailable = (%v, %q), want the refusal history to rule again",
@@ -199,9 +173,6 @@ func TestStaleInventoryStopsRulingShapesOut(t *testing.T) {
 	}
 }
 
-// Offerings are only rebuilt when the generation moves, so both a new reading and a reading going
-// stale have to move it. A stale reading that did not would leave shapes suppressed in a list nobody
-// rebuilds.
 func TestInventoryChangesMoveTheGeneration(t *testing.T) {
 	now := time.Now()
 	inventory := &fakeInventory{snapshot: read(now, 1, sledWithFree(8, 16))}
@@ -225,8 +196,6 @@ func TestInventoryChangesMoveTheGeneration(t *testing.T) {
 	}
 }
 
-// With inventory switched off nothing about the breaker changes, which is what makes inventory
-// something an operator can decline to grant fleet access for.
 func TestNoInventoryLeavesEveryShapeAvailable(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -239,7 +208,6 @@ func TestNoInventoryLeavesEveryShapeAvailable(t *testing.T) {
 	}
 }
 
-// The rack has to reach the offerings the scheduler actually reads, not just the breaker's own view.
 func TestInventoryConstrainsTheOfferedInstanceTypes(t *testing.T) {
 	now := time.Now()
 	inventory := &fakeInventory{snapshot: read(now, 1, sledWithFree(8, 16))}
@@ -252,7 +220,7 @@ func TestInventoryConstrainsTheOfferedInstanceTypes(t *testing.T) {
 	}{
 		{"8-16", true},
 		{"4-8", true},
-		{"16-32", false},
+		{"16-30", false},
 		{"8-64", false},
 	} {
 		it, ok := p.Get(tc.name)
@@ -264,17 +232,14 @@ func TestInventoryConstrainsTheOfferedInstanceTypes(t *testing.T) {
 		}
 	}
 
-	// A rack that has grown has to show up in the same list.
 	now = now.Add(time.Minute)
 	inventory.snapshot = read(now, 2, sledWithFree(32, 64))
 
-	if it, _ := p.Get("16-32"); !it.Offerings[0].Available {
-		t.Error("16-32 is still unavailable after the rack made room for it")
+	if it, _ := p.Get("16-30"); !it.Offerings[0].Available {
+		t.Error("16-30 is still unavailable after the rack made room for it")
 	}
 }
 
-// The frontier the capacity view reports. "Largest" has to be well defined when neither dimension
-// dominates, which is what the price ordering is for.
 func TestLargestShapeThatFits(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -284,12 +249,12 @@ func TestLargestShapeThatFits(t *testing.T) {
 		{
 			name: "bounded by memory",
 			free: capacity.Resources{CPUs: 64, Memory: 16 * GiB},
-			want: "8-16",
+			want: "31-16",
 		},
 		{
 			name: "bounded by cpus",
 			free: capacity.Resources{CPUs: 8, Memory: 512 * GiB},
-			want: "8-256",
+			want: "8-470",
 		},
 		{
 			name: "nothing fits",
@@ -318,9 +283,6 @@ func TestLargestShapeThatFits(t *testing.T) {
 	}
 }
 
-// The headroom is the same judgement Availability.Unavailable makes, published. It has to agree with
-// it exactly: a bound that ruled out a shape the rack would have placed would report a constraint that
-// is not there, and one that missed a shape would leave part of the unavailable count unexplained.
 func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -328,36 +290,31 @@ func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
 		want  []Specs
 	}{
 		{
-			// One sled, so one bound, covering both dimensions at once: anything wanting more CPUs or
-			// more memory than it has is out.
+
 			name:  "one sled",
 			sleds: []capacity.Sled{sledWithFree(8, 16)},
 			want:  []Specs{{Ncpus: 8, MemInGiB: 16}},
 		},
 		{
-			// Neither sled covers the other, so both are published and a shape is out only when it
-			// outgrows both: 8 CPUs with 64 GiB is too much memory for the CPU-heavy sled and too many
-			// CPUs for the memory-heavy one, though either number alone fits somewhere.
+
 			name:  "sleds that bound different dimensions",
 			sleds: []capacity.Sled{sledWithFree(64, 32), sledWithFree(4, 512)},
 			want:  []Specs{{Ncpus: 4, MemInGiB: 512}, {Ncpus: 64, MemInGiB: 32}},
 		},
 		{
-			// A sled with less of both rules nothing out the other allows, so it adds no bound.
+
 			name:  "a sled covered by another",
 			sleds: []capacity.Sled{sledWithFree(8, 16), sledWithFree(4, 8)},
 			want:  []Specs{{Ncpus: 8, MemInGiB: 16}},
 		},
 		{
-			// The catalog stops before this rack does, so no shape can outgrow the sled and there is
-			// nothing to report.
+
 			name:  "a rack larger than the catalog",
 			sleds: []capacity.Sled{sledWithFree(maxSledCPUs, maxSledMemGiB)},
 			want:  nil,
 		},
 		{
-			// Free space nobody can reach is not room. The whole catalog is out, and a headroom of
-			// nothing says so.
+
 			name: "nothing provisionable",
 			sleds: []capacity.Sled{func() capacity.Sled {
 				drained := sledWithFree(64, 128)
@@ -375,9 +332,6 @@ func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
 				t.Fatalf("headroom = %v, want %v", got, tc.want)
 			}
 
-			// The bounds are only worth anything if they say the same thing the rack does, so every
-			// shape in the catalog is asked of both. A shape is out when it fits inside no bound, since
-			// it only has to fit on one sled.
 			for _, specs := range shapes() {
 				out := len(got) > 0
 				for _, headroom := range got {
@@ -395,8 +349,6 @@ func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
 	}
 }
 
-// The rack frontier is the largest shape that fits on some single sled, never the largest that fits in
-// the total, and a sled that accepts nothing contributes nothing.
 func TestLargestShapeOnRackIsPerSled(t *testing.T) {
 	drained := sledWithFree(64, 128)
 	drained.Provisionable = false

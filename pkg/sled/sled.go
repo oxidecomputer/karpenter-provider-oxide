@@ -12,18 +12,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sled answers one question the project-scoped Oxide API cannot: which physical sled is a
-// given instance running on.
-//
-// That mapping only exists on the fleet-scoped system API, and only sled-by-sled: there is no
-// endpoint that takes an instance ID and reports its sled. Building it means listing every sled and
-// then listing the instances on each one, so a rack costs one call per sled plus one. That is far too
-// much to repeat per node, so the whole mapping is fetched at once into a snapshot that callers read
-// from, and refreshes are rate limited no matter how many callers ask for one.
-//
-// Everything here is best effort by construction. The system API requires fleet-level permissions
-// that an operator may reasonably decline to grant to Karpenter, so a caller that cannot read it is
-// expected to carry on without the mapping rather than fail.
+// Package sled tracks instance placement and sled capacity.
 package sled
 
 import (
@@ -38,53 +27,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// ErrNoSnapshot reports that no snapshot has been fetched yet, so nothing can be looked up. It is
-// returned instead of an empty snapshot so that callers can tell "the mapping is not available" from
-// "this instance is not on any sled", which are very different things: the first is temporary and
-// says nothing about the instance, the second means the instance is gone.
+// ErrNoSnapshot reports an unavailable sled snapshot.
 var ErrNoSnapshot = errors.New("no sled inventory snapshot has been fetched yet")
 
-// Placement is where a single instance is running, flattened from the sled that reported it. Every
-// field comes from the sled rather than the instance, since the instance is only how the sled was
-// found.
+// Placement is where a single instance is running, flattened from the sled that reported it.
 type Placement struct {
 	// SledID is the sled the instance is running on.
 	SledID string
 	// RackID is the rack the sled is attached to.
 	RackID string
-	// Serial, Part and Revision identify the physical hardware, and are what an operator correlates
-	// against a rack diagram or a support case.
+	// Serial, Part and Revision identify the physical hardware.
 	Serial   string
 	Part     string
 	Revision int
 	// State is the sled's lifecycle state: active, or decommissioned.
 	State string
-	// Policy is the operator-defined policy for the sled: in_service, or expunged. A node on an
-	// expunged sled is on hardware that is being removed from the rack.
+	// Policy is the operator-defined policy for the sled: in_service, or expunged.
 	Policy string
-	// ProvisionPolicy is whether the sled will accept new resources. It is only meaningful for an
-	// in_service sled, and is empty otherwise.
+	// ProvisionPolicy is whether the sled will accept new resources.
 	ProvisionPolicy string
-	// UsableHardwareThreads and UsablePhysicalRam size the sled itself, which is the denominator for
-	// how much of a sled a node actually occupies.
+	// UsableHardwareThreads and UsablePhysicalRam size the sled itself.
 	UsableHardwareThreads int
 	UsablePhysicalRam     uint64
 }
 
-// Sled policy and provision policy values that mean a node's days on its current sled are numbered.
-// They are compared as strings because both arrive as open enums from the API, and a value this code
-// has never heard of has to read as "not one of the states we act on" rather than fail to parse.
 const (
-	// policyExpunged is a sled the operator has removed from service. The hardware is on its way out of
-	// the rack and everything on it has to go somewhere else.
 	policyExpunged = "expunged"
-	// provisionPolicyNonProvisionable is a sled that is still running but closed to new placements,
-	// which is how a sled is drained ahead of maintenance.
+
 	provisionPolicyNonProvisionable = "non_provisionable"
 )
 
-// Reasons a placement is unhealthy, returned by Unhealthy so that callers can distinguish the two
-// cases without re-deriving them from the raw policy strings.
+// Placement health reasons.
 type UnhealthyReason string
 
 const (
@@ -95,16 +68,6 @@ const (
 )
 
 // Unhealthy reports whether the sled is being taken out of service, why, and in words.
-//
-// Both states are deliberately conservative: they are set by an operator, and neither is transient in
-// the way a failed health check is, so a node sitting on one is worth replacing rather than waiting
-// out. Anything else, including a state or policy this code does not recognise, is healthy. That
-// direction matters: an unrecognised value must never be grounds for deleting a node.
-//
-// A node on a non-provisionable sled is also the case that makes replacement work at all. Oxide
-// places instances rather than letting a caller pick a sled, so there is no way to ask for a
-// replacement somewhere else. But a sled closed to new placements will not accept one, so the
-// replacement necessarily lands elsewhere.
 func (p Placement) Unhealthy() (bool, UnhealthyReason, string) {
 	switch {
 	case p.Policy == policyExpunged:
@@ -116,57 +79,36 @@ func (p Placement) Unhealthy() (bool, UnhealthyReason, string) {
 	}
 }
 
-// snapshot is one complete read of the rack, held immutably so that readers never observe a
-// half-applied refresh.
 type snapshot struct {
-	// placements maps an Oxide instance ID to where it was running when the snapshot was taken.
 	placements map[string]Placement
-	// sleds is every sled the rack reported, including ones running none of our instances.
+
 	sleds []oxide.Sled
-	// capacity is the same read expressed as what each sled has room for, which is what decides
-	// whether a shape is worth offering at all. It is built here because the walk that produces the
-	// placements is already listing every instance on every sled, and that listing is the only thing
-	// that says how much of a sled is spoken for.
+
 	capacity capacity.Snapshot
-	// takenAt is when the refresh that produced this snapshot completed.
+
 	takenAt time.Time
 }
 
-// Provider serves the instance-to-sled mapping for a single Oxide project from a periodically
-// refreshed snapshot. It is safe for concurrent use.
+// Provider serves the instance-to-sled mapping for a single Oxide project from a periodically refreshed snapshot.
 type Provider struct {
 	ox      *oxide.Client
 	project string
-	// minRefreshInterval is the floor between refreshes. Callers ask for a refresh whenever they miss
-	// the snapshot, and a node that is not in it at all misses on every reconcile, so without this
-	// floor a single unmappable instance would drive a full rack walk per attempt.
+
 	minRefreshInterval time.Duration
-	// freshFor is how long a reading of the rack may be believed about what does not fit. See
-	// capacity.Snapshot.Fresh: it is what stops a provider that has lost access to the system API from
-	// suppressing offerings forever on the strength of an ancient reading.
+
 	freshFor time.Duration
 
 	mu   sync.RWMutex
 	snap *snapshot
-	// generation counts successful refreshes, and is what readers of the capacity snapshot compare to
-	// notice that the rack has been read again.
+
 	generation uint64
-	// lastAttempt is when a refresh was last started, whether or not it succeeded. Failures count:
-	// the usual failure is a token without fleet permissions, which fails fast and would otherwise
-	// retry as quickly as callers ask.
+
 	lastAttempt time.Time
-	// refreshing serializes refreshes so that concurrent callers collapse into one rack walk rather
-	// than each issuing their own.
+
 	refreshing sync.Mutex
 }
 
 // NewProvider builds a sled inventory provider that expects to be refreshed every refreshPeriod.
-//
-// The period is the one number an operator sets, and the two intervals derived from it are both
-// consequences of it rather than independent knobs. The on-demand floor is tighter than the period so
-// that a node launched between scheduled refreshes gets labeled promptly, while a cluster full of
-// unplaceable nodes still cannot drive more than one rack walk per floor. The freshness window is
-// looser than the period so that a single missed or slow refresh does not make the rack look unknown.
 func NewProvider(ox *oxide.Client, project string, refreshPeriod time.Duration) *Provider {
 	return &Provider{
 		ox:                 ox,
@@ -177,12 +119,6 @@ func NewProvider(ox *oxide.Client, project string, refreshPeriod time.Duration) 
 }
 
 // PlacementFor returns where an instance is running according to the current snapshot.
-//
-// The boolean reports whether the instance was found. A false with a nil error means the snapshot is
-// current but does not mention this instance, which happens both for an instance that no longer
-// exists and for one created since the last refresh; the caller decides whether that is worth
-// refreshing for. ErrNoSnapshot means nothing has been read yet and the caller should not conclude
-// anything about the instance.
 func (p *Provider) PlacementFor(instanceID string) (Placement, bool, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -194,9 +130,7 @@ func (p *Provider) PlacementFor(instanceID string) (Placement, bool, error) {
 	return placement, ok, nil
 }
 
-// Sleds returns every sled in the current snapshot, including those running none of this project's
-// instances. It is the fleet-wide view behind rack-level reporting, as opposed to the per-node view
-// PlacementFor serves.
+// Sleds returns every sled in the current snapshot, including those running none of this project's instances.
 func (p *Provider) Sleds() ([]oxide.Sled, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -208,12 +142,6 @@ func (p *Provider) Sleds() ([]oxide.Sled, error) {
 }
 
 // Capacity returns what the rack had room for when it was last read.
-//
-// Unlike the lookups above this reports no error, because its caller is asking a question that has a
-// safe answer when the rack has never been read: the zero snapshot reports itself as unknown, and a
-// caller that cannot see the rack is expected to carry on without it rather than stop. That is the
-// same posture the rest of this package takes, and it is what makes inventory something an operator
-// can leave switched off.
 func (p *Provider) Capacity() capacity.Snapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -225,7 +153,6 @@ func (p *Provider) Capacity() capacity.Snapshot {
 }
 
 // SnapshotAge reports how long ago the current snapshot was taken, and whether there is one at all.
-// Callers use it to label a node with how stale the placement they are writing is.
 func (p *Provider) SnapshotAge(now time.Time) (time.Duration, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -237,17 +164,8 @@ func (p *Provider) SnapshotAge(now time.Time) (time.Duration, bool) {
 }
 
 // Refresh rebuilds the snapshot from the system API, and reports whether it actually did.
-//
-// A false with a nil error means the call was skipped because a refresh happened within
-// minRefreshInterval, which is the expected outcome when many callers are asking at once. force
-// bypasses that floor and is for the periodic refresh that has to make progress regardless of how
-// often lookups have been missing.
-//
-// The snapshot is only replaced once the whole rack has been read: a partial walk would silently
-// look like instances having left their sleds.
 func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
-	// Held for the duration of the walk so that a second caller waits for this refresh and then sees
-	// it as recent, rather than starting a duplicate one behind it.
+
 	p.refreshing.Lock()
 	defer p.refreshing.Unlock()
 
@@ -284,14 +202,7 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 			SledId: sled.Id,
 		})
 		if err != nil {
-			// One unreadable sled would otherwise discard a whole rack's worth of good placements. The
-			// instances on it simply go unmapped, which reads the same as a node the snapshot has not
-			// caught up with yet.
-			//
-			// Its capacity is recorded as entirely free, which is not a claim that it is: it is the
-			// reading that cannot suppress an offering. Understating what a sled has room for is the
-			// one error this snapshot must not make, since a shape nobody offers is a shape nobody ever
-			// discovers the truth about.
+
 			log.FromContext(ctx).V(1).Info(
 				"unable to list the instances on a sled, its instances will not be mapped "+
 					"and it will be treated as empty",
@@ -304,13 +215,7 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 
 		for _, instance := range instances {
 			room.Used = plus(room.Used, holds(instance))
-			// A rack hosts every silo's instances, and only this project's can correspond to a node in
-			// this cluster. Skipping the rest keeps the snapshot proportional to the cluster rather
-			// than to the rack, and keeps unrelated tenants' instance IDs out of memory.
-			//
-			// The resources above are counted before this filter, deliberately: another silo's instance
-			// occupies the sled just as much as ours, and a placement decision that ignored it would be
-			// answering a question about a rack nobody is running.
+
 			if string(instance.ProjectName) != p.project {
 				continue
 			}
@@ -338,48 +243,8 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 	return true, nil
 }
 
-// vmmReservoirPercentOfPhysicalRAM is how much of a sled's physical RAM this provider treats as
-// available to hold guest memory.
-//
-// Guest memory does not come out of physical RAM. It comes out of the VMM reservoir, which is what
-// remains once the host OS and the control plane have been paid for, and the reservoir is the only thing
-// a placement is actually checked against. Omicron's own budget is, from omicron ff546dc31:
-//
-//   - sled-hardware/src/lib.rs, MemoryReservations::vmm_eligible: physical RAM, less 120 bytes of
-//     page_t per 4 KiB page, less a fixed control plane earmark
-//   - smf/sled-agent/gimlet/config.toml: that earmark is 45056 MiB, and vmm_reservoir_percentage takes
-//     86.3% of what is left
-//
-// That earmark covers Nexus, CockroachDB, ClickHouse, internal and external DNS and Crucible, plus OS
-// terms for network buffer slush, kernel heap and the ZFS ARC, all on the pessimistic assumption that
-// every one of those lands on this sled. It works out to roughly 80% of physical RAM on a 1 TiB Gimlet.
-//
-// One percentage of physical RAM stands in for the whole of that, deliberately. Reproducing the terms
-// individually implies a precision this cannot have: the real reservoir is whatever sled-agent managed
-// to allocate, alignment-rounded, on a sled whose earmark this code cannot read, and it is compared
-// against Propolis's reservation rather than against the instance's memory. A single number is honest
-// about being an estimate and is one thing to adjust when a rack disagrees with it.
-//
-// 87% is above Omicron's effective ~80%, so this errs high rather than low. That is the direction to err
-// here: a shape nobody offers is a shape nobody ever discovers the truth about, whereas one that is
-// offered and refused teaches the capacity manager something. Note that this is not the same 87 as
-// Omicron's 86.3 despite the resemblance — that percentage applies to already-derated memory, this one
-// to the raw total.
 const vmmReservoirPercentOfPhysicalRAM = 87
 
-// capacityOf is what a sled has to place instances with.
-//
-// CPUs are the sled's hardware threads, unreduced, because that is exactly what Omicron compares a
-// placement against. Its query admits a VMM only if all three of these hold:
-//
-//	sum(vmm hardware_threads) + requested <= sled.usable_hardware_threads
-//	sum(vmm rss_ram)          + requested <= sled.usable_physical_ram
-//	sum(vmm reservoir_ram)    + requested <= sled.reservoir_size
-//
-// See nexus/db-queries/src/db/queries/sled_reservation.rs, sled_find_targets_query. The first condition
-// is why no CPU overhead is subtracted here: the control plane's zones reduce a sled's memory but not
-// the threads it will hand out to instances. The third is the tight one, and the only term nothing in
-// the public API exposes, which is what vmmReservoirPercentOfPhysicalRAM stands in for.
 func capacityOf(placement Placement) capacity.Resources {
 	return capacity.Resources{
 		CPUs:   placement.UsableHardwareThreads,
@@ -387,20 +252,11 @@ func capacityOf(placement Placement) capacity.Resources {
 	}
 }
 
-// provisionable reports whether the sled will accept a new instance. A sled being drained or removed
-// from the rack has free resources and will still refuse everything placed on it, so its headroom is
-// not headroom at all.
 func provisionable(placement Placement) bool {
 	unhealthy, _, _ := placement.Unhealthy()
 	return !unhealthy && placement.State == string(oxide.SledStateActive)
 }
 
-// holds is what an instance on a sled is occupying.
-//
-// An instance that is stopped, failed or destroyed is counted as holding nothing. It has no virtual
-// machine running on the sled, so its resources are the sled's to hand out, and counting them as
-// spoken for would understate the rack. The size fields are pointers on this API and a missing one is
-// read as zero for the same reason: guessing high there would invent usage that does not exist.
 func holds(instance oxide.SledInstance) capacity.Resources {
 	switch instance.State {
 	case oxide.InstanceStateStopped, oxide.InstanceStateFailed, oxide.InstanceStateDestroyed:
@@ -416,12 +272,10 @@ func holds(instance oxide.SledInstance) capacity.Resources {
 	return held
 }
 
-// plus adds two amounts of resources.
 func plus(a, b capacity.Resources) capacity.Resources {
 	return capacity.Resources{CPUs: a.CPUs + b.CPUs, Memory: a.Memory + b.Memory}
 }
 
-// placementFor flattens a sled into the placement recorded for every instance on it.
 func placementFor(sled oxide.Sled) Placement {
 	placement := Placement{
 		SledID:            sled.Id,
@@ -438,8 +292,7 @@ func placementFor(sled oxide.Sled) Placement {
 	if sled.UsableHardwareThreads != nil {
 		placement.UsableHardwareThreads = *sled.UsableHardwareThreads
 	}
-	// Provision policy lives inside the in_service variant of the policy union, so it is only present
-	// on a sled that is in service at all.
+
 	switch policy := sled.Policy.Value.(type) {
 	case oxide.SledPolicyInService:
 		placement.ProvisionPolicy = string(policy.ProvisionPolicy)

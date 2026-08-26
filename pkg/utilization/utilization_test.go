@@ -23,7 +23,7 @@ func quota() Quota {
 }
 
 func TestQuotaAdmits(t *testing.T) {
-	q := quota() // headroom: 16 vCPUs, 64 GiB memory, 124 GiB storage
+	q := quota()
 
 	for _, tc := range []struct {
 		name     string
@@ -52,14 +52,13 @@ func TestQuotaAdmits(t *testing.T) {
 			resource: ResourceMemory,
 		},
 		{
-			// The dimension the boot disk exhausts, which no instance shape can avoid.
+
 			name:     "storage over is refused on storage",
 			request:  Request{CPUs: 8, Memory: 32 * giB, Storage: 200 * giB},
 			resource: ResourceStorage,
 		},
 		{
-			// Order has to be fixed, or raising the CPU quota would make the reported dimension jump
-			// around instead of moving on to the next real problem.
+
 			name:     "cpus is reported first when several dimensions are over",
 			request:  Request{CPUs: 100, Memory: 1000 * giB, Storage: 5000 * giB},
 			resource: ResourceCPUs,
@@ -82,9 +81,6 @@ func TestQuotaAdmits(t *testing.T) {
 	}
 }
 
-// A quota lowered below what is already provisioned is a real state, and the headroom has to go
-// negative rather than clamp: clamping to zero would report "no room" for a request of zero, and
-// would hide how far over the limit the silo actually is.
 func TestQuotaRemainingGoesNegativeWhenOverProvisioned(t *testing.T) {
 	q := Quota{
 		CapacityCPUs:      8,
@@ -110,8 +106,6 @@ func TestQuotaRemainingUnknownResource(t *testing.T) {
 	}
 }
 
-// The message is what surfaces on a NodeClaim when nothing scales up, so it has to carry the three
-// numbers an operator needs: what was asked for, the limit, and what is already spent.
 func TestQuotaExplain(t *testing.T) {
 	q := quota()
 
@@ -130,8 +124,6 @@ func TestQuotaExplain(t *testing.T) {
 	}
 }
 
-// Bytes are unreadable at quota scale, so they are rendered in GiB, and a non-round value must not be
-// truncated into looking round.
 func TestFormat(t *testing.T) {
 	for _, tc := range []struct {
 		resource Resource
@@ -150,8 +142,6 @@ func TestFormat(t *testing.T) {
 	}
 }
 
-// An absent CPU count must read as zero rather than as unlimited. Treating unknown as unlimited would
-// quietly switch the whole check off.
 func TestQuotaFromTreatsAbsentCountsAsZero(t *testing.T) {
 	got := quotaFrom(&oxide.Utilization{
 		Capacity: oxide.VirtualResourceCounts{
@@ -190,8 +180,6 @@ func TestQuotaFromPopulatesEveryField(t *testing.T) {
 	}
 }
 
-// An unread quota must be distinguishable from a quota with no headroom: the first means "do not
-// constrain", the second means "constrain everything".
 func TestQuotaReportsMissingSnapshotDistinctly(t *testing.T) {
 	p := NewProvider(nil, time.Minute)
 
@@ -203,14 +191,10 @@ func TestQuotaReportsMissingSnapshotDistinctly(t *testing.T) {
 	}
 }
 
-// Refresh is called from every refused launch, so the floor is what stops a burst of NodeClaims from
-// each issuing their own read.
 func TestRefreshRateLimitsUnforcedCalls(t *testing.T) {
 	p := NewProvider(nil, time.Hour)
 	p.lastAttempt = time.Now()
 
-	// A nil client would panic if the call reached the API, so returning without one proves the floor
-	// short-circuited first.
 	refreshed, err := p.Refresh(t.Context(), false)
 	if err != nil {
 		t.Errorf("Refresh returned %v, want no error when skipped", err)
@@ -220,8 +204,6 @@ func TestRefreshRateLimitsUnforcedCalls(t *testing.T) {
 	}
 }
 
-// The generation drives a full rebuild of the instance type list, and provisioned totals move every
-// time anything in the silo starts or stops, so it must only move when the quota actually changes.
 func TestGenerationOnlyMovesOnChange(t *testing.T) {
 	p := NewProvider(nil, time.Minute)
 	q := quota()
@@ -230,7 +212,6 @@ func TestGenerationOnlyMovesOnChange(t *testing.T) {
 	p.generation.Add(1)
 	first := p.Generation()
 
-	// Same values arriving again, as an unchanged poll would deliver them.
 	same := quota()
 	if *p.quota != same {
 		t.Fatal("two identical quotas did not compare equal")

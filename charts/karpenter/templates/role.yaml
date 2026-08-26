@@ -1,11 +1,3 @@
-{{/*
-Namespaced permissions.
-
-Every rule here is scoped as tightly as RBAC allows: to a single namespace, and where the verb
-supports it, to specific object names. The bootstrap-provider roles are rendered only for the
-providers that are actually enabled, so a cluster that only uses RKE2 never grants the controller
-the ability to write to kube-system, and vice versa.
-*/}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -18,7 +10,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Leader election.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "watch"]
@@ -27,8 +18,6 @@ rules:
     verbs: ["patch", "update"]
     resourceNames:
       - "karpenter-leader-election"
-  # resourceNames cannot be used with create, since the object does not exist yet.
-  # https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create"]
@@ -45,7 +34,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Karpenter reads the cluster DNS service to compute pod resource overhead.
   - apiGroups: [""]
     resources: ["services"]
     resourceNames: ["kube-dns"]
@@ -63,7 +51,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Node leases are deleted alongside the nodes Karpenter terminates.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch"]
@@ -83,9 +70,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # The nodeclass controller discovers the kube-apiserver address from the EndpointSlice backing the
-  # default/kubernetes service. It is read by name through the uncached reader, so list and watch are
-  # not required.
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     resourceNames: ["kubernetes"]
@@ -104,9 +88,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # cluster-info carries the cluster CA and apiserver endpoint used for kubeadm token discovery. It
-  # is readable by unauthenticated users by design, so this grant is not sensitive, but it is still
-  # pinned to the single ConfigMap that is actually read.
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["cluster-info"]
@@ -124,14 +105,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Bootstrap tokens must live in kube-system, since that is where the kube-apiserver's token
-  # authenticator looks for them.
-  #
-  # create is the only verb granted. It cannot be narrowed by resourceNames, but withholding get,
-  # list and watch means this role confers no ability to read any existing kube-system Secret, which
-  # is the permission that would actually matter if the controller were compromised. Tokens are
-  # never read back, and the control plane's tokencleaner controller removes them once they expire,
-  # so no delete is needed either.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
@@ -150,9 +123,6 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Read access to exactly one Secret: the RKE2 agent join token named in the OxideNodeClass. This
-  # must be kept in sync with spec.bootstrap.rke2.tokenRef. It is read by name through the uncached
-  # reader, so list and watch are not required.
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ required "bootstrap.rke2.tokenSecret.name is required when the rke2 bootstrap provider is enabled" .Values.bootstrap.rke2.tokenSecret.name | quote }}]

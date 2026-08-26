@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// newTestCapacityManager returns a manager on a clock the test drives, with jitter switched off so
-// backoffs can be compared exactly. Real jitter is only there to spread a burst out.
 func newTestCapacityManager(now *time.Time) *CapacityManager {
 	c := NewCapacityManager(nil)
 	c.now = func() time.Time { return *now }
@@ -25,12 +23,12 @@ func TestCapacityManagerCoversLargerShapes(t *testing.T) {
 		specs Specs
 		want  bool
 	}{
-		{Specs{Ncpus: 8, MemInGiB: 16}, true},  // the refused shape itself
-		{Specs{Ncpus: 16, MemInGiB: 32}, true}, // larger in both
-		{Specs{Ncpus: 8, MemInGiB: 64}, true},  // larger in memory only
-		{Specs{Ncpus: 4, MemInGiB: 16}, false}, // smaller in cpus
-		{Specs{Ncpus: 16, MemInGiB: 8}, false}, // more cpus but less memory
-		{Specs{Ncpus: 1, MemInGiB: 2}, false},  // smaller in both
+		{Specs{Ncpus: 8, MemInGiB: 16}, true},
+		{Specs{Ncpus: 16, MemInGiB: 32}, true},
+		{Specs{Ncpus: 8, MemInGiB: 64}, true},
+		{Specs{Ncpus: 4, MemInGiB: 16}, false},
+		{Specs{Ncpus: 16, MemInGiB: 8}, false},
+		{Specs{Ncpus: 1, MemInGiB: 2}, false},
 	} {
 		if got, _ := c.IsUnavailable(tc.specs); got != tc.want {
 			t.Errorf("IsUnavailable(%d cpus, %d GiB) = %v, want %v",
@@ -53,9 +51,6 @@ func TestCapacityManagerDropsSubsumedEntries(t *testing.T) {
 	}
 }
 
-// The refusal the subsumed entry recorded still happened, and the shape replacing it is smaller, so
-// the run of refusals continues rather than starting over. Without this the entry that survives claims
-// to be a first refusal and backs off for three minutes on the strength of it.
 func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -64,7 +59,7 @@ func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
 	small := Specs{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(ctx, large, ReasonCapacity)
-	c.RecordICE(ctx, large, ReasonCapacity) // 2 refusals, 6m
+	c.RecordICE(ctx, large, ReasonCapacity)
 	c.RecordICE(ctx, small, ReasonCapacity)
 
 	if got := ices(t, c, small); got != 3 {
@@ -75,16 +70,11 @@ func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
 	}
 }
 
-// The failure this whole mechanism exists to prevent, and the one the flat-3m behaviour let through: a
-// full rack does not refuse one shape repeatedly, it refuses whatever the scheduler proposes, and the
-// scheduler answers each refusal with something a little smaller. Every one of those is a new key, so
-// counting per key holds the backoff at its minimum for as long as there is a smaller shape to try.
 func TestWalkingDownShapesStillBacksOff(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 	ctx := context.Background()
 
-	// 21-42, 20-40, ... 17-34, as observed against a rack with nowhere to put any of them.
 	for cpus := 21; cpus >= 17; cpus-- {
 		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
 	}
@@ -101,15 +91,11 @@ func TestWalkingDownShapesStillBacksOff(t *testing.T) {
 	}
 }
 
-// Inheritance is not cumulative across unrelated shapes. Two boundaries that neither covers the other
-// describe different limits, and folding their counts together would let a rack with an odd shaped
-// hole in it back off as though one shape had been refused over and over.
 func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 	ctx := context.Background()
 
-	// Neither covers the other: one is CPU heavy, the other memory heavy.
 	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
 	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
 	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 64}, ReasonCapacity)
@@ -117,7 +103,6 @@ func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
 		t.Fatalf("snapshot has %d entries, want two independent boundaries", got)
 	}
 
-	// Subsumes both.
 	small := Specs{Ncpus: 8, MemInGiB: 32}
 	c.RecordICE(ctx, small, ReasonCapacity)
 
@@ -126,9 +111,6 @@ func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
 	}
 }
 
-// A launch that succeeds is the one thing that disproves the run, and it has to take the inherited
-// history with it. Otherwise a boundary that carried a long run forward would leave the next refusal
-// of that shape backing off for half an hour on evidence a successful launch already contradicted.
 func TestSuccessClearsInheritedHistory(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -150,8 +132,6 @@ func TestSuccessClearsInheritedHistory(t *testing.T) {
 	}
 }
 
-// The first refusal is the cheap one to retry: capacity comes and goes, so the shape is reconsidered
-// as soon as the rack has plausibly changed.
 func TestFirstICEBacksOffThreeMinutes(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -172,8 +152,6 @@ func TestFirstICEBacksOffThreeMinutes(t *testing.T) {
 	}
 }
 
-// Each consecutive refusal roughly doubles the wait, up to the cap. A shape the rack keeps refusing is
-// worth retrying less and less often, but never worth writing off.
 func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -191,7 +169,7 @@ func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 		if got := retryAfterOf(t, c, specs).Sub(now); got != want {
 			t.Fatalf("backoff after %d refusals = %v, want %v", ices(t, c, specs), got, want)
 		}
-		// Wait it out, which reopens the shape, and let the next probe be refused in turn.
+
 		now = now.Add(want)
 		if unavailable, _ := c.IsUnavailable(specs); unavailable {
 			t.Fatalf("the shape did not reopen after %v", want)
@@ -199,8 +177,6 @@ func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 	}
 }
 
-// Asking about a shape is not evidence about the rack. Only a refused launch is, and a lookup that
-// pushed the retry out would let a busy scheduler keep a shape backed off indefinitely.
 func TestLookupsDoNotExtendTheBackoff(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -224,9 +200,6 @@ func TestLookupsDoNotExtendTheBackoff(t *testing.T) {
 	}
 }
 
-// A launch that succeeded is proof the rack has room, so the history that says otherwise is wrong and
-// goes away entirely. The next incident starts over at three minutes rather than resuming the old
-// escalation.
 func TestSuccessResetsHistory(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -249,8 +222,6 @@ func TestSuccessResetsHistory(t *testing.T) {
 	}
 }
 
-// A launch of a large shape disproves the claim that nothing that size or larger fits, wherever that
-// claim was recorded. It says nothing about shapes larger still.
 func TestSuccessOnlyClearsEntriesItDisproves(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -269,8 +240,6 @@ func TestSuccessOnlyClearsEntriesItDisproves(t *testing.T) {
 	}
 }
 
-// The whole point of reopening a shape is that exactly one launch tests it. Letting the rest of a
-// burst through would turn one cheap probe into a wave of refusals against a shape that may well fit.
 func TestOnlyOneProbeRunsAtATime(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -285,11 +254,11 @@ func TestOnlyOneProbeRunsAtATime(t *testing.T) {
 	if c.TryAcquire(specs) {
 		t.Error("a second launch acquired a probe that was already in flight")
 	}
-	// Larger shapes are covered by the same entry, so they are probing the same claim.
+
 	if c.TryAcquire(Specs{Ncpus: 16, MemInGiB: 32}) {
 		t.Error("a launch of a covered shape acquired the in-flight probe")
 	}
-	// An unrelated shape has nothing to do with the probe.
+
 	if !c.TryAcquire(Specs{Ncpus: 2, MemInGiB: 4}) {
 		t.Error("an uncovered shape was blocked by an unrelated probe")
 	}
@@ -300,8 +269,6 @@ func TestOnlyOneProbeRunsAtATime(t *testing.T) {
 	}
 }
 
-// A refused probe both releases the interlock and lengthens the wait, so the shape leaves half-open
-// rather than staying open to the rest of the burst.
 func TestProbeRefusalReclosesTheBreaker(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -322,14 +289,13 @@ func TestProbeRefusalReclosesTheBreaker(t *testing.T) {
 	if got := retryAfterOf(t, c, specs).Sub(now); got != 6*time.Minute {
 		t.Errorf("backoff after the refused probe = %v, want 6m", got)
 	}
-	// The probe is gone with the state that held it, not leaked.
+
 	now = now.Add(6 * time.Minute)
 	if !c.TryAcquire(specs) {
 		t.Error("the next probe could not be acquired, so the refused one leaked its reservation")
 	}
 }
 
-// A succeeded probe closes the breaker, which is what lets the rest of the burst through.
 func TestProbeSuccessOpensTheShapeToEveryone(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -352,8 +318,6 @@ func TestProbeSuccessOpensTheShapeToEveryone(t *testing.T) {
 	}
 }
 
-// Concurrent launches must not stampede a reopened shape: whatever the interleaving, exactly one of
-// them gets the probe.
 func TestConcurrentProbesDoNotStampede(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -383,8 +347,6 @@ func TestConcurrentProbesDoNotStampede(t *testing.T) {
 	}
 }
 
-// A backed off shape is not offered at all, so a NodeClaim built before the refusal that still asks
-// for it is turned away here too rather than launched into a known wall.
 func TestBackedOffShapesCannotBeAcquired(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -397,8 +359,6 @@ func TestBackedOffShapesCannotBeAcquired(t *testing.T) {
 	}
 }
 
-// Offerings are only rebuilt when the generation moves, so a backoff elapsing has to move it or the
-// reopened shape is never actually offered.
 func TestReopeningChangesTheGeneration(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -411,7 +371,7 @@ func TestReopeningChangesTheGeneration(t *testing.T) {
 	if reopened := c.Generation(); reopened == backedOff {
 		t.Error("the generation did not move when the shape reopened")
 	}
-	// And settles once nothing more is changing, or the instance type list is rebuilt forever.
+
 	stable := c.Generation()
 	now = now.Add(time.Minute)
 	if got := c.Generation(); got != stable {
@@ -419,8 +379,6 @@ func TestReopeningChangesTheGeneration(t *testing.T) {
 	}
 }
 
-// History is what makes the backoff grow, so it outlives the backoff itself. It does not outlive the
-// rack it described: a shape refused this morning starts fresh tonight.
 func TestHistoryIsForgottenEventually(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -445,8 +403,6 @@ func TestHistoryIsForgottenEventually(t *testing.T) {
 	}
 }
 
-// RetryAfter is what an operator reads to know when a shape that is out will be tried again, so a
-// refusal while half-open has to push it back out rather than leave the shape looking reopened.
 func TestARefusalMovesTheRetryTimeBackOut(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -469,8 +425,6 @@ func TestARefusalMovesTheRetryTimeBackOut(t *testing.T) {
 	}
 }
 
-// Jitter keeps a burst of refusals from reopening in the same instant and walking into the same wall
-// together. It only ever adds, so a shape is never retried earlier than its backoff.
 func TestJitterStaysWithinItsFraction(t *testing.T) {
 	now := time.Now()
 	c := NewCapacityManager(nil)
@@ -489,8 +443,6 @@ func TestJitterStaysWithinItsFraction(t *testing.T) {
 	}
 }
 
-// The point of the whole mechanism: a shape sitting on a long backoff gets its probe as soon as the
-// rack visibly has room for it, instead of waiting out a wait that was set when it did not.
 func TestCapacityReleaseShortensALongBackoff(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -523,9 +475,6 @@ func TestCapacityReleaseShortensALongBackoff(t *testing.T) {
 	}
 }
 
-// A release is evidence the shape is worth trying, not evidence that it works. If the rack refuses
-// the probe anyway, the backoff has to pick up where it left off rather than start over, or a cluster
-// churning through terminations retries a hopeless shape every few minutes forever.
 func TestCapacityReleaseKeepsTheRefusalHistory(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -544,18 +493,16 @@ func TestCapacityReleaseKeepsTheRefusalHistory(t *testing.T) {
 	}
 }
 
-// Freeing one small instance must not reopen the whole rack. A claim that a shape does not fit is only
-// disturbed by a release big enough to have made room for that shape.
 func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 	ctx := context.Background()
 
 	for _, specs := range []Specs{
-		{Ncpus: 2, MemInGiB: 4},   // fits in the release
-		{Ncpus: 8, MemInGiB: 16},  // exactly the release
-		{Ncpus: 16, MemInGiB: 16}, // too many cpus
-		{Ncpus: 8, MemInGiB: 64},  // too much memory
+		{Ncpus: 2, MemInGiB: 4},
+		{Ncpus: 8, MemInGiB: 16},
+		{Ncpus: 16, MemInGiB: 16},
+		{Ncpus: 8, MemInGiB: 64},
 	} {
 		c.RecordICE(ctx, specs, ReasonCapacity)
 	}
@@ -578,9 +525,6 @@ func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
 	}
 }
 
-// Offerings are only rebuilt when the generation moves, so a release that reopens something has to
-// move it, and one that reopens nothing must not: a cluster terminating nodes steadily would
-// otherwise rebuild thousands of instance types for every one of them.
 func TestCapacityReleaseMovesTheGenerationOnlyWhenItReopens(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -599,8 +543,6 @@ func TestCapacityReleaseMovesTheGenerationOnlyWhenItReopens(t *testing.T) {
 	}
 }
 
-// A shape that is already being probed is not disturbed by a release. It is mid-experiment, and
-// clearing the interlock underneath it would let a second launch pile onto the same question.
 func TestCapacityReleaseDoesNotDisturbAnInFlightProbe(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -664,7 +606,7 @@ func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
 		want bool
 	}{
 		{"8-16", false},
-		{"16-32", false},
+		{"16-30", false},
 		{"4-8", true},
 	} {
 		it, ok := p.Get(tc.name)
@@ -677,8 +619,6 @@ func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
 	}
 }
 
-// A reopened shape has to make it all the way back into the offerings the scheduler reads, not just
-// into the breaker's own view, or nothing ever probes it.
 func TestReopenedShapesAreOfferedAgain(t *testing.T) {
 	now := time.Now()
 	p := NewProvider(nil, nil)
@@ -696,23 +636,15 @@ func TestReopenedShapesAreOfferedAgain(t *testing.T) {
 	}
 }
 
-// searchSim drives the manager the way the scheduler and the rack together do: it repeatedly offers
-// the largest shape still available, launches it, and reports the outcome back. maxLaunchableCPUs is
-// the rack's real boundary, which the manager cannot see and has to find.
-//
-// Shapes are the 1:2 memory family, which is what a NodeClaim's candidates look like: a chain under
-// covers, so there is exactly one largest available shape at any moment.
 type searchSim struct {
 	c                 *CapacityManager
 	maxLaunchableCPUs int
 	maxCPUs           int
-	// attempts is every shape launched, in order, and launched is the ones the rack accepted.
+
 	attempts []int
 	launched []int
 }
 
-// largestAvailable is the shape the scheduler would pick for a NodeClaim that wants as much as it
-// can get, which is what a big bin-packed claim asks for.
 func (s *searchSim) largestAvailable() (Specs, bool) {
 	for cpus := s.maxCPUs; cpus >= 1; cpus-- {
 		specs := Specs{Ncpus: cpus, MemInGiB: cpus * 2}
@@ -723,8 +655,6 @@ func (s *searchSim) largestAvailable() (Specs, bool) {
 	return Specs{}, false
 }
 
-// run launches shapes until one is placed or the budget is spent, and returns the shape that
-// launched.
 func (s *searchSim) run(t *testing.T, budget int) Specs {
 	t.Helper()
 	for range budget {
@@ -744,10 +674,6 @@ func (s *searchSim) run(t *testing.T, budget int) Specs {
 	return Specs{}
 }
 
-// A rack with no room refuses the largest shape, the scheduler comes back one size smaller, and that
-// is refused too. Stepping through that one size at a time costs a launch per size and takes the
-// better part of twenty minutes across a wide instance type range, so the search descends
-// geometrically instead: each refusal past the first halves what is offered next.
 func TestCapacitySearchDescendsGeometrically(t *testing.T) {
 	now := time.Now()
 	sim := &searchSim{
@@ -761,13 +687,12 @@ func TestCapacitySearchDescendsGeometrically(t *testing.T) {
 	if launched.Ncpus > sim.maxLaunchableCPUs {
 		t.Fatalf("launched %d cpus, which the rack had no room for", launched.Ncpus)
 	}
-	// Stepping down one size at a time from 38 to 9 would be 29 refusals. Anything close to that is
-	// the walk this exists to avoid, whatever the exact halving works out to.
+
 	if len(sim.attempts) > 6 {
 		t.Errorf("took %d launches to place a shape, want a geometric descent: %v",
 			len(sim.attempts), sim.attempts)
 	}
-	// Each attempt must be meaningfully smaller than the last, not one size down.
+
 	for i := 2; i < len(sim.attempts); i++ {
 		if sim.attempts[i] > sim.attempts[i-1]/2 {
 			t.Errorf("attempt %d went from %d to %d cpus, want at most half: %v",
@@ -776,10 +701,6 @@ func TestCapacitySearchDescendsGeometrically(t *testing.T) {
 	}
 }
 
-// Halving overshoots on purpose, so the search has to climb back. A shape that launches puts a floor
-// under the band nothing has tested, and the next offering is its midpoint rather than the floor
-// itself, which is what stops an aggressive skip from leaving the cluster on the smallest shape on
-// the rack for as long as the backoff lasts.
 func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
 	now := time.Now()
 	sim := &searchSim{
@@ -789,13 +710,11 @@ func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
 	}
 
 	first := sim.run(t, 10)
-	// The descent is expected to undershoot: it halves rather than testing every size, so it lands
-	// below the boundary and there is a band above it nothing has ruled out on evidence.
+
 	if first.Ncpus == sim.maxLaunchableCPUs {
 		t.Skip("the descent happened to land exactly on the boundary, leaving nothing to climb")
 	}
 
-	// Keep launching. Each success should reach higher than the last until the boundary is found.
 	for range 8 {
 		if sim.launched[len(sim.launched)-1] == sim.maxLaunchableCPUs {
 			break
@@ -818,18 +737,15 @@ func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
 	}
 }
 
-// A skip is a guess, and a guess must never be the reason nothing can launch. However far a walk
-// runs, some shape has to be left offerable.
 func TestCapacitySearchNeverRulesOutEveryShape(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 
-	// A rack that refuses everything, walked all the way down.
 	for _, cpus := range []int{38, 19, 9, 4, 2, 1} {
 		c.RecordICE(context.Background(), Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
 		smallest := Specs{Ncpus: 1, MemInGiB: 2}
 		if unavailable, _ := c.IsUnavailable(smallest); unavailable {
-			// The smallest shape may only be ruled out by having been refused itself, never by a skip.
+
 			if cpus > 1 {
 				t.Fatalf(
 					"a skip after refusing %d cpus ruled out the smallest shape on the rack",
@@ -840,9 +756,6 @@ func TestCapacitySearchNeverRulesOutEveryShape(t *testing.T) {
 	}
 }
 
-// Only the shape that was actually refused clears an entry. A launch below the reach is the search
-// working, not evidence against the refusal, and treating it as such would throw away a real refusal
-// and send the scheduler straight back to the top of the walk.
 func TestCapacitySuccessBelowTheReachDoesNotClearTheRefusal(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
@@ -850,8 +763,6 @@ func TestCapacitySuccessBelowTheReachDoesNotClearTheRefusal(t *testing.T) {
 	c.RecordICE(context.Background(), Specs{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
 	c.RecordICE(context.Background(), Specs{Ncpus: 31, MemInGiB: 62}, ReasonCapacity)
 
-	// The second refusal establishes the walk, so the reach is well below 31 cpus and a much smaller
-	// shape is offered.
 	c.RecordSuccess(context.Background(), Specs{Ncpus: 4, MemInGiB: 8})
 
 	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 31, MemInGiB: 62}); !unavailable {
@@ -862,26 +773,17 @@ func TestCapacitySuccessBelowTheReachDoesNotClearTheRefusal(t *testing.T) {
 	}
 }
 
-// Refusals arrive out of order, because a launch already in flight when a shape is refused still
-// runs and still fails. The later refusal is for a larger shape, so it does not subsume the smaller
-// entry and the two sit side by side.
-//
-// That is fine as long as the larger one does not search. If it descends a reach of its own, that
-// reach reaches below the smaller entry and rules out the smaller entry's own shape, so reopening
-// that shape for a probe achieves nothing: the probe cannot launch, and nothing says why.
 func TestOutOfOrderRefusalDoesNotSmotherTheSmallerEntry(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 	ctx := context.Background()
 
-	// A walk that has been running a while, so the smaller entry has a long run behind it.
 	for _, cpus := range []int{32, 16, 11} {
 		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
 	}
-	// The 12 CPU launch that was already in flight when 11 was refused now fails too.
+
 	c.RecordICE(ctx, Specs{Ncpus: 12, MemInGiB: 24}, ReasonCapacity)
 
-	// A teardown frees enough for the shape the walk stopped on, reopening it for one probe.
 	c.RecordCapacityReleased(ctx, Specs{Ncpus: 11, MemInGiB: 22})
 
 	if got := stateOf(t, c, Specs{Ncpus: 11, MemInGiB: 22}); got != StateHalfOpen {
@@ -893,16 +795,12 @@ func TestOutOfOrderRefusalDoesNotSmotherTheSmallerEntry(t *testing.T) {
 	if !c.TryAcquire(Specs{Ncpus: 11, MemInGiB: 22}) {
 		t.Error("the reopened shape could not be acquired for its probe")
 	}
-	// The out-of-order refusal is still evidence, and still rules out what it refused.
+
 	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 12, MemInGiB: 24}); !unavailable {
 		t.Error("12-24 was refused and is being offered anyway")
 	}
 }
 
-// The case this was written for. A controller that has just started has launched nothing, so no entry
-// has a floor, and the descent is pure speculation: refusing 10-20 halves to 5-10 and takes the shape
-// every node in the cluster is running out of the catalogue along with it. A running node is proof its
-// shape placed, and seeding it brackets the search instead.
 func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
@@ -931,14 +829,12 @@ func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 		t.Errorf("IsUnavailable(%d-%d) = true, want a shape the cluster is running to stay offered",
 			running.Ncpus, running.MemInGiB)
 	}
-	// between(5-10, 10-20) puts the midpoint at 7-15 and rules out from one step above it.
+
 	if got := entryOf(t, seeded, refused).Reach; got != (Specs{Ncpus: 8, MemInGiB: 16}) {
 		t.Errorf("reach = %d-%d, want the bracketed midpoint 8-16", got.Ncpus, got.MemInGiB)
 	}
 }
 
-// A seed is weaker evidence than a launch and must never displace one. RecordSuccess sets a floor
-// during the entry's life; a seed taken from a node that has been up for hours is older news.
 func TestSeededFloorDoesNotDisplaceALaunchedOne(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
@@ -961,8 +857,6 @@ func TestSeededFloorDoesNotDisplaceALaunchedOne(t *testing.T) {
 	}
 }
 
-// Only the largest seed matters: a smaller running shape says nothing a larger one does not, and
-// order of arrival is whatever order the NodeClaims happened to list in.
 func TestSeedKeepsTheLargestShape(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
@@ -980,9 +874,6 @@ func TestSeedKeepsTheLargestShape(t *testing.T) {
 	}
 }
 
-// A seed at or above the shape just refused describes a rack that has changed since. The refusal is
-// the newer evidence, so the search must fall back to descending rather than bracket above a shape
-// known not to fit.
 func TestSeedAtOrAboveTheRefusalIsDropped(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()

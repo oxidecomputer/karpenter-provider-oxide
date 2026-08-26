@@ -24,8 +24,6 @@ func request(cpus int, memGiB uint64) Resources {
 	return Resources{CPUs: cpus, Memory: memGiB * giB}
 }
 
-// The reason this is per sled rather than per rack. An instance is placed on one sled, so two sleds
-// with four free CPUs each cannot host an eight CPU instance, however the totals add up.
 func TestFragmentationIsNotHiddenByRackTotals(t *testing.T) {
 	rack := snapshotOf(
 		sled("a", 8, 64, 4, 32),
@@ -40,8 +38,6 @@ func TestFragmentationIsNotHiddenByRackTotals(t *testing.T) {
 	}
 }
 
-// Whichever resource runs out first decides, and the counts add across sleds. This is the number two
-// readings are compared on, so it has to mean something more precise than "yes".
 func TestFeasibleCountIsTheTighterOfTheTwoResources(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -82,8 +78,6 @@ func TestFeasibleCountIsTheTighterOfTheTwoResources(t *testing.T) {
 	}
 }
 
-// A sled being drained or expunged has free resources and will still refuse everything, so its
-// headroom is not headroom.
 func TestSledsThatWillNotAcceptInstancesDoNotCount(t *testing.T) {
 	draining := sled("a", 64, 256, 0, 0)
 	draining.Provisionable = false
@@ -97,8 +91,6 @@ func TestSledsThatWillNotAcceptInstancesDoNotCount(t *testing.T) {
 	}
 }
 
-// A snapshot taken while an instance is migrating can report more used than the sled has. Wrapping
-// around would turn that into an enormous amount of free space and make every shape look placeable.
 func TestOversubscribedSledReportsNoFreeSpace(t *testing.T) {
 	free := sled("a", 8, 16, 12, 32).Free()
 
@@ -107,8 +99,6 @@ func TestOversubscribedSledReportsNoFreeSpace(t *testing.T) {
 	}
 }
 
-// The distinction that keeps a broken inventory controller from freezing provisioning: a reading that
-// has stopped being refreshed stops being allowed to rule anything out.
 func TestFreshnessBoundsWhatAReadingMayClaim(t *testing.T) {
 	takenAt := time.Now()
 	rack := NewSnapshot([]Sled{sled("a", 8, 16, 0, 0)}, takenAt, 10*time.Minute, 1)
@@ -124,8 +114,6 @@ func TestFreshnessBoundsWhatAReadingMayClaim(t *testing.T) {
 	}
 }
 
-// The zero snapshot is what a provider with inventory switched off holds, and it must never be
-// mistaken for a reading of an empty rack.
 func TestZeroSnapshotIsUnknownRatherThanEmpty(t *testing.T) {
 	var rack Snapshot
 

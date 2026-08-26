@@ -1,12 +1,4 @@
-// Package storage turns an OxideNodeClass's storage spec, its resolved status and one instance name
-// into the concrete disks a launch creates.
-//
-// It is pure: no Oxide client, no API calls, no cache. That matters because it is the single place a
-// disk name is minted. A disk's name is the only handle the guest has on it -- Nexus sets the
-// emulated NVMe controller's serial number to the first 20 bytes of the name -- so the launch that
-// creates the disks and the user-data that tells the guest which is which have to agree exactly. Two
-// copies of the naming rule is the one bug that would break serial matching in production while every
-// unit test passed, so there is one copy and everything reads from it.
+// Package storage plans attached disks.
 package storage
 
 import (
@@ -24,24 +16,12 @@ import (
 )
 
 const (
-	// dataPrefix marks a disk as a Karpenter data disk, as opposed to a boot disk, which keeps the
-	// instance's own name.
-	dataPrefix = "kd-"
+	diskPrefix = "kd-"
 
-	// fingerprintLength is how many base32 characters of the instance name's digest go into a data
-	// disk name. Twelve characters is 60 bits, which over the instance names alive in a project at
-	// once is a collision probability of about N^2/2^61: four in a hundred billion at ten thousand
-	// instances. It is also fixed width, which is the load-bearing part -- see diskName.
 	fingerprintLength = 12
 
-	// serialLength is how much of a disk name the guest sees. Nexus passes the first 20 bytes of the
-	// name to Propolis as the NVMe controller's serial number, and the serial derives the NVMe
-	// subsystem NQN, so two disks on one instance whose names agree in their first 20 bytes make the
-	// guest kernel reject one of them.
 	serialLength = 20
 
-	// localBlockSize is the block size a local disk is fixed at by the Oxide API. Blank distributed
-	// disks are created with the same size so that a set does not change shape when its type does.
 	localBlockSize = 4096
 )
 
@@ -52,30 +32,22 @@ var ErrTooManyDisks = errors.New("too many disks")
 type Disk struct {
 	// Name is the Oxide disk name.
 	Name string
-	// Serial is what the guest sees as this disk's NVMe serial number, and the only deterministic
-	// handle it has on the disk. Always exactly serialLength bytes: the minimum length of a diskSet
-	// name is what guarantees a data disk name is at least that long, so the serial is never padded
-	// and the guest never has to strip padding to match it.
+	// Serial is the guest-visible NVMe serial number.
 	Serial string
 	// Set is the diskSet this disk belongs to, empty for the boot disk.
 	Set string
-	// Index is the flat index across a launch's disks. Zero is the boot disk; data disks are 1 and up,
-	// and this is the byte that makes their names unique within the instance.
+	// Index is the flat index across a launch's disks.
 	Index int
 	// Ordinal is the disk's position within its set, counting from zero.
 	Ordinal int32
 	Boot    bool
-	// Local is whether the disk is sled-local rather than distributed. It decides both the Oxide disk
-	// backend and, at launch, whether the disk is created ahead of the instance or by it.
+	// Local marks sled-local storage.
 	Local     bool
 	ReadOnly  bool
 	SizeBytes int64
-	// Filesystem is what the guest formats this disk with. Empty means format nothing, which is what
-	// a disk created from an image or a snapshot needs. v1alpha1.FilesystemNone means leave it a raw
-	// block device.
+	// Filesystem is what the guest formats this disk with.
 	Filesystem string
-	// MountPoint is where the guest mounts this disk, or empty for a raw block disk, which is not
-	// mounted in its own right.
+	// MountPoint is empty for raw block disks.
 	MountPoint string
 	// BlockLink is where a raw block disk's device is symlinked, or empty otherwise.
 	BlockLink string
@@ -96,22 +68,19 @@ type Set struct {
 // Plan is every disk one launch creates.
 type Plan struct {
 	InstanceName string
-	// DataPrefix is the prefix every data disk of this launch was named with. It is derived from the
-	// instance name alone, which is what lets a teardown find disks a launch created but never
-	// attached -- something no attachment listing can report.
-	DataPrefix string
-	Boot       Disk
-	Sets       []Set
+	// Prefix is what every disk of this launch, boot disk included, is named with.
+	Prefix string
+	Boot   Disk
+	Sets   []Set
 }
 
-// Build resolves a nodeclass and an instance name into the disks a launch creates.
-//
-// It fails rather than launching something wrong. Most of what it checks is also refused by CEL on
-// the CRD, and it checks again anyway: a nodeclass stored before a rule shipped is not re-validated
-// by the apiserver until it is next written, so the launch is the only place left to catch it.
-func Build(instanceName string, nodeClass *v1alpha1.OxideNodeClass) (Plan, error) {
+// Build resolves a nodeclass, an instance name and a launch token into the disks a launch creates.
+func Build(instanceName, token string, nodeClass *v1alpha1.OxideNodeClass) (Plan, error) {
 	if instanceName == "" {
 		return Plan{}, errors.New("an instance name is required to plan disks")
+	}
+	if token == "" {
+		return Plan{}, errors.New("a launch token is required to plan disks")
 	}
 	spec := nodeClass.Spec.Storage
 
@@ -124,23 +93,19 @@ func Build(instanceName string, nodeClass *v1alpha1.OxideNodeClass) (Plan, error
 		)
 	}
 
+	prefix := Prefix(instanceName, token)
+	bootName := bootDiskName(prefix)
 	plan := Plan{
 		InstanceName: instanceName,
-		DataPrefix:   DataPrefix(instanceName),
+		Prefix:       prefix,
 		Boot: Disk{
-			// The boot disk keeps the instance's own name. It is the one disk name an operator can
-			// read and tie to a node without a hash table, its serial cannot collide with a data
-			// disk's because those all start "kd-", and renaming it would mean carrying the old name
-			// through teardown forever: the name is the only handle left on the disk once the
-			// instance is gone and can no longer be asked what it booted from.
-			Name:      instanceName,
-			Serial:    Serial(instanceName),
+
+			Name:      bootName,
+			Serial:    Serial(bootName),
 			Index:     0,
 			Boot:      true,
 			SizeBytes: spec.Boot.Size.Value(),
-			// Images is empty when no selector matched. Launch with an empty image and let the Oxide
-			// API reject it, which is what happened when an unmatched selector still left a
-			// zero-valued entry here.
+
 			ImageID: lo.FirstOrEmpty(nodeClass.Status.Images).ID,
 		},
 	}
@@ -186,7 +151,7 @@ func buildSet(
 
 	for ordinal := int32(0); ordinal < set.EffectiveCount(); ordinal++ {
 		*index++
-		name := diskName(plan.InstanceName, *index, set.Name, ordinal)
+		name := diskName(plan.Prefix, *index, set.Name, ordinal)
 		disk := Disk{
 			Name:       name,
 			Serial:     Serial(name),
@@ -202,9 +167,7 @@ func buildSet(
 		}
 		switch {
 		case rawBlock:
-			// Always beneath the directory, including for a set of one. The local static provisioner
-			// discovers the contents of its hostDir, so a hostDir that is itself a symlink to a
-			// device discovers nothing. CEL forbids mountPath here so there is no other case.
+
 			disk.BlockLink = path.Join(set.MountDir, fmt.Sprintf("%s-%d", set.Name, ordinal))
 		case set.MountPath != "":
 			disk.MountPoint = set.MountPath
@@ -216,8 +179,6 @@ func buildSet(
 	return resolved, nil
 }
 
-// source returns the resolved image or snapshot a set's disks are created from, and refuses a set
-// whose selector resolved to nothing rather than launching a disk with an empty source.
 func source(nodeClass *v1alpha1.OxideNodeClass, set v1alpha1.DiskSet) (string, string, error) {
 	if !set.Sourced() {
 		return "", "", nil
@@ -249,9 +210,6 @@ func source(nodeClass *v1alpha1.OxideNodeClass, set v1alpha1.DiskSet) (string, s
 		id, sourceSize, kind = snapshot.ID, snapshot.SizeBytes, "snapshot"
 	}
 
-	// Refused rather than rounded up. A disk silently larger than the nodeclass asked for is a
-	// storage bill nobody agreed to, and the Oxide API would reject the create anyway with nothing on
-	// the nodeclass to explain it.
 	if size := set.Size.Value(); sourceSize > 0 && size < sourceSize {
 		return "", "", fmt.Errorf(
 			"diskSet %q asks for %d bytes per disk, which is smaller than the %s it is created from at %d bytes",
@@ -274,9 +232,6 @@ func diskSetStatuses(nodeClass *v1alpha1.OxideNodeClass) []v1alpha1.DiskSetStatu
 	return nodeClass.Status.Storage.DiskSets
 }
 
-// checkMountFields refuses a mount target that would not survive being interpolated into the
-// generated shell and JSON. Rejecting these here is what lets the renderer print them as literals
-// rather than escaping at every use, and CEL already refuses most of them on the way in.
 func checkMountFields(set v1alpha1.DiskSet) error {
 	if (set.MountPath == "") == (set.MountDir == "") {
 		return fmt.Errorf(
@@ -296,9 +251,7 @@ func checkMountFields(set v1alpha1.DiskSet) error {
 			set.Name, field, target, path.Clean(target),
 		)
 	}
-	// A space is refused along with the quoting characters. It survives the shell, but /etc/fstab
-	// separates its fields on whitespace and would need it written as \040, and a mount point spelled
-	// one way in the table and another in fstab is worse than a nodeclass that is refused outright.
+
 	if i := strings.IndexAny(target, "'\"\\\n\r\t "); i >= 0 {
 		return fmt.Errorf(
 			"diskSet %q: %s %q contains %q, which is not allowed in a mount target",
@@ -308,12 +261,6 @@ func checkMountFields(set v1alpha1.DiskSet) error {
 	return nil
 }
 
-// checkSerials refuses a plan in which two disks would present the guest the same NVMe serial.
-//
-// This is the failure this whole package's naming scheme exists to prevent, so it is asserted rather
-// than assumed. The guest kernel rejects the second of two disks whose serials collide, which means a
-// node that boots one disk short with nothing in the launch to explain it. Caught here, it is an
-// error on the launch instead.
 func checkSerials(plan Plan) error {
 	seen := map[string]string{plan.Boot.Serial: plan.Boot.Name}
 	for _, set := range plan.Sets {
@@ -332,10 +279,18 @@ func checkSerials(plan Plan) error {
 	return nil
 }
 
-// DataPrefix is the prefix every data disk of a launch is named with. Derived from the instance name
-// alone, so a teardown that has nothing but the NodeClaim name can still find them.
-func DataPrefix(instanceName string) string {
-	return dataPrefix + fingerprint(instanceName) + "-"
+// Prefix is what every disk of one launch is named with.
+func Prefix(instanceName, token string) string {
+	return diskPrefix + fingerprint(instanceName+"\x00"+token) + "-"
+}
+
+// LegacyPrefix is the prefix disks were named with before a launch had a token.
+func LegacyPrefix(instanceName string) string {
+	return diskPrefix + fingerprint(instanceName) + "-"
+}
+
+func bootDiskName(prefix string) string {
+	return prefix + "0-boot"
 }
 
 // Serial is what the guest sees of a disk name: its first serialLength bytes.
@@ -346,34 +301,12 @@ func Serial(name string) string {
 	return name[:serialLength]
 }
 
-// diskName builds a data disk's name.
-//
-//	kd-<fingerprint>-<index>-<set>-<ordinal>
-//	│  │             │       │     └ ordinal within the set, for readability and the mount directory
-//	│  │             │       └────── diskSet name, for readability
-//	│  │             └────────────── flat index across the launch's data disks, 1..7
-//	│  └──────────────────────────── 12 fixed-width base32 characters of the instance name's digest
-//	└─────────────────────────────── marks a Karpenter data disk
-//
-// The fingerprint being fixed width is the whole point: everything before the index is a constant
-// number of bytes, so the index always lands on byte 17, inside the 20 bytes the guest sees as the
-// serial, and nothing a user writes in a diskSet name can push it out. Within one instance the
-// fingerprint is constant and the index is distinct, so no two of its disks can collide.
-//
-// The minimum diskSet name length of three characters then makes every data disk name at least 23
-// bytes, so the serial is a truncation rather than a padded field, and the guest can compare it as a
-// plain string.
-func diskName(instanceName string, index int, setName string, ordinal int32) string {
-	return fmt.Sprintf("%s%d-%s-%d", DataPrefix(instanceName), index, setName, ordinal)
+func diskName(prefix string, index int, setName string, ordinal int32) string {
+	return fmt.Sprintf("%s%d-%s-%d", prefix, index, setName, ordinal)
 }
 
-// fingerprint is a fixed-width, lowercase base32 digest of the instance name.
-//
-// Base32 rather than hex so that 60 bits fit in 12 characters, and lowercased because an Oxide name
-// may not contain uppercase. RFC 4648's alphabet has no 0, 1, 8 or 9, so a fingerprint can never be
-// confused with the decimal index and ordinal that follow it, and can never start with a digit.
-func fingerprint(instanceName string) string {
-	sum := sha256.Sum256([]byte(instanceName))
+func fingerprint(launch string) string {
+	sum := sha256.Sum256([]byte(launch))
 	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
 	return strings.ToLower(encoded)[:fingerprintLength]
 }
@@ -392,22 +325,12 @@ func (p Plan) All() []Disk {
 	return append([]Disk{p.Boot}, p.Data()...)
 }
 
-// Names is every disk name the launch owns. It is what cleanup abandons on a failure: the whole
-// planned set rather than the disks that happened to be created, since a name in it can only ever
-// have been created by an earlier attempt at this same launch.
+// Names is every disk name the launch owns.
 func (p Plan) Names() []string {
 	return lo.Map(p.All(), func(disk Disk, _ int) string { return disk.Name })
 }
 
 // DistributedBytes is the storage this launch would add to the silo's provisioned total.
-//
-// Local disks are deliberately excluded. The Oxide API reports one storage figure with no way to tell
-// the two backends apart, so whether local disks are charged to it is not something this code can
-// know. The two ways to be wrong are not symmetric: under-counting means the pre-check passes and the
-// disk create is refused, which the launch already handles and reports as insufficient storage, while
-// over-counting means refusing launches the rack would have accepted and explaining the refusal with a
-// number that is not true, which nothing recovers from. So this counts what it is sure of and leaves
-// the API as the authority on the rest.
 func (p Plan) DistributedBytes() int64 {
 	total := p.Boot.SizeBytes
 	for _, disk := range p.Data() {
@@ -418,8 +341,7 @@ func (p Plan) DistributedBytes() int64 {
 	return total
 }
 
-// MountOrder is every disk the guest mounts, ordered so that a parent directory is always mounted
-// before anything nested beneath it.
+// MountOrder returns disks with parent paths first.
 func (p Plan) MountOrder() []Disk {
 	var mounted []Disk
 	for _, set := range p.Sets {
@@ -449,20 +371,17 @@ func (p Plan) BlockLinks() []Disk {
 }
 
 // BootAttachment is the boot disk as an instance create asks for it.
-func (p Plan) BootAttachment() oxide.InstanceDiskAttachment {
-	return oxide.InstanceDiskAttachment{Value: attachmentCreate(p.Boot, "Boot disk")}
+func (p Plan) BootAttachment(description string) oxide.InstanceDiskAttachment {
+	return oxide.InstanceDiskAttachment{Value: attachmentCreate(p.Boot, description)}
 }
 
 // DataAttachments is every data disk as an instance create asks for it.
-func (p Plan) DataAttachments() []oxide.InstanceDiskAttachment {
+func (p Plan) DataAttachments(description func(Disk) string) []oxide.InstanceDiskAttachment {
 	data := p.Data()
 	attachments := make([]oxide.InstanceDiskAttachment, 0, len(data))
 	for _, disk := range data {
 		attachments = append(attachments, oxide.InstanceDiskAttachment{
-			Value: attachmentCreate(
-				disk,
-				fmt.Sprintf("diskSet %s disk %d", disk.Set, disk.Ordinal),
-			),
+			Value: attachmentCreate(disk, description(disk)),
 		})
 	}
 	return attachments
@@ -477,11 +396,6 @@ func attachmentCreate(disk Disk, description string) *oxide.InstanceDiskAttachme
 	}
 }
 
-// backend is the Oxide disk backend for a disk.
-//
-// A local disk has no disk source at all: DiskBackendLocal is an empty struct, which is the API's way
-// of saying a local disk cannot be created from an image or a snapshot and has a block size fixed at
-// 4 KiB. That is why a Local diskSet cannot carry a source selector.
 func backend(disk Disk) oxide.DiskBackend {
 	if disk.Local {
 		return oxide.DiskBackend{Value: &oxide.DiskBackendLocal{}}
@@ -504,8 +418,6 @@ func backend(disk Disk) oxide.DiskBackend {
 	return oxide.DiskBackend{Value: &oxide.DiskBackendDistributed{DiskSource: src}}
 }
 
-// readOnly is nil unless the disk is actually read-only, so that the common case sends no field at
-// all rather than an explicit false.
 func readOnly(disk Disk) *bool {
 	if !disk.ReadOnly {
 		return nil

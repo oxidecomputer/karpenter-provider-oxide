@@ -62,8 +62,6 @@ func TestDecorationsRendersEveryField(t *testing.T) {
 	}
 }
 
-// A sled that is expunged carries no provision policy, and empty values must be omitted rather than
-// written as empty labels: an empty sled-policy label reads as "we looked and it has no policy".
 func TestDecorationsOmitsEmptyValues(t *testing.T) {
 	p := placement()
 	p.ProvisionPolicy = ""
@@ -87,8 +85,6 @@ func TestDecorationsOmitsEmptyValues(t *testing.T) {
 	}
 }
 
-// A value that is not legal in a label is dropped from the labels but must still be recorded, since
-// the serial is the operator's handle on the physical sled.
 func TestDecorationsDropsIllegalLabelValues(t *testing.T) {
 	p := placement()
 	p.Serial = strings.Repeat("x", 64)
@@ -117,23 +113,18 @@ func TestNeedsPatch(t *testing.T) {
 		t.Error("an unlabeled node was reported as not needing a patch")
 	}
 
-	// A node that moved sleds, which is the case the whole resync exists for.
 	moved := maps.Clone(labels)
 	moved[v1alpha1.LabelSledID] = "b6a2f1d0-0000-4000-8000-000000000009"
 	if !needsPatch(labels, moved) {
 		t.Error("a changed sled ID was reported as not needing a patch")
 	}
 
-	// A newer observation of an unchanged placement must not rewrite the node: the timestamp alone
-	// changes every refresh, and every node in the cluster would be patched every period.
 	_, later := decorations(placement(), observedAt.Add(time.Hour))
 	if needsPatch(annotations, later) {
 		t.Error("a newer timestamp alone was reported as needing a patch")
 	}
 }
 
-// Every reason the sled package can report has to map to a Reason on the condition. A new reason
-// added there without a mapping here would silently write an empty Reason onto the node.
 func TestConditionReasonsCoverEverySledReason(t *testing.T) {
 	for _, reason := range []sled.UnhealthyReason{
 		sled.ReasonExpunged,
@@ -214,8 +205,6 @@ func conditionOn(t *testing.T, kubeClient client.Client, name string) corev1.Nod
 	return nodeutils.GetCondition(node, v1alpha1.ConditionTypeSledUnhealthy)
 }
 
-// The condition is the only thing here that can get a node deleted, so an unhealthy sled has to
-// produce exactly the True status core's repair policy matches on.
 func TestApplyConditionMarksUnhealthySled(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
 	c, kubeClient := newNodeController(t, node)
@@ -239,8 +228,6 @@ func TestApplyConditionMarksUnhealthySled(t *testing.T) {
 	}
 }
 
-// A healthy sled must write False rather than leaving the condition absent, so that a sled coming back
-// into service releases a node core would otherwise go on to repair.
 func TestApplyConditionClearsWhenSledReturnsToService(t *testing.T) {
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
@@ -266,9 +253,6 @@ func TestApplyConditionClearsWhenSledReturnsToService(t *testing.T) {
 	}
 }
 
-// LastTransitionTime is what core measures the repair toleration duration from. Rewriting the
-// condition while the status is unchanged would push that timestamp forward on every resync, and a
-// node would age toward repair forever without reaching it.
 func TestApplyConditionDoesNotResetTransitionTime(t *testing.T) {
 	transitioned := metav1.NewTime(observedAt)
 	node := &corev1.Node{

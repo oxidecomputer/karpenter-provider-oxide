@@ -37,27 +37,27 @@ The CRDs live in the separate `karpenter-crd` chart and must be installed first.
 | additionalAnnotations | object | `{}` | Additional annotations to add into metadata. |
 | additionalClusterRoleRules | list | `[]` | Specifies additional rules for the core ClusterRole. |
 | additionalLabels | object | `{}` | Additional labels to add into metadata. |
-| affinity | object | `{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"karpenter.sh/nodepool","operator":"DoesNotExist"}]}]}},"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname"}]}}` | Affinity rules for scheduling the pod. If an explicit label selector is not provided for pod affinity or pod anti-affinity one will be created from the pod selector labels. |
-| bootstrap | object | `{"kubeadm":{"enabled":false},"rke2":{"enabled":true,"tokenSecret":{"name":"rancher-agent-token","namespace":""}}}` | Bootstrap provider configuration. Only enable the providers actually in use: each one is granted its own namespaced Role, so a disabled provider's permissions are never created at all. |
-| bootstrap.kubeadm.enabled | bool | `false` | Enable RBAC for the kubeadm bootstrap provider. This grants get on the kube-public/cluster-info ConfigMap and create (but not read) on kube-system Secrets, so that short-lived bootstrap tokens can be minted per node. |
+| affinity | object | `{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"karpenter.sh/nodepool","operator":"DoesNotExist"}]}]}},"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname"}]}}` | Affinity rules for scheduling the pod. |
+| bootstrap | object | `{"kubeadm":{"enabled":false},"rke2":{"enabled":true,"tokenSecret":{"name":"rancher-agent-token","namespace":""}}}` | Bootstrap provider configuration. |
+| bootstrap.kubeadm.enabled | bool | `false` | Enable RBAC for the kubeadm bootstrap provider. |
 | bootstrap.rke2.enabled | bool | `true` | Enable RBAC for the RKE2 bootstrap provider. |
-| bootstrap.rke2.tokenSecret | object | `{"name":"rancher-agent-token","namespace":""}` | The Secret holding the RKE2 agent join token. The controller is granted get on this one Secret by name, so this must match spec.bootstrap.rke2.tokenRef on the OxideNodeClass. |
+| bootstrap.rke2.tokenSecret | object | `{"name":"rancher-agent-token","namespace":""}` | The Secret holding the RKE2 agent join token. |
 | bootstrap.rke2.tokenSecret.name | string | `"rancher-agent-token"` | Name of the token Secret. |
-| bootstrap.rke2.tokenSecret.namespace | string | `""` | Namespace of the token Secret. Defaults to the release namespace. |
+| bootstrap.rke2.tokenSecret.namespace | string | `""` | Namespace of the token Secret. |
 | controller.env | list | `[]` | Additional environment variables for the controller pod. |
 | controller.envFrom | list | `[]` |  |
 | controller.extraVolumeMounts | list | `[]` | Additional volumeMounts for the controller pod. |
 | controller.healthProbe.port | int | `8081` | The container port to use for http health probe. |
 | controller.image.digest | string | `""` | SHA256 digest of the controller image. |
 | controller.image.repository | string | `"ghcr.io/oxidecomputer/karpenter"` | Repository path to the controller image. |
-| controller.image.tag | string | `""` | Tag of the controller image. Defaults to the chart's appVersion. |
+| controller.image.tag | string | `""` | Tag of the controller image. |
 | controller.metrics.port | int | `8080` | The container port to use for metrics. |
 | controller.resources | object | `{}` | Resources for the controller pod. |
 | dnsConfig | object | `{}` | Configure DNS Config for the pod. |
 | dnsPolicy | string | `"Default"` | Configure the DNS Policy for the pod. |
 | extraVolumes | list | `[]` | Additional volumes for the pod. |
 | fullnameOverride | string | `""` | Overrides the chart's computed fullname. |
-| hostNetwork | bool | `false` | Bind the pod to the host network. This is required when using a custom CNI. |
+| hostNetwork | bool | `false` | Bind the pod to the host network. |
 | imagePullPolicy | string | `"IfNotPresent"` | Image pull policy for Docker images. |
 | imagePullSecrets | list | `[]` | Image pull secrets for Docker images. |
 | logLevel | string | `"info"` | Global log level, defaults to 'info'. |
@@ -73,35 +73,48 @@ The CRDs live in the separate `karpenter-crd` chart and must be installed first.
 | revisionHistoryLimit | int | `10` | The number of old ReplicaSets to retain to allow rollback. |
 | serviceAccount.annotations | object | `{}` | Additional annotations for the ServiceAccount. |
 | serviceAccount.create | bool | `true` | Specifies if a ServiceAccount should be created. |
-| serviceAccount.name | string | `""` | The name of the ServiceAccount to use. If not set and create is true, a name is generated using the fullname template. |
+| serviceAccount.name | string | `""` | The name of the ServiceAccount to use. |
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"inventory":{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"},"minValuesPolicy":"Strict","oxide":{"host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","quota":{"enabled":true,"refreshPeriod":"1m"}}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"},"launch":{"deadline":"10m","diskCreatingDeadline":"2m","instanceCreatingDeadline":"2m","instanceStartingDeadline":"5m","instanceStoppingDeadline":"3m"},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","quota":{"enabled":true,"refreshPeriod":"1m"},"reaper":{"enabled":true,"period":"1m","quarantine":"5m"}}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
-| settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. The longer this is, the more pods we can consider for provisioning at one time which usually results in fewer but larger nodes. |
+| settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
 | settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false}` | Feature gate configuration values. |
 | settings.featureGates.nodeOverlay | bool | `false` | nodeOverlay is ALPHA and is disabled by default. |
 | settings.featureGates.nodeRepair | bool | `false` | nodeRepair is ALPHA and is disabled by default. |
 | settings.featureGates.spotToSpotConsolidation | bool | `false` | spotToSpotConsolidation is ALPHA and is disabled by default. |
 | settings.featureGates.staticCapacity | bool | `false` | staticCapacity is ALPHA and is disabled by default. |
-| settings.inventory | object | `{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"}` | Sled inventory configuration. Records which physical sled each node landed on, as labels and annotations on the Node and NodeClaim, and uses the same rack reading to stop offering instance types no sled has room for. Provisioning still works whether this is enabled, disabled, or failing: a snapshot that stops refreshing is ignored, and unplaceable shapes are then learned from refused launches instead. |
-| settings.inventory.enabled | bool | `false` | Enable the sled inventory controllers. This requires an Oxide token with fleet-level read access to the system API (/v1/system/hardware/sleds), which is a much broader grant than provisioning instances into a single project. Leave this disabled unless the placement labels are wanted. If enabled with a token that cannot read the system API, the controller logs the failure and applies no labels rather than failing. |
-| settings.inventory.refreshPeriod | string | `"5m"` | How often the sled inventory is re-read from the Oxide API. Building it costs one API call per sled in the rack, so lowering this raises fleet API load proportionally. A reading is trusted for twice this long; past that it is ignored rather than allowed to constrain provisioning on stale information. |
-| settings.inventory.repairTolerationDuration | string | `"30m"` | How long a node may sit on a sled that is being taken out of service (expunged, or closed to new placements) before Karpenter drains it and provisions a replacement. Replacement ALSO requires settings.featureGates.nodeRepair, and is subject to core's node repair guardrail that blocks repair while more than 20% of a NodePool's nodes are unhealthy. Set to 0 to record sled health without ever replacing nodes for it. |
-| settings.minValuesPolicy | string | `"Strict"` | How the Karpenter scheduler treats min values. Options are 'Strict' and 'BestEffort'. |
-| settings.oxide | object | `{"host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |
+| settings.instanceTypes | object | `{"incrementPercent":10}` | Instance type catalog generation. |
+| settings.instanceTypes.incrementPercent | int | `10` | Percentage increase between successive CPU and memory values in the generated catalog. |
+| settings.inventory | object | `{"enabled":false,"refreshPeriod":"5m","repairTolerationDuration":"30m"}` | Sled inventory configuration. |
+| settings.inventory.enabled | bool | `false` | Enable the sled inventory controllers. |
+| settings.inventory.refreshPeriod | string | `"5m"` | How often the sled inventory is re-read from the Oxide API. |
+| settings.inventory.repairTolerationDuration | string | `"30m"` | Time before replacing a node on an unhealthy sled. |
+| settings.launch | object | `{"deadline":"10m","diskCreatingDeadline":"2m","instanceCreatingDeadline":"2m","instanceStartingDeadline":"5m","instanceStoppingDeadline":"3m"}` | Launch deadlines. |
+| settings.launch.deadline | string | `"10m"` | Overall bound on a single launch, across every Oxide API call it makes. |
+| settings.launch.diskCreatingDeadline | string | `"2m"` | How long a disk may sit in the creating state. |
+| settings.launch.instanceCreatingDeadline | string | `"2m"` | How long an instance may sit in the creating state. |
+| settings.launch.instanceStartingDeadline | string | `"5m"` | Node registration deadline for a placed instance. |
+| settings.launch.instanceStoppingDeadline | string | `"3m"` | How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in. |
+| settings.minValuesPolicy | string | `"Strict"` | How the Karpenter scheduler treats min values. |
+| settings.oxide | object | `{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |
+| settings.oxide.clusterID | string | `""` | Identity this cluster records on every Oxide resource it creates. |
 | settings.oxide.host | string | `""` | URL of the Oxide API, for example https://oxide.sys.example.com. |
 | settings.oxide.project | string | `""` | Oxide project that Karpenter provisions instances into. |
-| settings.oxide.tokenSecret | object | `{"key":"token","name":"oxide-api-token"}` | Secret in the release namespace holding the Oxide API token. The token is referenced rather than templated so it is never written into the Helm release. |
-| settings.preferencePolicy | string | `"Respect"` | How the Karpenter scheduler should treat preferences. Can be one of 'Ignore' and 'Respect'. |
-| settings.quota | object | `{"enabled":true,"refreshPeriod":"1m"}` | Silo quota configuration. Constrains the instance types Karpenter offers to those the silo has quota headroom for, so the scheduler does not pick a shape the API will refuse. |
-| settings.quota.enabled | bool | `true` | Enable silo quota awareness. This reads /v1/utilization, which is silo-scoped and needs no permissions beyond launching instances, so it is on by default. If the read fails, instance types are left unconstrained and a launch that exceeds the quota fails at the API instead; provisioning is never blocked by an unreadable quota. |
-| settings.quota.refreshPeriod | string | `"1m"` | How often the silo's quota is re-read. This is a single API call, and what it measures changes whenever anything in the silo starts or stops. |
+| settings.oxide.tokenSecret | object | `{"key":"token","name":"oxide-api-token"}` | Secret in the release namespace holding the Oxide API token. |
+| settings.preferencePolicy | string | `"Respect"` | How the Karpenter scheduler should treat preferences. |
+| settings.quota | object | `{"enabled":true,"refreshPeriod":"1m"}` | Silo quota configuration. |
+| settings.quota.enabled | bool | `true` | Enable silo quota awareness. |
+| settings.quota.refreshPeriod | string | `"1m"` | How often the silo's quota is re-read. |
+| settings.reaper | object | `{"enabled":true,"period":"1m","quarantine":"5m"}` | Orphan reaper. |
+| settings.reaper.enabled | bool | `true` | Enable the orphan reaper. |
+| settings.reaper.period | string | `"1m"` | How often the project is rescanned. |
+| settings.reaper.quarantine | string | `"5m"` | How long a resource must look orphaned before it is deleted. |
 | strategy | object | `{"rollingUpdate":{"maxUnavailable":1}}` | Strategy for updating the pod. |
 | terminationGracePeriodSeconds | string | `nil` | Override the default termination grace period for the pod. |
 | tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"}]` | Tolerations to allow the pod to be scheduled to nodes with taints. |
-| topologySpreadConstraints | list | `[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]` | Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones. If an explicit label selector is not provided one will be created from the pod selector labels. |
+| topologySpreadConstraints | list | `[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]` | Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones. |
 
 ----------------------------------------------
 

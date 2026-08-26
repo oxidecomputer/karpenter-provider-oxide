@@ -11,8 +11,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 )
 
-// clock is a hand-wound clock, so that the ceiling cases can be about how old a reading is rather
-// than about how long a test is willing to sleep.
 type clock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -34,8 +32,6 @@ func (c *clock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// counter is a resolve function that records how many times it was called, so that a cache hit can be
-// asserted as the absence of an API call rather than as the presence of the right answer.
 type counter struct {
 	calls int
 	value string
@@ -50,10 +46,6 @@ func (c *counter) resolve(context.Context) (string, error) {
 	return c.value, nil
 }
 
-// ttl is the coalescing window these tests measure against. Its own number, not
-// providers.CoalesceWindow, because what a cache does inside its window is the same whatever the
-// production window happens to be -- and deliberately not equal to it, so that a test asserting the
-// staleness ceiling cannot pass by accident on the two being the same length.
 const ttl = 5 * time.Minute
 
 func TestCacheServesAHitWithoutResolving(t *testing.T) {
@@ -101,8 +93,6 @@ func TestCacheReresolvesPastTheTTL(t *testing.T) {
 	}
 }
 
-// An edited selector is a different question, so it is a different key. This is the whole of cache
-// invalidation: nothing has to notice the edit, because nothing looks up the old answer again.
 func TestADifferentKeyResolvesSeparately(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 	resolver := &counter{value: "first"}
@@ -126,14 +116,10 @@ func TestADifferentKeyResolvesSeparately(t *testing.T) {
 	}
 }
 
-// Two nodeclasses selecting the same resources ask the same question, so they share one reading. This
-// is what makes the cache shared rather than per nodeclass.
 func TestIdenticalSelectorsShareOneEntry(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 	resolver := &counter{value: "first"}
 
-	// Written in a different order on purpose: the fingerprint is over the set of selectors, not over
-	// the order someone happened to type them in.
 	first := Fingerprint([]string{"ubuntu-*", "rke2-*"})
 	second := Fingerprint([]string{"rke2-*", "ubuntu-*"})
 	if first != second {
@@ -153,8 +139,6 @@ func TestIdenticalSelectorsShareOneEntry(t *testing.T) {
 	}
 }
 
-// A transient API failure must not take a nodeclass un-Ready over a reading that has not
-// meaningfully aged, so the last good reading is served with Stale set and no error.
 func TestAFailedResolutionServesTheLastReading(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
@@ -178,9 +162,6 @@ func TestAFailedResolutionServesTheLastReading(t *testing.T) {
 	}
 }
 
-// Past the ceiling the cache stops absorbing. Serving stale indefinitely would make a revoked token
-// look identical to a healthy cluster, and the error says how long it has been failing because "the
-// API call failed" does not distinguish the first failure from the twentieth.
 func TestAFailedResolutionPastTheCeilingReturnsTheError(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
@@ -191,9 +172,6 @@ func TestAFailedResolutionPastTheCeilingReturnsTheError(t *testing.T) {
 	}
 	resolver.err = errors.New("the API is unreachable")
 
-	// Three resyncs in a row that could not be made are absorbed; the reading is only over the
-	// ceiling once it is older than providers.StaleLimit. Advanced a resync at a time rather than a
-	// TTL at a time, because the ceiling is pinned to the resync and not to the coalescing window.
 	for range providers.StaleLimit / providers.ResolveInterval {
 		clk.advance(providers.ResolveInterval)
 		entry, err := cache.Get(context.Background(), "key", resolver.resolve)
@@ -222,8 +200,6 @@ func TestAFailedResolutionPastTheCeilingReturnsTheError(t *testing.T) {
 	}
 }
 
-// The first resolution of a set of selectors having failed leaves nothing to serve, so the error is
-// the only honest answer.
 func TestAFailedResolutionWithNothingCachedReturnsTheError(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 	want := errors.New("the API is unreachable")
@@ -234,8 +210,6 @@ func TestAFailedResolutionWithNothingCachedReturnsTheError(t *testing.T) {
 	}
 }
 
-// A successful resolution clears the failure history, so a run of failures that recovers does not
-// count towards a later run's ceiling.
 func TestASuccessfulResolutionClearsStaleness(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
@@ -260,8 +234,6 @@ func TestASuccessfulResolutionClearsStaleness(t *testing.T) {
 	}
 }
 
-// An entry nothing has asked about for an hour belongs to selectors nothing is asking about any more,
-// almost always a deleted nodeclass. Dropping it is what garbage collects the cache.
 func TestAnUnreadEntryIsPruned(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
@@ -279,13 +251,9 @@ func TestAnUnreadEntryIsPruned(t *testing.T) {
 	}
 }
 
-// Concurrent Gets for one key collapse into one resolve, which is what stops a burst of reconciles
-// from issuing a burst of identical API calls.
 func TestConcurrentGetsCollapse(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 
-	// Not guarded, and it does not need to be: the cache holds one lock across the resolve, so if
-	// this races the test has already found the bug it is here to catch.
 	resolver := &counter{value: "first"}
 
 	var wg sync.WaitGroup

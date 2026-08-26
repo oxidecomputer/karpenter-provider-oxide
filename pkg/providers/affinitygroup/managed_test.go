@@ -8,8 +8,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// defaultNodeClass is the nodeclass name most of these cases share, so that what varies between
-// them is only the managed group configuration.
 const defaultNodeClass = "default"
 
 func TestManagedGroupName(t *testing.T) {

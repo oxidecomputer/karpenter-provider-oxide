@@ -17,6 +17,8 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
@@ -25,7 +27,9 @@ import (
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/nodeoverlay"
@@ -42,24 +46,19 @@ type OxideCloudProvider struct {
 	ox         *oxide.Client
 	project    string
 
+	clusterUID types.UID
+
 	instanceProvider     *instance.Provider
 	instanceTypeProvider *instancetype.Provider
 	instanceTypeStore    instanceTypeOverlayStore
-	// affinityPolicy backs a nodeclass off when the rack cannot satisfy a fail-policy affinity group.
-	// Separate from instanceTypeProvider because such a refusal is not about a shape, so it must not
-	// reach the shape circuit breaker. See pkg/affinitypolicy.
+
 	affinityPolicy *affinitypolicy.Tracker
 	bootstrappers  bootstrap.Bootstrappers
 	repairPolicies []cloudprovider.RepairPolicy
-	// drifters decide drift for one resolved resource each, in the order the nodeclass controller
-	// resolves them. Which reason wins when several apply is therefore this slice's order, so it is
-	// the caller's to fix rather than something assembled here.
+
 	drifters []providers.Drifter
 }
 
-// instanceTypeOverlayStore is the NodeOverlay view shared with Karpenter core. Keeping the field
-// behind the one operation Create needs makes the launch-price path independently testable while the
-// production constructor still requires Karpenter's concrete store.
 type instanceTypeOverlayStore interface {
 	Apply(string, *cloudprovider.InstanceType) (*cloudprovider.InstanceType, error)
 }
@@ -68,6 +67,8 @@ func NewOxideCloudProvider(
 	kubeClient client.Client,
 	ox *oxide.Client,
 	project string,
+	clusterUID types.UID,
+	instanceProvider *instance.Provider,
 	instanceTypeProvider *instancetype.Provider,
 	instanceTypeStore *nodeoverlay.InstanceTypeStore,
 	affinityPolicy *affinitypolicy.Tracker,
@@ -79,22 +80,9 @@ func NewOxideCloudProvider(
 		kubeClient: kubeClient,
 		ox:         ox,
 		project:    project,
-		// Every teardown reports what it gave back, including the ones that happen inside a failed
-		// launch. A shape the rack refused an hour ago may well fit in the room a terminating node
-		// just left, and waiting out the rest of its backoff to find that out is exactly the delay
-		// this is here to avoid.
-		instanceProvider: instance.NewProvider(
-			ox,
-			project,
-			func(ctx context.Context, released instance.Released) {
-				instanceTypeProvider.RecordCapacityReleased(ctx, instancetype.Specs{
-					Ncpus: released.Ncpus,
-					// Truncating is the conservative direction: it can only understate what came
-					// back, which reopens fewer shapes rather than more.
-					MemInGiB: int(released.Memory / GiB),
-				})
-			},
-		),
+		clusterUID: clusterUID,
+
+		instanceProvider:     instanceProvider,
 		instanceTypeProvider: instanceTypeProvider,
 		instanceTypeStore:    instanceTypeStore,
 		affinityPolicy:       affinityPolicy,
@@ -109,14 +97,12 @@ func (c *OxideCloudProvider) Name() string {
 	return "oxide"
 }
 
-// Create launches a NodeClaim with the given resource requests and requirements and returns a hydrated
-// NodeClaim back with resolved NodeClaim labels for the launched NodeClaim
+// Create launches a NodeClaim with the given resource requests and requirements.
 func (c *OxideCloudProvider) Create(
 	ctx context.Context,
 	nodeClaim *karpcorev1.NodeClaim,
 ) (*karpcorev1.NodeClaim, error) {
 
-	// Get the Oxide Node Class from the NodeClaim
 	nodeClass := &v1alpha1.OxideNodeClass{}
 	if err := c.kubeClient.Get(
 		ctx,
@@ -126,8 +112,6 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
 	}
 
-	// Taints are per-NodeClaim rather than per-nodeclass, so they are resolved here and handed to the
-	// bootstrapper to apply in whatever form it registers nodes with.
 	nodeTaints := append(
 		append(nodeClaim.Spec.Taints, nodeClaim.Spec.StartupTaints...),
 		corev1.Taint{
@@ -151,12 +135,6 @@ func (c *OxideCloudProvider) Create(
 		candidates = req.Values
 	}
 
-	// Shapes that cannot be launched are dropped here as well as from the offerings the scheduler
-	// sees. The NodeClaim carries the requirements it was built with, so one that was already in
-	// flight when a shape became unavailable can still ask for it.
-	//
-	// The reason is kept so the error below can say which limit was hit. Quota wins when both apply,
-	// because it is the one an operator can do something about.
 	blockedBy := instancetype.Reason("")
 	available := lo.Filter(candidates, func(candidate string, _ int) bool {
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
@@ -176,7 +154,6 @@ func (c *OxideCloudProvider) Create(
 		)
 	}
 
-	// Smallest first, so the launch takes the least of the rack that satisfies the NodeClaim.
 	ordered := lo.FilterMap(available, func(candidate string, _ int) (instancetype.Specs, bool) {
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
 		return specs, err == nil
@@ -192,9 +169,6 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("no instance types match NodeClaim requirements")
 	}
 
-	// A shape whose backoff has just elapsed is offered again, but only one launch is allowed to test
-	// it. Losing that race is not a capacity failure, so this walks on to the next shape rather than
-	// turning a local interlock into a refusal the rack never issued.
 	instanceType, held := instancetype.Specs{}, false
 	for _, specs := range ordered {
 		if c.instanceTypeProvider.TryAcquire(specs) {
@@ -203,16 +177,13 @@ func (c *OxideCloudProvider) Create(
 		}
 	}
 	if !held {
-		// Retryable on purpose. The probe ahead of this one settles the question within a launch or
-		// two, and whichever way it goes the next attempt has a better answer than this one could.
+
 		return nil, fmt.Errorf(
 			"all %d instance types the NodeClaim can use are being probed by another launch",
 			len(ordered),
 		)
 	}
-	// Nothing below reports an outcome for a launch abandoned before the rack sees it, so the
-	// reservation is handed back here. RecordICE and RecordSuccess release it themselves; this is
-	// idempotent alongside them.
+
 	defer c.instanceTypeProvider.ReleaseProbe(instanceType)
 	effectiveInstanceType, err := c.effectiveInstanceType(
 		ctx,
@@ -224,23 +195,13 @@ func (c *OxideCloudProvider) Create(
 	}
 	name := InstanceNamePrefix + nodeClaim.Name
 
-	// Planned before anything is created, because every later step reads from it: the disks the
-	// instance is created with, the storage the quota is asked about, and the serials the user-data
-	// tells the guest to match on. Planning is also the second line of defence behind the CRD's
-	// validation, so a layout the apiserver never re-validated is refused here rather than launching
-	// something wrong.
-	plan, err := storage.Build(name, nodeClass)
+	launchToken := uuid.NewString()
+
+	plan, err := storage.Build(name, launchToken, nodeClass)
 	if err != nil {
 		return nil, fmt.Errorf("unable to plan the disks for %s: %w", nodeClaim.Name, err)
 	}
 
-	// Checked before anything is created, and before a bootstrapper mints a join credential the
-	// launch would waste. This is the only place the disks are known, so it is the only place the
-	// storage quota can be checked at all: disk size comes from the OxideNodeClass, not the shape, so
-	// it cannot be folded into an instance type's offerings the way CPU and memory are.
-	//
-	// Local disks are excluded from the figure. See Plan.DistributedBytes for why counting them would
-	// be the more dangerous of the two ways to be wrong.
 	request := utilization.Request{
 		CPUs:    int64(instanceType.Ncpus),
 		Memory:  uint64(instanceType.MemInGiB) * GiB,
@@ -248,9 +209,7 @@ func (c *OxideCloudProvider) Create(
 	}
 	if quota, err := c.instanceTypeProvider.Quota(); err == nil {
 		if admits, resource := quota.Admits(request); !admits {
-			// Only the shape's own dimensions are worth marking. A storage quota refuses every shape
-			// equally, so taking this one and everything larger out of consideration would say something
-			// untrue about the shape and would not help the next attempt find a smaller one that fits.
+
 			if resource != utilization.ResourceStorage {
 				c.instanceTypeProvider.RecordICE(ctx, instanceType, instancetype.ReasonQuota)
 			}
@@ -262,9 +221,8 @@ func (c *OxideCloudProvider) Create(
 
 	subnet := nodeClass.Status.Subnets[rand.IntN(len(nodeClass.Status.Subnets))]
 
-	// Generated last, immediately before the instance is created. Some bootstrappers mint a
-	// short-lived join credential here, so this must not run for a launch that is going to be
-	// abandoned for an unrelated reason.
+	describe := c.ownership(nodeClaim)
+
 	userData, err := bootstrapper.UserData(ctx, nodeClass, bootstrap.Request{
 		NodeClaim:  nodeClaim,
 		NodeTaints: nodeTaints,
@@ -275,27 +233,25 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
 	}
 
-	// Create resolves the whole launch: it provisions the boot disk, creates the instance stopped,
-	// and starts it, adopting or clearing anything left behind by an earlier attempt. It returns once
-	// the rack has placed the instance, which is what the shape chosen above is being tested against.
-	// Whether the node then boots and registers is Karpenter's to time out on.
 	launched, err := c.instanceProvider.Create(ctx, oxide.InstanceCreateParams{
 		Project: oxide.NameOrId(c.project),
 		Body: &oxide.InstanceCreate{
 			Name:        oxide.Name(name),
 			Hostname:    oxide.Hostname(name),
-			Description: "Karpenter provisioned node by NodePool",
+			Description: describe(ownership.KindInstance, "Karpenter provisioned node by NodePool"),
 			Memory:      oxide.ByteCount(instanceType.MemInGiB * GiB),
 			Ncpus:       oxide.InstanceCpuCount(instanceType.Ncpus),
 			UserData:    base64.StdEncoding.EncodeToString([]byte(userData)),
-			// Joined at create rather than afterwards because the start is what places the instance:
-			// a membership added after it would be recorded against a placement it did not influence.
-			// The create-time field is also free and atomic, which no separate call would be.
+
 			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
-			// Both come from the same plan as the serials rendered into the user-data above, so
-			// what the rack creates and what the guest is told to look for cannot disagree.
-			BootDisk: plan.BootAttachment(),
-			Disks:    plan.DataAttachments(),
+
+			BootDisk: plan.BootAttachment(describe(ownership.KindBootDisk, "Boot disk")),
+			Disks: plan.DataAttachments(func(disk storage.Disk) string {
+				return describe(
+					ownership.KindDataDisk,
+					fmt.Sprintf("diskSet %s disk %d", disk.Set, disk.Ordinal),
+				)
+			}),
 			NetworkInterfaces: oxide.InstanceNetworkInterfaceAttachment{
 				Value: &oxide.InstanceNetworkInterfaceAttachmentCreate{
 					Params: []oxide.InstanceNetworkInterfaceCreate{
@@ -317,92 +273,15 @@ func (c *OxideCloudProvider) Create(
 			),
 		},
 	}, instance.Options{
-		// Joined between the create and the start rather than at create time, because the Oxide API
-		// has no create-time field for affinity groups the way it does for anti-affinity ones.
+
 		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
 	})
 	if err != nil {
-		// Karpenter deletes the NodeClaim immediately on an insufficient capacity error and
-		// reschedules its pods. Without this the NodeClaim sits around holding a launch that the
-		// rack cannot satisfy until the 15 minute registration timeout expires.
-		//
-		// The boot disk is created ahead of the instance, so a launch refused for want of storage says
-		// so on its own error. Nothing about the shape is recorded for it: Crucible spreads a disk's
-		// regions across three sleds chosen independently of where the instance lands, so the shape had
-		// no bearing on the refusal and no smaller one would have fared better. Marking this shape
-		// unavailable would take it out of consideration for a limit it did not hit, and would send the
-		// next attempt looking for a smaller shape that runs into exactly the same wall.
-		if errors.Is(err, instance.ErrInsufficientStorage) {
-			// Diagnosed against storage alone. The disk create is the only thing that was refused, so
-			// naming a CPU or memory quota here would blame a dimension that was never asked for.
-			reason, diagnosis := c.diagnoseRefusal(
-				utilization.Request{Storage: request.Storage},
-				err,
-			)
-			// Recorded rather than acted on. Nothing is filtered on it; it is what makes the OxideCapacity
-			// view able to say storage is why nothing is launching, which is otherwise only visible as
-			// every shape failing at once for no reason the view can name.
-			c.instanceTypeProvider.RecordStorageRefusal(ctx, reason, diagnosis.Error())
-			if reason == instancetype.ReasonQuota {
-				// Same reasoning as the capacity path: the snapshot said there was room and the API
-				// disagreed, so re-read it before the rest of an in-flight burst is judged against it.
-				c.instanceTypeProvider.RefreshQuota(ctx)
-			}
-			return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
-		}
-		if errors.Is(err, instance.ErrInsufficientCapacity) {
-			// The API reports a quota that has no room and a rack that has no room identically, so the
-			// two are told apart here by asking whether the quota would have allowed this launch. The
-			// quota was checked above, but a concurrent launch or a lowered quota can have consumed the
-			// headroom since, which is exactly the case worth naming rather than blaming the rack for.
-			//
-			// Storage is left out of the question. The boot disk already exists by the time the instance
-			// create runs, so its storage was accounted for and whatever refused this launch was not it.
-			reason, diagnosis := c.diagnoseRefusal(
-				utilization.Request{CPUs: request.CPUs, Memory: request.Memory},
-				err,
-			)
-			// A nodeclass launching into a fail-policy affinity group has a second way to be refused
-			// that arrives as this same error, and it is not about the shape: the rack could not place
-			// the instance within the group's constraint, which no smaller shape would have fixed.
-			// Recording it against the shape would take that shape and every larger one out of
-			// consideration for every nodeclass in the cluster, over a limit none of them hit.
-			//
-			// So it is attributed to the nodeclass and backed off there instead. Only when the quota
-			// had room: a refusal the quota explains is genuinely about the quota, whatever groups the
-			// nodeclass also asked for.
-			//
-			// TODO: attribute this on the error itself once the Oxide API distinguishes a fail-policy
-			// refusal from a capacity one. Today both arrive as InsufficientCapacity with nothing to
-			// separate them, so this leans on the nodeclass's own configuration and consequently also
-			// catches genuine capacity refusals for these nodeclasses -- costing the other nodeclasses
-			// one wasted launch each to rediscover a full rack, rather than wrongly ruling out shapes
-			// cluster-wide. See pkg/affinitypolicy.
-			if reason == instancetype.ReasonCapacity &&
-				affinitypolicy.Attributable(nodeClass.Status.AffinityGroups) {
-				c.affinityPolicy.RecordRefusal(ctx, nodeClass.Name, diagnosis.Error())
-				return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
-			}
-			// Rescheduling only helps if it lands somewhere else, so this shape and everything
-			// larger comes out of consideration while the limit holds.
-			c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)
-			if reason == instancetype.ReasonQuota {
-				// Direct evidence that the snapshot overstated the headroom. Re-reading now means the rest
-				// of an in-flight burst is judged against the truth instead of failing the same way.
-				c.instanceTypeProvider.RefreshQuota(ctx)
-			}
-			return nil, cloudprovider.NewInsufficientCapacityError(diagnosis)
-		}
-		return nil, err
+		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, instanceType, request)
 	}
 
-	// The rack placed this shape, which disproves every recorded claim that it could not be placed,
-	// including the ones recorded against smaller shapes. Closing the breaker here is what stops a
-	// shape that recovered from carrying its refusal history into the next incident and backing off
-	// from the second refusal as though it were the fifth.
 	c.instanceTypeProvider.RecordSuccess(ctx, instanceType)
-	// And it placed within whatever groups the nodeclass asked for, which is the only proof a fail
-	// policy is satisfiable. Cleared unconditionally: a nodeclass with no history is a no-op.
+
 	c.affinityPolicy.RecordSuccess(ctx, nodeClass.Name)
 
 	resolvedNodeClaim, err := c.resolveLaunched(
@@ -412,6 +291,7 @@ func (c *OxideCloudProvider) Create(
 		nodeClaim,
 		name,
 		subnet.ID,
+		plan.Prefix,
 	)
 	if err != nil {
 		return nil, err
@@ -421,15 +301,66 @@ func (c *OxideCloudProvider) Create(
 	return resolvedNodeClaim, nil
 }
 
-// resolveLaunched is the NodeClaim Karpenter gets back from a launch: the instance's own labels and
-// status, plus the launch record stamped on top of it.
-//
-// The record is what this instance was actually launched from, as opposed to what the nodeclass would
-// launch from now. Drift is the difference between the two, and only this side of it can be recorded
-// here -- the other side moves whenever the spec or the project does.
-//
-// Reading the instance's external addresses is part of it, which is why this takes a context: they
-// are the one piece of the record that cannot be assembled from the nodeclass alone.
+func (c *OxideCloudProvider) diagnoseLaunchFailure(
+	ctx context.Context,
+	err error,
+	nodeClass *v1alpha1.OxideNodeClass,
+	instanceType instancetype.Specs,
+	request utilization.Request,
+) error {
+
+	var stuck *instance.StuckLaunchResourceError
+	if errors.As(err, &stuck) {
+		metrics.StuckLaunchResources.WithLabelValues(stuck.Kind, stuck.State).Inc()
+		log.FromContext(ctx).Error(
+			err,
+			"abandoning a launch whose Oxide resource is stuck in a transitional state; "+
+				"it is left in place for the orphan reaper to remove once this NodeClaim is gone",
+			"kind", stuck.Kind,
+			"resource", stuck.Name,
+			"resource-id", stuck.ID,
+			"state", stuck.State,
+		)
+		return cloudprovider.NewInsufficientCapacityError(err)
+	}
+
+	if errors.Is(err, instance.ErrInsufficientStorage) {
+
+		reason, diagnosis := c.diagnoseRefusal(
+			utilization.Request{Storage: request.Storage},
+			err,
+		)
+
+		c.instanceTypeProvider.RecordStorageRefusal(ctx, reason, diagnosis.Error())
+		if reason == instancetype.ReasonQuota {
+
+			c.instanceTypeProvider.RefreshQuota(ctx)
+		}
+		return cloudprovider.NewInsufficientCapacityError(diagnosis)
+	}
+	if errors.Is(err, instance.ErrInsufficientCapacity) {
+
+		reason, diagnosis := c.diagnoseRefusal(
+			utilization.Request{CPUs: request.CPUs, Memory: request.Memory},
+			err,
+		)
+
+		if reason == instancetype.ReasonCapacity &&
+			affinitypolicy.Attributable(nodeClass.Status.AffinityGroups) {
+			c.affinityPolicy.RecordRefusal(ctx, nodeClass.Name, diagnosis.Error())
+			return cloudprovider.NewInsufficientCapacityError(diagnosis)
+		}
+
+		c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)
+		if reason == instancetype.ReasonQuota {
+
+			c.instanceTypeProvider.RefreshQuota(ctx)
+		}
+		return cloudprovider.NewInsufficientCapacityError(diagnosis)
+	}
+	return err
+}
+
 func (c *OxideCloudProvider) resolveLaunched(
 	ctx context.Context,
 	launched *oxide.Instance,
@@ -437,50 +368,36 @@ func (c *OxideCloudProvider) resolveLaunched(
 	nodeClaim *karpcorev1.NodeClaim,
 	instanceName string,
 	subnetID string,
+	diskPrefix string,
 ) (*karpcorev1.NodeClaim, error) {
 	resolved, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
 	if err != nil {
 		return nil, err
 	}
-	// Which address each entry actually got, and which pool it came from, are only knowable by asking
-	// the instance: oxide.Instance carries no external IPs, and an entry that took the silo's default
-	// never named a pool for the nodeclass to record. Read here and only here -- doing it from Get or
-	// List would be one extra call per instance on every reconcile.
+
 	ephemeralIPs, err := c.ephemeralIPRecords(ctx, nodeClass, instanceName)
 	if err != nil {
 		return nil, err
 	}
-	// The launch record: what this instance was actually launched from, as opposed to what the
-	// nodeclass would launch from now. Drift is the difference between the two, and only this side of
-	// it can be recorded here -- the other side moves whenever the spec or the project does.
-	//
-	// The subnet is recorded singular because a launch picks one of the selected subnets: the resolved
-	// set says what could have been used, and only this says what was. The keys and external addresses
-	// are recorded whole, since a launch uses all of them.
+
 	resolved.Annotations = lo.Assign(resolved.Annotations, map[string]string{
 		v1alpha1.AnnotationOxideNodeClassHash:        nodeClass.Hash(),
 		v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
 		v1alpha1.AnnotationSubnet:                    subnetID,
-		// Written even when empty, which is what tells a node launched with no keys apart from one
-		// launched before there was a record to keep. The first drifts when a key is added; the
-		// second cannot be compared at all and never drifts.
+
+		v1alpha1.AnnotationDiskPrefix: diskPrefix,
+
 		v1alpha1.AnnotationSSHKeys: v1alpha1.EncodeIDs(
 			v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys),
 		),
-		// Written even when empty, for the reason the SSH keys are: an empty value is a node launched
-		// with no external address, and no annotation at all is a node launched before there was a
-		// record, which cannot be compared and never drifts.
+
 		v1alpha1.AnnotationEphemeralIPs: v1alpha1.EncodeEphemeralIPs(ephemeralIPs),
-		// Written even when a set has no source, for the reason the SSH keys are: an entry with an
-		// empty value is a set whose disks were created blank, and no entry at all is a set nothing
-		// was recorded for, which cannot be compared and never drifts.
+
 		v1alpha1.AnnotationDiskSetSources: v1alpha1.EncodeDiskSetSources(
 			v1alpha1.DiskSetSources(nodeClass.Status.Storage),
 		),
 	})
-	// Recorded so that a group added to the desired set after this launch is visible as drift, and so
-	// that a group removed from it can still be left. The desired set alone cannot answer either
-	// question: it says what an instance should be in, not what this one actually joined.
+
 	if len(nodeClass.Status.AffinityGroups) > 0 {
 		resolved.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
 			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
@@ -489,18 +406,24 @@ func (c *OxideCloudProvider) resolveLaunched(
 	return resolved, nil
 }
 
-// externalIPs is the external address attachments a launch asks for: exactly one per resolved
-// ephemeral IP entry, never one per pool that happens to exist in the silo.
-//
-// That is the whole shape of this feature. Oxide allows at most one ephemeral address per IP version
-// and refuses a pair that does not span two versions, so how many addresses an instance gets has to
-// be fixed by the nodeclass rather than discovered from the silo.
+func (c *OxideCloudProvider) ownership(
+	nodeClaim *karpcorev1.NodeClaim,
+) func(ownership.Kind, string) string {
+	return func(kind ownership.Kind, human string) string {
+		return ownership.Marker{
+			ClusterUID:    c.clusterUID,
+			NodeClaimUID:  nodeClaim.UID,
+			NodeClaimName: nodeClaim.Name,
+			Kind:          kind,
+		}.Description(human)
+	}
+}
+
 func externalIPs(ephemeralIPs []v1alpha1.OxideEphemeralIP) []oxide.ExternalIpCreate {
 	return lo.Map(
 		ephemeralIPs,
 		func(ephemeralIP v1alpha1.OxideEphemeralIP, _ int) oxide.ExternalIpCreate {
-			// An entry that named no pool takes the silo's default for its version, which is Nexus's
-			// to resolve at launch rather than something worth guessing at here.
+
 			selector := oxide.PoolSelector{
 				Value: &oxide.PoolSelectorAuto{IpVersion: oxide.IpVersion(ephemeralIP.IPVersion)},
 			}
@@ -516,16 +439,6 @@ func externalIPs(ephemeralIPs []v1alpha1.OxideEphemeralIP) []oxide.ExternalIpCre
 	)
 }
 
-// ephemeralIPRecords reads back the external addresses the instance was launched with, in the form
-// the launch record stores them.
-//
-// A nodeclass declaring none is answered without an API call: nothing was attached, so nothing can be
-// listed, and the empty record is written all the same to distinguish a node launched with no address
-// from one launched before there was a record.
-//
-// Only the ephemeral addresses are kept. An instance also carries a SNAT address it did not ask for,
-// and could carry a floating IP somebody attached by hand; neither is something the nodeclass
-// templated, so neither belongs in a record that drift is decided against.
 func (c *OxideCloudProvider) ephemeralIPRecords(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -562,9 +475,7 @@ func (c *OxideCloudProvider) ephemeralIPRecords(
 			)
 		}
 		records = append(records, v1alpha1.EphemeralIPRecord{
-			// Derived from the address rather than looked up on the pool. The family of an address is
-			// a property of the address, so asking the API for it would be a call per launch to learn
-			// something already in hand.
+
 			IPVersion: lo.Ternary(
 				address.Is4(),
 				string(oxide.IpVersionV4),
@@ -577,9 +488,6 @@ func (c *OxideCloudProvider) ephemeralIPRecords(
 	return records, nil
 }
 
-// effectiveInstanceType returns the selected instance type as Karpenter evaluated it for this
-// NodePool. NodeOverlay owns the adjustment semantics and conflict resolution; the provider only
-// asks the shared store for the already-computed result, just as the AWS provider does at launch.
 func (c *OxideCloudProvider) effectiveInstanceType(
 	ctx context.Context,
 	nodeClaim *karpcorev1.NodeClaim,
@@ -594,8 +502,7 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 	}
 	nodePoolName, ok := nodeClaim.Labels[karpcorev1.NodePoolLabelKey]
 	if !ok {
-		// NodeOverlays are scoped through NodePools, so a standalone NodeClaim has only the provider's
-		// base price. This matches Karpenter's overlay decorator and the AWS provider's Create path.
+
 		return instanceType, nil
 	}
 	effective, err := c.instanceTypeStore.Apply(nodePoolName, instanceType)
@@ -609,9 +516,6 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 	return effective, nil
 }
 
-// annotateHourlyPrice records the price of the offering the provider actually resolved. There is no
-// fallback to the cheapest offering: if Oxide gains more zones or capacity types later, publishing a
-// plausible but different offering's price would be worse than leaving the annotation absent.
 func annotateHourlyPrice(
 	nodeClaim *karpcorev1.NodeClaim,
 	instanceType *cloudprovider.InstanceType,
@@ -629,38 +533,37 @@ func annotateHourlyPrice(
 	nodeClaim.Annotations[v1alpha1.AnnotationHourlyPrice] = strconv.FormatFloat(price, 'f', -1, 64)
 }
 
-// Delete removes a NodeClaim from the cloudprovider by its provider id. Delete should return
-// NodeClaimNotFoundError if the cloudProvider instance is already terminated and nil if deletion was triggered.
-// Karpenter will keep retrying until Delete returns a NodeClaimNotFound error.
+// Delete removes a NodeClaim from the cloudprovider by its provider id.
 func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.NodeClaim) error {
 	instanceID, err := InstanceIDFromProviderID(nodeClaim.Status.ProviderID)
 	if err != nil {
 		return fmt.Errorf("invalid provider id, must use the oxide ccm: %w", err)
 	}
 
-	// Matches the names assigned in Create, and deliberately derived from the NodeClaim name alone
-	// rather than from the nodeclass, which may have been edited or deleted since the launch. It is
-	// the fallback used to find the disks when the instance is already gone and can no longer be
-	// asked what was attached to it.
 	name := InstanceNamePrefix + nodeClaim.Name
-	teardown := instance.Teardown{
-		BootDiskName: name,
-		DataPrefix:   storage.DataPrefix(name),
-	}
 
-	if err := c.instanceProvider.Delete(ctx, instanceID, teardown); err != nil {
+	if err := c.instanceProvider.Delete(ctx, instanceID, teardownFor(nodeClaim, name)); err != nil {
 		if errors.Is(err, instance.ErrNotFound) {
 			return cloudprovider.NewNodeClaimNotFoundError(err)
 		}
 		return err
 	}
 
-	// The instance and its disks are gone by the time Delete returns without an error, so report the
-	// terminal state directly rather than making Karpenter retry to discover it.
 	return cloudprovider.NewNodeClaimNotFoundError(instance.ErrNotFound)
 }
 
-// Get retrieves a NodeClaim from the cloudprovider by its provider id
+func teardownFor(nodeClaim *karpcorev1.NodeClaim, instanceName string) instance.Teardown {
+	if prefix := nodeClaim.Annotations[v1alpha1.AnnotationDiskPrefix]; prefix != "" {
+
+		return instance.Teardown{DiskPrefix: prefix}
+	}
+	return instance.Teardown{
+		BootDiskName: instanceName,
+		DiskPrefix:   storage.LegacyPrefix(instanceName),
+	}
+}
+
+// Get retrieves a NodeClaim by provider ID.
 func (c *OxideCloudProvider) Get(
 	ctx context.Context,
 	providerID string,
@@ -674,9 +577,7 @@ func (c *OxideCloudProvider) Get(
 		oxide.InstanceViewParams{Instance: oxide.NameOrId(instanceID)},
 	)
 	if err != nil {
-		// Karpenter's termination flow only removes finalizers once the cloudprovider reports the
-		// instance as gone, so a 404 must surface as a NodeClaimNotFoundError rather than a generic
-		// error that gets retried forever.
+
 		if errors.Is(err, oxide.ErrObjectNotFound) {
 			return nil, cloudprovider.NewNodeClaimNotFoundError(err)
 		}
@@ -751,7 +652,7 @@ func InstanceIDFromProviderID(providerID string) (string, error) {
 	return instanceID, nil
 }
 
-// List retrieves all NodeClaims from the cloudprovider
+// List retrieves all NodeClaims.
 func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim, error) {
 	instances, err := c.ox.InstanceListAllPages(
 		ctx,
@@ -775,9 +676,6 @@ func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim,
 }
 
 // GetInstanceTypes returns instance types supported by the cloudprovider.
-// Availability of types or zone may vary by nodepool or over time.  Regardless of
-// availability, the GetInstanceTypes method should always return all instance types,
-// even those with no offerings available.
 func (c *OxideCloudProvider) GetInstanceTypes(
 	context.Context,
 	*karpcorev1.NodePool,
@@ -785,12 +683,6 @@ func (c *OxideCloudProvider) GetInstanceTypes(
 	return c.instanceTypeProvider.InstanceTypes(), nil
 }
 
-// noCandidatesError explains that every instance type the NodeClaim could have used is currently
-// unavailable, in terms of whichever limit ruled them out.
-//
-// This is the message that surfaces on the NodeClaim and in the events an operator reads when nothing
-// is scaling up, so it is worth the effort of being specific: "the silo's cpus quota has no room"
-// points at an administrator, whereas "the rack has no room" points at waiting or at smaller pods.
 func (c *OxideCloudProvider) noCandidatesError(
 	candidates []string,
 	reason instancetype.Reason,
@@ -809,8 +701,7 @@ func (c *OxideCloudProvider) noCandidatesError(
 			len(candidates),
 		)
 	}
-	// Reported against the smallest candidate, since that is the one whose failure to fit actually
-	// establishes that none of them do.
+
 	smallest := smallestSpecs(candidates)
 	request := utilization.Request{
 		CPUs:   int64(smallest.Ncpus),
@@ -830,13 +721,6 @@ func (c *OxideCloudProvider) noCandidatesError(
 	)
 }
 
-// diagnoseRefusal decides whether a refused launch was the silo's quota or the rack's capacity, and
-// returns the reason to record along with the error to report.
-//
-// The API does not distinguish them, so this asks the question the API answers implicitly: if the
-// quota had no room for this request, the quota is the binding constraint and the rack never got a
-// say. An unknown quota falls back to capacity, which is both the more common cause and the
-// conservative guess, since the breaker retries it on its own.
 func (c *OxideCloudProvider) diagnoseRefusal(
 	request utilization.Request,
 	cause error,
@@ -856,12 +740,6 @@ func (c *OxideCloudProvider) diagnoseRefusal(
 	)
 }
 
-// antiAffinityGroups picks the anti-affinity groups out of a nodeclass's resolved set, as the IDs an
-// instance create joins them by.
-//
-// Addressed by ID rather than by name because the ID is the identity: a group deleted and recreated
-// under the same name between the reconcile that resolved it and this launch is a different group,
-// and asking for it by ID fails rather than silently joining the wrong one.
 func antiAffinityGroups(groups []v1alpha1.OxideAffinityGroup) []oxide.NameOrId {
 	return lo.FilterMap(
 		groups,
@@ -871,9 +749,6 @@ func antiAffinityGroups(groups []v1alpha1.OxideAffinityGroup) []oxide.NameOrId {
 	)
 }
 
-// affinityGroups picks the affinity groups out of a nodeclass's resolved set, as the IDs a launch
-// joins them by between the create and the start. Addressed by ID for the same reason
-// antiAffinityGroups is.
 func affinityGroups(groups []v1alpha1.OxideAffinityGroup) []string {
 	return lo.FilterMap(
 		groups,
@@ -883,9 +758,6 @@ func affinityGroups(groups []v1alpha1.OxideAffinityGroup) []string {
 	)
 }
 
-// smallestSpecs returns the smallest shape among instance type names, by CPU and then memory.
-// Unparseable names are skipped rather than failing the caller, which is only assembling an error
-// message.
 func smallestSpecs(candidates []string) instancetype.Specs {
 	smallest := instancetype.Specs{}
 	for _, candidate := range candidates {
@@ -902,19 +774,12 @@ func smallestSpecs(candidates []string) instancetype.Specs {
 	return smallest
 }
 
-// RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter
-// to monitor on the node.
-//
-// This is empty unless sled inventory is enabled, because nothing else sets the condition it would
-// name: there is no way to observe that a node's hardware is being retired without the fleet-scoped
-// system API. Returning it empty is also what keeps core from registering its health controller at
-// all, so an installation without inventory has no node repair machinery running for this provider.
+// RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter to monitor on the node.
 func (c *OxideCloudProvider) RepairPolicies() []cloudprovider.RepairPolicy {
 	return c.repairPolicies
 }
 
-// GetSupportedNodeClasses returns CloudProvider NodeClass that implements status.Object
-// NOTE: It returns a list where the first element should be the default NodeClass
+// GetSupportedNodeClasses returns CloudProvider NodeClass that implements status.Object NOTE.
 func (c *OxideCloudProvider) GetSupportedNodeClasses() []status.Object {
 	return []status.Object{&v1alpha1.OxideNodeClass{}}
 }

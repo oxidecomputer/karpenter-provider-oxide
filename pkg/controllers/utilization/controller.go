@@ -12,12 +12,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package utilization keeps the silo's quota snapshot fresh.
-//
-// The quota moves for reasons Karpenter never sees: anything else in the silo starting or stopping
-// changes what is provisioned, and an administrator can change the capacity outright. So it is polled
-// rather than invalidated, and polled on its own schedule rather than off the back of node activity,
-// which would leave a cluster that has stopped scaling with a snapshot that never updates again.
+// Package utilization refreshes silo quota.
 package utilization
 
 import (
@@ -36,8 +31,7 @@ import (
 type Controller struct {
 	quotas *utilization.Provider
 	period time.Duration
-	// failureLogged records that the read has already been reported as failing, so a persistent
-	// permissions problem is said once at error rather than every period forever.
+
 	failureLogged bool
 }
 
@@ -53,11 +47,6 @@ func (c *Controller) Name() string {
 }
 
 // Reconcile re-reads the quota and schedules the next read.
-//
-// It never returns an error. The quota is a constraint that makes provisioning smarter, not one it
-// depends on: an unreadable quota means shapes stop being filtered by it, which is the same behavior
-// as before there was a quota check at all. Returning an error would instead put this into backoff
-// and report the provider unhealthy for something nodes do not need.
 func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
 

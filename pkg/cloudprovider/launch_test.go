@@ -1,16 +1,18 @@
 package cloudprovider
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// The regression this whole shape exists for: the number of external addresses a launch asks for is
-// the number of entries the nodeclass declares, and nothing else. Deriving it from the pools the silo
-// happens to contain produced a launch that Nexus refuses outright, since an instance may have at
-// most one ephemeral address per IP version.
 func TestExternalIPsIsOneAttachmentPerEntry(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -45,9 +47,6 @@ func TestExternalIPsIsOneAttachmentPerEntry(t *testing.T) {
 	}
 }
 
-// The two ways an entry names its pool are the two variants of Oxide's PoolSelector. Auto is the one
-// the previous shape had no way to express at all: it is what "the silo's default for this version"
-// is spelled as, and Nexus needs the version on it to choose between two default pools.
 func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -78,9 +77,7 @@ func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
 			}
 			ephemeral, ok := got[0].Value.(*oxide.ExternalIpCreateEphemeral)
 			if !ok {
-				// Floating IPs are deliberately not templatable: a floating address has one parent, so
-				// a nodeclass carrying one would deadlock its own drift the moment Karpenter launched
-				// a replacement before terminating the node it replaces.
+
 				t.Fatalf("externalIPs() asked for %T, want an ephemeral attachment", got[0].Value)
 			}
 			if ephemeral.PoolSelector.Type() != tt.want.Type() {
@@ -107,5 +104,70 @@ func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOwnershipMarksEveryResourceOfALaunch(t *testing.T) {
+	c := &OxideCloudProvider{clusterUID: types.UID("cluster-uid")}
+	nodeClaim := &karpcorev1.NodeClaim{
+		ObjectMeta: v1.ObjectMeta{Name: "default-abc12", UID: types.UID("nodeclaim-uid")},
+	}
+	describe := c.ownership(nodeClaim)
+
+	for _, kind := range []ownership.Kind{
+		ownership.KindInstance,
+		ownership.KindBootDisk,
+		ownership.KindDataDisk,
+	} {
+		human := "diskSet logs disk 1"
+		description := describe(kind, human)
+
+		marker, ok := ownership.Parse(description)
+		if !ok {
+			t.Fatalf("Parse(%q) found no marker", description)
+		}
+		want := ownership.Marker{
+			ClusterUID:    "cluster-uid",
+			NodeClaimUID:  "nodeclaim-uid",
+			NodeClaimName: "default-abc12",
+			Kind:          kind,
+		}
+		if marker != want {
+			t.Errorf("Parse(%q) = %#v, want %#v", description, marker, want)
+		}
+
+		if !strings.Contains(description, human) {
+			t.Errorf("description %q lost the human-readable text %q", description, human)
+		}
+	}
+}
+
+func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
+	nodeClaim := &karpcorev1.NodeClaim{
+		ObjectMeta: v1.ObjectMeta{
+			Name:        "default-abc12",
+			Annotations: map[string]string{v1alpha1.AnnotationDiskPrefix: "kd-abcdefghijkl-"},
+		},
+	}
+
+	teardown := teardownFor(nodeClaim, "karpenter-default-abc12")
+	if teardown.DiskPrefix != "kd-abcdefghijkl-" {
+		t.Errorf("disk prefix = %q, want the prefix the launch recorded", teardown.DiskPrefix)
+	}
+
+	if teardown.BootDiskName != "" {
+		t.Errorf("boot disk name = %q, want it left to the prefix", teardown.BootDiskName)
+	}
+}
+
+func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
+	nodeClaim := &karpcorev1.NodeClaim{ObjectMeta: v1.ObjectMeta{Name: "default-abc12"}}
+
+	teardown := teardownFor(nodeClaim, "karpenter-default-abc12")
+	if teardown.BootDiskName != "karpenter-default-abc12" {
+		t.Errorf("boot disk name = %q, want the legacy name", teardown.BootDiskName)
+	}
+	if want := storage.LegacyPrefix("karpenter-default-abc12"); teardown.DiskPrefix != want {
+		t.Errorf("disk prefix = %q, want the legacy prefix %q", teardown.DiskPrefix, want)
 	}
 }

@@ -56,10 +56,6 @@ formatters:
   settings:
     golines:
       max-len: 100
-      # Comments are left alone: golines wraps at the nearest space, which
-      # silently splits a long +kubebuilder marker onto a second line and
-      # breaks controller-gen. lll (120) still guards comment length, and
-      # markers are exempt from it via the pkg/apis exclusion below.
       shorten-comments: false
   exclusions:
     generated: lax

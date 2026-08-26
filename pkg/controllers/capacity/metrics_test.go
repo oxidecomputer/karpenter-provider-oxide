@@ -10,9 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// A shape that is no longer unavailable has no value to write, so its series has to go. Leaving the
-// last one behind would report a countdown that finished long ago as though it were still running,
-// which is worse than reporting nothing.
 func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 	c, _ := newController(t, nil)
 	c.instanceTypes.RecordICE(
@@ -31,7 +28,6 @@ func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 		t.Fatalf("unavailable shapes = %v, want 1", got)
 	}
 
-	// The shape launched successfully, so it is not unavailable anymore.
 	c.instanceTypes.RecordSuccess(t.Context(), instancetype.Specs{Ncpus: 8, MemInGiB: 16})
 	rack, inventory = c.instanceTypes.Rack()
 	publishMetrics(c.render(rack, inventory), rack, inventory)
@@ -44,8 +40,6 @@ func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 	}
 }
 
-// The rack numbers only mean anything while the reading is being acted on, and freshness is the gauge
-// an operator alerts on: a reading that stops being refreshed stops constraining anything.
 func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 	fresh := &fakeInventory{snapshot: capacity.NewSnapshot(
 		[]capacity.Sled{sled("sled-a", 8, 16, true)},
@@ -71,7 +65,6 @@ func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 		t.Errorf("largest feasible cpus = %v, want 8", got)
 	}
 
-	// Nothing has refreshed it since, so it ages out and stops being believed.
 	fresh.snapshot = capacity.NewSnapshot(
 		[]capacity.Sled{sled("sled-a", 8, 16, true)},
 		time.Now().Add(-2*time.Hour),
@@ -86,8 +79,6 @@ func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 	}
 }
 
-// The rack disagreeing with a refusal is the interesting case, so the feasible count is published
-// alongside the shapes that are out rather than for every shape the provider offers.
 func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 	inventory := &fakeInventory{snapshot: capacity.NewSnapshot(
 		[]capacity.Sled{sled("sled-a", 16, 32, true)},
@@ -108,8 +99,6 @@ func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 	}
 	publishMetrics(c.render(rack, state), rack, state)
 
-	// Two 8-16 instances fit in a sled with 16 CPUs and 32 GiB free, which says the refusal came from
-	// something the reading cannot see.
 	series := testutil.ToFloat64(metrics.FeasibleInstances.WithLabelValues("8-16"))
 	if series != 2 {
 		t.Errorf("feasible instances of 8-16 = %v, want 2", series)
@@ -119,8 +108,6 @@ func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 	}
 }
 
-// The view exists to be looked at, so the labels on it have to stay bounded no matter what the provider
-// is doing. Nothing here may be labeled per shape unless the shape is actually out.
 func TestPublishMetricsStaysBoundedWithNothingWrong(t *testing.T) {
 	c, _ := newController(t, nil)
 
