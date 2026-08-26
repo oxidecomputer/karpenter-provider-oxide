@@ -96,7 +96,7 @@ extraVolumes: []
 controller:
   image:
     # -- Repository path to the controller image.
-    repository: ghcr.io/oxidecomputer/karpenter
+    repository: ghcr.io/oxidecomputer/karpenter-provider-oxide
     # -- Tag of the controller image.
     tag: ""
     # -- SHA256 digest of the controller image.

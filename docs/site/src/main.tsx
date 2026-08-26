@@ -37,7 +37,7 @@ function App() {
           <span className="product-name">Karpenter</span>
         </a>
         <nav aria-label="Project links">
-          <a href="https://github.com/oxidecomputer/karpenter">GitHub ↗</a>
+          <a href="https://github.com/oxidecomputer/karpenter-provider-oxide">GitHub ↗</a>
           <a href="https://oxide.computer">Oxide ↗</a>
         </nav>
       </header>

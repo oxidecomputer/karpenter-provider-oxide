@@ -1,17 +1,17 @@
-# karpenter
+# karpenter-provider-oxide
 
 ![Version: 0.0.1](https://img.shields.io/badge/Version-0.0.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.1](https://img.shields.io/badge/AppVersion-0.0.1-informational?style=flat-square)
 
 A Helm chart for the Karpenter Oxide provider controller.
 
-**Homepage:** <https://github.com/oxidecomputer/karpenter>
+**Homepage:** <https://github.com/oxidecomputer/karpenter-provider-oxide>
 
 ## Installing the Chart
 
 To install the chart with the release name `karpenter`:
 
 ```console
-helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter \
+helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter-provider-oxide \
   --namespace kube-system \
   --set settings.oxide.host=${OXIDE_HOST} \
   --set settings.oxide.project=${OXIDE_PROJECT}
@@ -24,11 +24,11 @@ The controller reads its Oxide API token from a Secret in the release namespace
 kubectl create secret --namespace kube-system generic oxide-api-token --from-literal=token=${OXIDE_TOKEN}
 ```
 
-The CRDs live in the separate `karpenter-crd` chart and must be installed first.
+The CRDs live in the separate `karpenter-oxide-crd` chart and must be installed first.
 
 ## Source Code
 
-* <https://github.com/oxidecomputer/karpenter>
+* <https://github.com/oxidecomputer/karpenter-provider-oxide>
 
 ## Values
 
@@ -49,7 +49,7 @@ The CRDs live in the separate `karpenter-crd` chart and must be installed first.
 | controller.extraVolumeMounts | list | `[]` | Additional volumeMounts for the controller pod. |
 | controller.healthProbe.port | int | `8081` | The container port to use for http health probe. |
 | controller.image.digest | string | `""` | SHA256 digest of the controller image. |
-| controller.image.repository | string | `"ghcr.io/oxidecomputer/karpenter"` | Repository path to the controller image. |
+| controller.image.repository | string | `"ghcr.io/oxidecomputer/karpenter-provider-oxide"` | Repository path to the controller image. |
 | controller.image.tag | string | `""` | Tag of the controller image. |
 | controller.metrics.port | int | `8080` | The container port to use for metrics. |
 | controller.resources | object | `{}` | Resources for the controller pod. |

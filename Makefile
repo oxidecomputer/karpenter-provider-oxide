@@ -3,6 +3,10 @@ VERSION ?= $(shell git describe --tags --always | sed -e 's/^v//')
 MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter-provider-oxide
 IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter-provider-oxide
 HELM_OCI_REPO ?= ghcr.io/oxidecomputer/helm-charts
+CONTROLLER_CHART_NAME ?= karpenter-provider-oxide
+CRD_CHART_NAME ?= karpenter-oxide-crd
+CONTROLLER_CHART_DIR ?= charts/$(CONTROLLER_CHART_NAME)
+CRD_CHART_DIR ?= charts/$(CRD_CHART_NAME)
 IMAGE_TAG ?= dev
 IMG ?= $(IMAGE_REPO):$(IMAGE_TAG)
 KO_DOCKER_REPO ?= $(IMAGE_REPO)
@@ -49,7 +53,7 @@ generate: ## Generate deepcopy code and CRDs w/ controller-gen, vendor the karpe
 	$(CONTROLLER_GEN) object crd paths="./pkg/apis/..." \
 		output:crd:artifacts:config=pkg/apis/crds
 	cp $(KARPENTER_CORE_DIR)/pkg/apis/crds/* pkg/apis/crds
-	cp pkg/apis/crds/* charts/karpenter-crd/templates
+	cp pkg/apis/crds/* $(CRD_CHART_DIR)/templates
 	$(HELM_DOCS) --chart-search-root charts
 	$(MAKE) docs-generate
 
@@ -61,6 +65,7 @@ docs-generate: ## Generate the AsciiDoc OxideNodeClass API reference from Go typ
 		--renderer=asciidoctor \
 		--templates-dir=docs/templates/asciidoctor \
 		--output-path=docs/oxide-karpenter.adoc
+	perl -0pi -e 's/\n+\z/\n/' docs/oxide-karpenter.adoc
 
 .PHONY: docs
 docs: docs-generate ## Build the single-page documentation preview.
@@ -194,14 +199,16 @@ ARTIFACTS ?= $(PWD)/_artifacts
 manifests: generate
 	rm -rf $(ARTIFACTS)/helm
 	mkdir -p $(ARTIFACTS)/helm
-	$(HELM) package charts/karpenter \
+	$(HELM) package $(CONTROLLER_CHART_DIR) \
 		--version $(VERSION) \
 		--app-version $(VERSION) \
 		--destination $(ARTIFACTS)/helm
-	$(HELM) package charts/karpenter-crd \
+	$(HELM) package $(CRD_CHART_DIR) \
 		--version $(VERSION) \
 		--app-version $(VERSION) \
 		--destination $(ARTIFACTS)/helm
+	test -f $(ARTIFACTS)/helm/$(CONTROLLER_CHART_NAME)-$(VERSION).tgz
+	test -f $(ARTIFACTS)/helm/$(CRD_CHART_NAME)-$(VERSION).tgz
 
 ##@ Dev Deployment
 
@@ -223,7 +230,7 @@ HELM_OPTS ?= --set settings.oxide.host=${OXIDE_HOST} \
 
 .PHONY: install-crds
 install-crds: generate ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(HELM) upgrade --install karpenter-crds charts/karpenter-crd --take-ownership --force-conflicts
+	$(HELM) upgrade --install karpenter-crds $(CRD_CHART_DIR) --take-ownership --force-conflicts
 
 .PHONY: uninstall-crds
 uninstall-crds: ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
@@ -231,7 +238,7 @@ uninstall-crds: ## Uninstall CRDs from the K8s cluster specified in ~/.kube/conf
 
 .PHONY: deploy
 deploy: generate ## Deploy the controller to the cluster in ~/.kube/config. Pulls a remote image, but uses the local helm chart.
-	$(HELM) upgrade --install karpenter charts/karpenter \
+	$(HELM) upgrade --install karpenter $(CONTROLLER_CHART_DIR) \
 		--namespace $(KARPENTER_NAMESPACE) \
 		$(HELM_OPTS) \
 		--set controller.image.repository=$(IMAGE_REPO) \
@@ -241,7 +248,7 @@ deploy: generate ## Deploy the controller to the cluster in ~/.kube/config. Pull
 .PHONY: helm-apply
 helm-apply:
 	REF="$$(cat $(IMAGE_REF_FILE))"; \
-	$(HELM) upgrade --install karpenter charts/karpenter \
+	$(HELM) upgrade --install karpenter $(CONTROLLER_CHART_DIR) \
 		--namespace $(KARPENTER_NAMESPACE) \
 		$(HELM_OPTS) \
 		--set controller.image.repository="$${REF%:*}" \
@@ -288,4 +295,17 @@ release: tools ## Build and push the multi-arch (linux/amd64,linux/arm64) images
 	$(GORELEASER) release --clean
 	for chart in $(ARTIFACTS)/helm/*.tgz; do \
 		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO)"; \
+	done
+	$(MAKE) release-verify VERSION=$(VERSION)
+
+.PHONY: release-verify
+release-verify: helm ## Verify both charts and both image tags exist, and that each image is multi-arch.
+	@for chart in $(CONTROLLER_CHART_NAME) $(CRD_CHART_NAME); do \
+		$(HELM) show chart "oci://$(HELM_OCI_REPO)/$$chart" --version "$(VERSION)" \
+			| grep -qx "name: $$chart"; \
+	done
+	@for tag in "$(VERSION)" latest; do \
+		docker manifest inspect "$(IMAGE_REPO):$$tag" \
+			| jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] \
+				| index("linux/amd64") != null and index("linux/arm64") != null' >/dev/null; \
 	done

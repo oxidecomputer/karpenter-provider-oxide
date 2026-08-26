@@ -1,6 +1,6 @@
 apiVersion: v2
-name: karpenter-crd
-description: A Helm chart for the Karpenter Oxide provider Custom Resource Definitions (CRDs).
+name: karpenter-provider-oxide
+description: A Helm chart for the Karpenter Oxide provider controller.
 type: application
 version: "0.0.1"
 appVersion: "0.0.1"
@@ -11,7 +11,7 @@ keywords:
   - autoscaling
   - lifecycle
   - oxide
-home: https://github.com/oxidecomputer/karpenter
+home: https://github.com/oxidecomputer/karpenter-provider-oxide
 icon: https://repository-images.githubusercontent.com/278480393/dab059c8-caa1-4b55-aaa7-3d30e47a5616
 sources:
-  - https://github.com/oxidecomputer/karpenter
+  - https://github.com/oxidecomputer/karpenter-provider-oxide

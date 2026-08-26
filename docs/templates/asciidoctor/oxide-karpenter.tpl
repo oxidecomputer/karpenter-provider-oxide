@@ -103,8 +103,8 @@ spec:
 | *`kind`* __string__ | `{{ $type.GVK.Kind }}` | |
 {{ end -}}
 {{ range $type.Members -}}
-| *`{{ .Name }}`* __{{ asciidocRenderType .Type }}__ | {{ template "type_members" . }} | {{ .Default }} | {{ range .Validation -}} {{ asciidocRenderValidation . }} +
-{{ end }}
+| *`{{ .Name }}`* __{{ asciidocRenderType .Type }}__ | {{ template "type_members" . }} | {{ .Default }} |{{ if .Validation }} {{ range .Validation -}} {{ asciidocRenderValidation . }} +
+{{ end }}{{ end }}
 {{ end -}}
 |===
 {{ end -}}

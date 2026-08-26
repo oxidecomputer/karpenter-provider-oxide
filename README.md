@@ -1,13 +1,18 @@
-# oxide-karpenter
+# karpenter-provider-oxide
 
 The Karpenter provider for Oxide enables you to manage Kubernetes nodes on Oxide. 
 Karpenter scales up your nodes when needed and then back down when they're not.
 
 ## Installation
 
-To install the Karpenter provider for Oxide, use helm:
+Install the CRDs and the Karpenter provider for Oxide from their GHCR OCI charts:
 
+```console
+helm upgrade --install karpenter-crds \
+  oci://ghcr.io/oxidecomputer/helm-charts/karpenter-oxide-crd
 ```
+
+```console
 helm upgrade --install karpenter \
   --namespace kube-system \
   --set settings.oxide.host=${OXIDE_HOST} \
