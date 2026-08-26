@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/awslabs/operatorpkg/status"
@@ -26,6 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/controllers/nodeoverlay"
+	karpoptions "sigs.k8s.io/karpenter/pkg/operator/options"
 )
 
 const (
@@ -40,6 +43,7 @@ type OxideCloudProvider struct {
 
 	instanceProvider     *instance.Provider
 	instanceTypeProvider *instancetype.Provider
+	instanceTypeStore    instanceTypeOverlayStore
 	// affinityPolicy backs a nodeclass off when the rack cannot satisfy a fail-policy affinity group.
 	// Separate from instanceTypeProvider because such a refusal is not about a shape, so it must not
 	// reach the shape circuit breaker. See pkg/affinitypolicy.
@@ -52,11 +56,19 @@ type OxideCloudProvider struct {
 	drifters []providers.Drifter
 }
 
+// instanceTypeOverlayStore is the NodeOverlay view shared with Karpenter core. Keeping the field
+// behind the one operation Create needs makes the launch-price path independently testable while the
+// production constructor still requires Karpenter's concrete store.
+type instanceTypeOverlayStore interface {
+	Apply(string, *cloudprovider.InstanceType) (*cloudprovider.InstanceType, error)
+}
+
 func NewOxideCloudProvider(
 	kubeClient client.Client,
 	ox *oxide.Client,
 	project string,
 	instanceTypeProvider *instancetype.Provider,
+	instanceTypeStore *nodeoverlay.InstanceTypeStore,
 	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 	repairPolicies []cloudprovider.RepairPolicy,
@@ -83,6 +95,7 @@ func NewOxideCloudProvider(
 			},
 		),
 		instanceTypeProvider: instanceTypeProvider,
+		instanceTypeStore:    instanceTypeStore,
 		affinityPolicy:       affinityPolicy,
 		bootstrappers:        bootstrappers,
 		repairPolicies:       repairPolicies,
@@ -200,6 +213,14 @@ func (c *OxideCloudProvider) Create(
 	// reservation is handed back here. RecordICE and RecordSuccess release it themselves; this is
 	// idempotent alongside them.
 	defer c.instanceTypeProvider.ReleaseProbe(instanceType)
+	effectiveInstanceType, err := c.effectiveInstanceType(
+		ctx,
+		nodeClaim,
+		instancetype.SpecsToInstanceTypeName(instanceType.Ncpus, instanceType.MemInGiB),
+	)
+	if err != nil {
+		return nil, err
+	}
 	name := InstanceNamePrefix + nodeClaim.Name
 
 	// Planned before anything is created, because every later step reads from it: the disks the
@@ -435,8 +456,54 @@ func (c *OxideCloudProvider) Create(
 			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
 		)
 	}
+	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
 
 	return resolvedNodeClaim, nil
+}
+
+// effectiveInstanceType returns the selected instance type as Karpenter evaluated it for this
+// NodePool. NodeOverlay owns the adjustment semantics and conflict resolution; the provider only
+// asks the shared store for the already-computed result, just as the AWS provider does at launch.
+func (c *OxideCloudProvider) effectiveInstanceType(
+	ctx context.Context,
+	nodeClaim *karpcorev1.NodeClaim,
+	instanceTypeName string,
+) (*cloudprovider.InstanceType, error) {
+	instanceType, ok := c.instanceTypeProvider.Get(instanceTypeName)
+	if !ok {
+		return nil, fmt.Errorf("selected instance type %q is no longer available", instanceTypeName)
+	}
+	if !karpoptions.FromContext(ctx).FeatureGates.NodeOverlay {
+		return instanceType, nil
+	}
+	nodePoolName, ok := nodeClaim.Labels[karpcorev1.NodePoolLabelKey]
+	if !ok {
+		// NodeOverlays are scoped through NodePools, so a standalone NodeClaim has only the provider's
+		// base price. This matches Karpenter's overlay decorator and the AWS provider's Create path.
+		return instanceType, nil
+	}
+	effective, err := c.instanceTypeStore.Apply(nodePoolName, instanceType)
+	if err != nil {
+		return nil, fmt.Errorf("applying nodeoverlays to instance type %q, %w", instanceTypeName, err)
+	}
+	return effective, nil
+}
+
+// annotateHourlyPrice records the price of the offering the provider actually resolved. There is no
+// fallback to the cheapest offering: if Oxide gains more zones or capacity types later, publishing a
+// plausible but different offering's price would be worse than leaving the annotation absent.
+func annotateHourlyPrice(nodeClaim *karpcorev1.NodeClaim, instanceType *cloudprovider.InstanceType) {
+	price, ok := instanceType.OfferingPrice(
+		nodeClaim.Labels[corev1.LabelTopologyZone],
+		nodeClaim.Labels[karpcorev1.CapacityTypeLabelKey],
+	)
+	if !ok {
+		return
+	}
+	if nodeClaim.Annotations == nil {
+		nodeClaim.Annotations = map[string]string{}
+	}
+	nodeClaim.Annotations[v1alpha1.AnnotationHourlyPrice] = strconv.FormatFloat(price, 'f', -1, 64)
 }
 
 // Delete removes a NodeClaim from the cloudprovider by its provider id. Delete should return

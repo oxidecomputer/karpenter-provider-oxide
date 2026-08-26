@@ -136,6 +136,12 @@ var (
 	// allocated from at launch, sorted and comma-separated. One IP is attached per resolved pool.
 	AnnotationIPPools = apis.Group + "/ip-pools"
 
+	// AnnotationHourlyPrice is the effective hourly price Karpenter used for the instance's offering
+	// when it launched the NodeClaim, including any NodeOverlay price override or adjustment. The
+	// units and whether the value is suitable as a billing estimate are defined by the cloud provider;
+	// Oxide's default prices are synthetic comparison costs unless an overlay replaces them.
+	AnnotationHourlyPrice = apis.Group + "/hourly-price"
+
 	// AnnotationDiskSetSources is the image or snapshot each diskSet's disks were created from at
 	// launch, as "<set>=<uuid>" entries, sorted and comma-separated.
 	//

@@ -187,6 +187,7 @@ func run() error {
 		ox,
 		project,
 		instanceTypes,
+		karpcore.InstanceTypeStore,
 		affinityPolicy,
 		bootstrappers,
 		inventoryCfg.repairPolicies(),

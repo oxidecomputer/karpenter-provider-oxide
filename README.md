@@ -499,6 +499,18 @@ default-4mzqp   ImageDrift
 default-7xk2n   <none>
 ```
 
+## Launch Price
+
+Every launched NodeClaim carries `karpenter.oxide.computer/hourly-price`, the effective offering
+price Karpenter used at launch. Karpenter copies the annotation to the Node when it registers, so
+cost-aware tools can read either object without knowing how Oxide instance types are priced.
+
+The value includes any matching `NodeOverlay` `price` or `priceAdjustment`. It is a launch-time
+snapshot: changing an overlay does not rewrite existing NodeClaims. It is also Karpenter's comparison
+price rather than an authoritative billing estimate. Oxide's default scale is synthetic and exists to
+order shapes for scheduling and consolidation; use an absolute `NodeOverlay` price when the value
+needs to represent a real hourly cost.
+
 ## Silo Quota
 
 A silo has a quota — vCPUs, memory and storage it is entitled to — separate from whether the rack has
