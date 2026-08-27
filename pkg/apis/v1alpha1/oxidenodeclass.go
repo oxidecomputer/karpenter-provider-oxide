@@ -13,10 +13,13 @@ import (
 
 // OxideNodeClassSpec is the top level specification for the Oxide Karpenter Provider.
 type OxideNodeClassSpec struct {
-	// UserData to be applied to the provisioned nodes.
+	// UserData is a bash fragment that runs before the provider-generated node bootstrap steps.
 	// +optional
-	UserData string   `json:"userData,omitempty"`
-	Env      []EnvVar `json:"env,omitempty"`
+	UserData string `json:"userData,omitempty"`
+	// Env contains environment variables exported before userData and the provider-generated
+	// node bootstrap steps. Values may be specified directly or read from a Secret.
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
 	// Server is the endpoint nodes use to join the cluster.
 	// +optional
 	Server string `json:"server,omitempty"`
@@ -296,12 +299,19 @@ func (in *Bootstrap) Kind() string {
 }
 
 type EnvVar struct {
-	Name      string     `json:"name,omitempty"`
-	Value     string     `json:"value,omitempty"`
+	// Name is the shell environment variable name.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_]*$`
+	Name string `json:"name"`
+	// Value is the literal environment variable value.
+	// +optional
+	Value string `json:"value,omitempty"`
+	// ValueFrom selects the environment variable value from a Kubernetes object.
+	// +optional
 	ValueFrom *ValueFrom `json:"valueFrom,omitempty"`
 }
 
 type ValueFrom struct {
+	// SecretKeyRef selects a key of a Secret.
 	SecretKeyRef SecretRef `json:"secretKeyRef,omitempty"`
 }
 

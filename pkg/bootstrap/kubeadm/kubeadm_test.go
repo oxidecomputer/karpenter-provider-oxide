@@ -88,6 +88,38 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
+	nc := nodeClass(t)
+	nc.Spec.UserData = "echo custom-$NODE_ROLE\n"
+	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+
+	out, err := NewBootstrapper(kubeClient, kubeClient).UserData(
+		context.Background(),
+		nc,
+		bootstrap.Request{
+			NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			Hostname:  "karpenter-default-x7k2p",
+		},
+	)
+	if err != nil {
+		t.Fatalf("UserData() returned an unexpected error: %v", err)
+	}
+
+	environment := strings.Index(out, "export NODE_ROLE='worker'")
+	custom := strings.Index(out, "echo custom-$NODE_ROLE")
+	join := strings.Index(out, "kubeadm join --config")
+	if environment < 0 || custom < 0 || join < 0 || environment >= custom || custom >= join {
+		t.Errorf(
+			"user-data sections are missing or out of order: environment=%d custom=%d join=%d\n%s",
+			environment,
+			custom,
+			join,
+			out,
+		)
+	}
+}
+
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 

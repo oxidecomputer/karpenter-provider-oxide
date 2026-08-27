@@ -156,15 +156,24 @@ spec:
                 - message: exactly one bootstrap provider must be set
                   rule: '[has(self.rke2), has(self.kubeadm)].exists_one(x, x)'
               env:
+                description: |-
+                  Env contains environment variables exported before userData and the provider-generated
+                  node bootstrap steps. Values may be specified directly or read from a Secret.
                 items:
                   properties:
                     name:
+                      description: Name is the shell environment variable name.
+                      pattern: ^[a-zA-Z_][a-zA-Z0-9_]*$
                       type: string
                     value:
+                      description: Value is the literal environment variable value.
                       type: string
                     valueFrom:
+                      description: ValueFrom selects the environment variable value
+                        from a Kubernetes object.
                       properties:
                         secretKeyRef:
+                          description: SecretKeyRef selects a key of a Secret.
                           properties:
                             key:
                               type: string
@@ -174,6 +183,8 @@ spec:
                               type: string
                           type: object
                       type: object
+                  required:
+                  - name
                   type: object
                 type: array
               ephemeralIPs:
@@ -489,7 +500,8 @@ spec:
                 minItems: 1
                 type: array
               userData:
-                description: UserData to be applied to the provisioned nodes.
+                description: UserData is a bash fragment that runs before the provider-generated
+                  node bootstrap steps.
                 type: string
             required:
             - storage

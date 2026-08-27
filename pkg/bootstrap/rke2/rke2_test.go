@@ -101,6 +101,37 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestUserDataMergesCustomUserDataAndEnvironmentBeforeAgentStart(t *testing.T) {
+	nc := nodeClass(t)
+	nc.Spec.UserData = "echo custom-$NODE_ROLE\n"
+	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
+
+	out, err := NewBootstrapper(readerFor(t, tokenSecret(t))).UserData(
+		context.Background(),
+		nc,
+		bootstrap.Request{
+			NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			Hostname:  "karpenter-default-x7k2p",
+		},
+	)
+	if err != nil {
+		t.Fatalf("UserData() returned an unexpected error: %v", err)
+	}
+
+	environment := strings.Index(out, "export NODE_ROLE='worker'")
+	custom := strings.Index(out, "echo custom-$NODE_ROLE")
+	start := strings.Index(out, "systemctl start rke2-agent.service")
+	if environment < 0 || custom < 0 || start < 0 || environment >= custom || custom >= start {
+		t.Errorf(
+			"user-data sections are missing or out of order: environment=%d custom=%d start=%d\n%s",
+			environment,
+			custom,
+			start,
+			out,
+		)
+	}
+}
+
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 

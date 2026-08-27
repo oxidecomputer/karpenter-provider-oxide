@@ -84,6 +84,9 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidenodeclasses"]
     verbs: ["get", "list", "watch", "patch", "update"]

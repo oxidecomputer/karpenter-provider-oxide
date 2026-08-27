@@ -161,7 +161,7 @@ func (b *Bootstrapper) UserData(
 	}); err != nil {
 		return "", fmt.Errorf("unable to execute user-data template: %w", err)
 	}
-	return rendered.String(), nil
+	return bootstrap.MergeUserData(ctx, b.reader, nodeClass, rendered.String())
 }
 
 type clusterInfoData struct {
