@@ -128,8 +128,8 @@ github.com/onsi/ginkgo/v2 v2.28.3 h1:4JvMdwtFU0imd8fHx25OJXoDMRexnf8v5NHKYSTTji4
 github.com/onsi/ginkgo/v2 v2.28.3/go.mod h1:+aXOY+vzZ5mu2iI2HpTZUPmM//oQfsNFX6gU9kNcA44=
 github.com/onsi/gomega v1.40.0 h1:Vtol0e1MghCD2ZVIilPDIg44XSL9l2QAn8ZNaljWcJc=
 github.com/onsi/gomega v1.40.0/go.mod h1:M/Uqpu/8qTjtzCLUA2zJHX9Iilrau25x1PdoSRbWh5A=
-github.com/oxidecomputer/oxide.go v0.9.1-0.20260420200835-b6f489e52089 h1:9jEQTD3At8j8Y5mhns5Bc2bJdUwRpfRQOEeOYtoZyRc=
-github.com/oxidecomputer/oxide.go v0.9.1-0.20260420200835-b6f489e52089/go.mod h1:6KXHuYsXMOR1DS3uRE+wI6DPVQnS16tEDkj8miqXQcY=
+github.com/oxidecomputer/oxide.go v0.10.0 h1:4eGzt3OrN2jJJpXdsNnyd26D+zYAIIF7A9wswx+f4LM=
+github.com/oxidecomputer/oxide.go v0.10.0/go.mod h1:H8k5p7Eb5+jQGbWNmeiJcOQPUvR3ciwwBzWf7B24lNo=
 github.com/patrickmn/go-cache v2.1.0+incompatible h1:HRMgzkcYKYpi3C8ajMPV8OFXaaRUnok+kx1WdO15EQc=
 github.com/patrickmn/go-cache v2.1.0+incompatible/go.mod h1:3Qf8kWWT7OJRJbdiICTKqZju1ZixQ/KpMGzzAfe6+WQ=
 github.com/pelletier/go-toml v1.9.5 h1:4yBQzkHv+7BHq2PQUZF3Mx0IYxG7LsP222s7Agd3ve8=
