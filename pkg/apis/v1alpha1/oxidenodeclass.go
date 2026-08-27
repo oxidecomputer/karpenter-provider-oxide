@@ -49,7 +49,26 @@ type OxideNodeClassSpec struct {
 	Affinity *Affinity `json:"affinity,omitempty"`
 }
 
-const maxAttachedDisks = 8
+const (
+	maxAttachedDisks = 8
+
+	// These match Nexus MIN_DISK_SIZE_BYTES and MAX_DISK_SIZE_BYTES in
+	// omicron/nexus/src/app/mod.rs.
+	DiskSizeGranularityBytes    int64 = 1 << 30
+	MinDiskSizeBytes            int64 = 1 << 30
+	MaxDistributedDiskSizeBytes int64 = 1023 << 30
+)
+
+// DiskSizeError reports a disk quantity or source-size contract Nexus would reject.
+type DiskSizeError struct {
+	Disk       string
+	Requested  string
+	Constraint string
+}
+
+func (e *DiskSizeError) Error() string {
+	return fmt.Sprintf("%s size %s is invalid: %s", e.Disk, e.Requested, e.Constraint)
+}
 
 // Filesystem values a diskSet's disks can be formatted with.
 const (
@@ -151,6 +170,16 @@ func (in BootDisk) PoolMaxReady() int32 {
 	return DefaultBootDiskPoolMaxReady
 }
 
+// ValidateSize checks the static Nexus size contract for a boot disk.
+func (in BootDisk) ValidateSize() error {
+	return validateDiskSize("boot disk", in.Size, true)
+}
+
+// ValidateSourceSize checks that the boot disk can hold its selected image.
+func (in BootDisk) ValidateSourceSize(sourceBytes int64) error {
+	return validateSourceSize("boot disk", in.Size, sourceBytes, false)
+}
+
 // DiskSet is a group of identically configured disks attached to every launched instance.
 // +kubebuilder:validation:XValidation:rule="[has(self.mountPath), has(self.mountDir)].exists_one(x, x)",message="exactly one of mountPath or mountDir must be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.mountPath) || self.count == 1",message="mountPath is a single mount point, so it needs count 1; a set of several disks wants mountDir, which each disk is mounted beneath"
@@ -216,6 +245,98 @@ type DiskSet struct {
 	// ReadOnly attaches sourced disks read-only.
 	// +optional
 	ReadOnly *bool `json:"readOnly,omitempty"`
+}
+
+// ValidateSize checks the static Nexus size contract for each disk in the set.
+func (in DiskSet) ValidateSize() error {
+	return validateDiskSize(
+		fmt.Sprintf("diskSet %q", in.Name),
+		in.Size,
+		in.EffectiveType() == DiskSetTypeDistributed,
+	)
+}
+
+// ValidateSourceSize checks the size contract for the set's selected source.
+func (in DiskSet) ValidateSourceSize(sourceBytes int64) error {
+	return validateSourceSize(
+		fmt.Sprintf("diskSet %q", in.Name),
+		in.Size,
+		sourceBytes,
+		in.ReadOnlyEnabled(),
+	)
+}
+
+func validateDiskSize(
+	disk string,
+	size resource.Quantity,
+	distributed bool,
+) error {
+	bytes, exact := size.AsInt64()
+	switch {
+	case !exact:
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: "must fit exactly in a signed 64-bit Oxide byte count",
+		}
+	case bytes < MinDiskSizeBytes:
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: fmt.Sprintf("must be at least %d bytes (1 GiB)", MinDiskSizeBytes),
+		}
+	case bytes%DiskSizeGranularityBytes != 0:
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: fmt.Sprintf(
+				"must be a multiple of %d bytes (1 GiB)", DiskSizeGranularityBytes,
+			),
+		}
+	case distributed && bytes > MaxDistributedDiskSizeBytes:
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: fmt.Sprintf(
+				"must not exceed %d bytes (1023 GiB) for distributed storage",
+				MaxDistributedDiskSizeBytes,
+			),
+		}
+	default:
+		return nil
+	}
+}
+
+func validateSourceSize(
+	disk string,
+	size resource.Quantity,
+	sourceBytes int64,
+	readOnly bool,
+) error {
+	bytes, exact := size.AsInt64()
+	if !exact {
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: "must fit exactly in a signed 64-bit Oxide byte count",
+		}
+	}
+	if sourceBytes <= 0 {
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: "cannot be validated because its source size is unknown or zero",
+		}
+	}
+	if readOnly && bytes != sourceBytes {
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: fmt.Sprintf(
+				"must equal its read-only source size of %d bytes", sourceBytes,
+			),
+		}
+	}
+	if !readOnly && bytes < sourceBytes {
+		return &DiskSizeError{
+			Disk: disk, Requested: size.String(),
+			Constraint: fmt.Sprintf("must be at least its source size of %d bytes", sourceBytes),
+		}
+	}
+	return nil
 }
 
 // SnapshotSelector selects a snapshot by ID or by name.
@@ -521,6 +642,11 @@ func (in DiskSet) EffectiveType() string {
 // Sourced reports whether the set's disks are created from an image or a snapshot.
 func (in DiskSet) Sourced() bool {
 	return len(in.ImageSelector) > 0 || len(in.SnapshotSelector) > 0
+}
+
+// ReadOnlyEnabled reports whether sourced disks are attached read-only.
+func (in DiskSet) ReadOnlyEnabled() bool {
+	return in.ReadOnly != nil && *in.ReadOnly
 }
 
 // EffectiveFilesystem is what the guest should format each of the set's disks with.

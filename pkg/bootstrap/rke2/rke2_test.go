@@ -48,7 +48,13 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 				DiskSets: sets,
 			},
 		},
-		Status: v1alpha1.OxideNodeClassStatus{Server: "https://10.0.0.1:9345"},
+		Status: v1alpha1.OxideNodeClassStatus{
+			Server: "https://10.0.0.1:9345",
+			Images: []v1alpha1.OxideImage{{
+				ID:        "11111111-1111-1111-1111-111111111111",
+				SizeBytes: 4 << 30,
+			}},
+		},
 	}
 }
 

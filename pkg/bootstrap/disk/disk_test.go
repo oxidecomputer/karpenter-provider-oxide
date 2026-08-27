@@ -18,6 +18,12 @@ func nodeClass(sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 				DiskSets: sets,
 			},
 		},
+		Status: v1alpha1.OxideNodeClassStatus{
+			Images: []v1alpha1.OxideImage{{
+				ID:        "11111111-1111-1111-1111-111111111111",
+				SizeBytes: 4 << 30,
+			}},
+		},
 	}
 }
 
@@ -288,8 +294,11 @@ func TestSourcedDiskIsNeverFormatted(t *testing.T) {
 	nc := nodeClass(set)
 	nc.Status.Storage = &v1alpha1.StorageStatus{
 		DiskSets: []v1alpha1.DiskSetStatus{{
-			Name:   "sourced",
-			Images: []v1alpha1.OxideImage{{ID: "11111111-1111-1111-1111-111111111111"}},
+			Name: "sourced",
+			Images: []v1alpha1.OxideImage{{
+				ID:        "11111111-1111-1111-1111-111111111111",
+				SizeBytes: 4 << 30,
+			}},
 		}},
 	}
 	built, err := storage.Build("inst-test", "launch-token", nc)

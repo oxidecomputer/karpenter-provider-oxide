@@ -20,6 +20,7 @@ func TestReadyIsDerivedFromImagesAndSubnetsResolved(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			nodeClass := tt.nodeClass
 			nodeClass.StatusConditions().SetTrue(ConditionTypeSubnetsResolved)
+			nodeClass.StatusConditions().SetTrue(ConditionTypeStorageResolved)
 
 			nodeClass.StatusConditions().
 				SetFalse(ConditionTypeImagesResolved, "ImagesNotFound", "no images matched")
@@ -38,6 +39,7 @@ func TestReadyIsDerivedFromImagesAndSubnetsResolved(t *testing.T) {
 func TestReadyRemainsFalseWithoutResolvedSubnets(t *testing.T) {
 	nodeClass := &OxideNodeClass{}
 	nodeClass.StatusConditions().SetTrue(ConditionTypeImagesResolved)
+	nodeClass.StatusConditions().SetTrue(ConditionTypeStorageResolved)
 	nodeClass.StatusConditions().SetFalse(
 		ConditionTypeSubnetsResolved, "SubnetsNotFound", "no subnets matched {vpcName=prod}",
 	)
@@ -53,6 +55,7 @@ func TestReadyIsFalseWhenABootstrapConditionIsFalse(t *testing.T) {
 
 	nodeClass.StatusConditions().SetTrue(ConditionTypeImagesResolved)
 	nodeClass.StatusConditions().SetTrue(ConditionTypeSubnetsResolved)
+	nodeClass.StatusConditions().SetTrue(ConditionTypeStorageResolved)
 	nodeClass.StatusConditions().
 		SetFalse(ConditionTypeClusterInfoAvailable, "ClusterInfoUnavailable", "boom")
 	if cond := nodeClass.StatusConditions().Get(status.ConditionReady); !cond.IsFalse() {

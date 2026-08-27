@@ -29,6 +29,10 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 		},
 		Status: v1alpha1.OxideNodeClassStatus{
 			Server: "10.0.0.1:6443",
+			Images: []v1alpha1.OxideImage{{
+				ID:        "11111111-1111-1111-1111-111111111111",
+				SizeBytes: 4 << 30,
+			}},
 			Bootstrap: &v1alpha1.BootstrapStatus{
 				Kubeadm: &v1alpha1.KubeadmStatus{
 					CACertHashes: []string{"sha256:abcdef"},

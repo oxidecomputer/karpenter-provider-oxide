@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -35,6 +36,9 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 				Boot:     v1alpha1.BootDisk{Size: resource.MustParse("20Gi")},
 				DiskSets: sets,
 			},
+		},
+		Status: v1alpha1.OxideNodeClassStatus{
+			Images: []v1alpha1.OxideImage{{ID: "boot-image", SizeBytes: 10 << 30}},
 		},
 	}
 }
@@ -426,8 +430,150 @@ func TestBuildRejectsADiskSmallerThanItsSource(t *testing.T) {
 	if err == nil {
 		t.Fatal("Build accepted a disk smaller than the image it is created from")
 	}
-	if !strings.Contains(err.Error(), "smaller than") {
+	if !strings.Contains(err.Error(), "at least its source size") {
 		t.Errorf("error %q does not explain the size mismatch", err)
+	}
+}
+
+func TestBuildValidatesStaticDiskSizes(t *testing.T) {
+	for _, tt := range []struct {
+		name, size, diskType string
+		valid                bool
+	}{
+		{name: "zero", size: "0", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "below minimum", size: "512Mi", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "minimum", size: "1Gi", diskType: v1alpha1.DiskSetTypeDistributed, valid: true},
+		{name: "fractional GiB", size: "1536Mi", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "whole GiB", size: "2Gi", diskType: v1alpha1.DiskSetTypeDistributed, valid: true},
+		{name: "distributed maximum", size: "1023Gi", diskType: v1alpha1.DiskSetTypeDistributed, valid: true},
+		{name: "above distributed maximum", size: "1024Gi", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "negative", size: "-1Gi", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "overflow", size: "1000000000000000000000000000000Gi", diskType: v1alpha1.DiskSetTypeDistributed},
+		{name: "large local", size: "1024Gi", diskType: v1alpha1.DiskSetTypeLocal, valid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := nodeClass(t, set(t, "data", func(set *v1alpha1.DiskSet) {
+				set.Size = resource.MustParse(tt.size)
+				set.Type = tt.diskType
+			}))
+			_, err := Build("karpenter-default-x7k2p", testToken, nc)
+			if (err == nil) != tt.valid {
+				t.Fatalf("Build() error = %v, valid = %t", err, tt.valid)
+			}
+			if !tt.valid {
+				var sizeErr *v1alpha1.DiskSizeError
+				if !errors.As(err, &sizeErr) {
+					t.Fatalf("Build() error = %v, want a typed DiskSizeError", err)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildValidatesBootImageSize(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		requested string
+		source    int64
+		valid     bool
+	}{
+		{name: "smaller", requested: "1Gi", source: 2 << 30},
+		{name: "equal", requested: "2Gi", source: 2 << 30, valid: true},
+		{name: "larger", requested: "3Gi", source: 2 << 30, valid: true},
+		{name: "unknown", requested: "2Gi", source: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := nodeClass(t)
+			nc.Spec.Storage.Boot.Size = resource.MustParse(tt.requested)
+			nc.Status.Images[0].SizeBytes = tt.source
+			_, err := Build("karpenter-default-x7k2p", testToken, nc)
+			if (err == nil) != tt.valid {
+				t.Fatalf("Build() error = %v, valid = %t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestBuildValidatesStaticBootSizes(t *testing.T) {
+	for _, tt := range []struct {
+		size  string
+		valid bool
+	}{
+		{size: "0"},
+		{size: "512Mi"},
+		{size: "1Gi", valid: true},
+		{size: "1536Mi"},
+		{size: "1023Gi", valid: true},
+		{size: "1024Gi"},
+		{size: "-1Gi"},
+		{size: "1000000000000000000000000000000Gi"},
+	} {
+		t.Run(tt.size, func(t *testing.T) {
+			nc := nodeClass(t)
+			nc.Spec.Storage.Boot.Size = resource.MustParse(tt.size)
+			nc.Status.Images[0].SizeBytes = 1 << 30
+			_, err := Build("karpenter-default-x7k2p", testToken, nc)
+			if (err == nil) != tt.valid {
+				t.Fatalf("Build() error = %v, valid = %t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestBuildValidatesSourcedDiskSizes(t *testing.T) {
+	for _, kind := range []string{"image", "snapshot"} {
+		for _, readOnly := range []bool{false, true} {
+			for _, requested := range []string{"1Gi", "2Gi", "3Gi"} {
+				name := kind + "/" + map[bool]string{false: "read-write", true: "read-only"}[readOnly] + "/" + requested
+				t.Run(name, func(t *testing.T) {
+					sourced := set(t, "sourced", func(set *v1alpha1.DiskSet) {
+						set.Size = resource.MustParse(requested)
+						set.ReadOnly = &readOnly
+						if kind == "image" {
+							set.ImageSelector = []v1alpha1.ImageSelector{{Name: "source"}}
+						} else {
+							set.SnapshotSelector = []v1alpha1.SnapshotSelector{{Name: "source"}}
+						}
+					})
+					nc := nodeClass(t, sourced)
+					status := v1alpha1.DiskSetStatus{Name: sourced.Name}
+					if kind == "image" {
+						status.Images = []v1alpha1.OxideImage{{ID: "image", SizeBytes: 2 << 30}}
+					} else {
+						status.Snapshots = []v1alpha1.OxideSnapshot{{ID: "snapshot", SizeBytes: 2 << 30}}
+					}
+					nc.Status.Storage = &v1alpha1.StorageStatus{DiskSets: []v1alpha1.DiskSetStatus{status}}
+
+					_, err := Build("karpenter-default-x7k2p", testToken, nc)
+					want := requested == "2Gi" || (!readOnly && requested == "3Gi")
+					if (err == nil) != want {
+						t.Fatalf("Build() error = %v, valid = %t", err, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestBuildRejectsUnknownSourceSizes(t *testing.T) {
+	nc := nodeClass(t, set(t, "sourced", func(set *v1alpha1.DiskSet) {
+		set.Size = resource.MustParse("2Gi")
+		set.ImageSelector = []v1alpha1.ImageSelector{{Name: "source"}}
+	}))
+	nc.Status.Storage = &v1alpha1.StorageStatus{DiskSets: []v1alpha1.DiskSetStatus{{
+		Name: "sourced", Images: []v1alpha1.OxideImage{{ID: "image", SizeBytes: 0}},
+	}}}
+
+	_, err := Build("karpenter-default-x7k2p", testToken, nc)
+	var sizeErr *v1alpha1.DiskSizeError
+	if !errors.As(err, &sizeErr) {
+		t.Fatalf("Build() error = %v, want a typed DiskSizeError", err)
+	}
+
+	nc = nodeClass(t)
+	nc.Status.Images = nil
+	if _, err := Build("karpenter-default-x7k2p", testToken, nc); err == nil {
+		t.Fatal("Build() accepted a boot disk with no resolved image")
 	}
 }
 
@@ -454,7 +600,7 @@ func TestSourcedDiskSetIsNeverFormatted(t *testing.T) {
 	nc.Status.Storage = &v1alpha1.StorageStatus{
 		DiskSets: []v1alpha1.DiskSetStatus{{
 			Name:   "sourced",
-			Images: []v1alpha1.OxideImage{{ID: "img-id"}},
+			Images: []v1alpha1.OxideImage{{ID: "img-id", SizeBytes: 100 << 30}},
 		}},
 	}
 	plan := mustBuild(t, "karpenter-default-x7k2p", nc)

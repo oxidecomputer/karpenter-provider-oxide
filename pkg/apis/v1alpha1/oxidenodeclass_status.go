@@ -28,7 +28,7 @@ const ConditionTypeAffinityPolicySatisfiable = "AffinityPolicySatisfiable"
 // ConditionReasonAffinityPolicyUnsatisfiable identifies a fail-policy refusal.
 const ConditionReasonAffinityPolicyUnsatisfiable = "AffinityPolicyUnsatisfiable"
 
-// ConditionTypeStorageResolved reports whether disk sources resolved.
+// ConditionTypeStorageResolved reports whether the complete storage layout is valid and its sources resolved.
 const ConditionTypeStorageResolved = "StorageResolved"
 
 // ConditionTypeEphemeralIPsResolved reports whether every ephemeral IP entry named a pool that exists.
@@ -48,7 +48,11 @@ const (
 const (
 	// ConditionReasonDiskSourceNotFound is a diskSet selector, wildcard included, that matched nothing.
 	ConditionReasonDiskSourceNotFound = "DiskSourceNotFound"
-	// ConditionReasonDiskTooSmall identifies a disk smaller than its source.
+	// ConditionReasonInvalidDiskSize identifies a disk outside Nexus's static size contract.
+	ConditionReasonInvalidDiskSize = "InvalidDiskSize"
+	// ConditionReasonDiskSourceSizeMismatch identifies a disk incompatible with its source size.
+	ConditionReasonDiskSourceSizeMismatch = "DiskSourceSizeMismatch"
+	// ConditionReasonDiskTooSmall is the deprecated former reason for a source-size mismatch.
 	ConditionReasonDiskTooSmall = "DiskTooSmall"
 	// ConditionReasonTooManyDisks is a layout asking for more than the eight disks an instance can attach.
 	ConditionReasonTooManyDisks = "TooManyDisks"
@@ -239,7 +243,11 @@ type OxideEphemeralIP struct {
 // StatusConditions returns the node class condition set.
 func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
 
-	conds := []string{ConditionTypeImagesResolved, ConditionTypeSubnetsResolved}
+	conds := []string{
+		ConditionTypeImagesResolved,
+		ConditionTypeSubnetsResolved,
+		ConditionTypeStorageResolved,
+	}
 	switch in.Spec.Bootstrap.Kind() {
 	case BootstrapKindRKE2:
 		if in.Spec.Bootstrap.RKE2.TokenRefSecret.Name != "" {
@@ -247,9 +255,6 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		}
 	case BootstrapKindKubeadm:
 		conds = append(conds, ConditionTypeClusterInfoAvailable)
-	}
-	if in.Spec.Storage.NeedsSourceResolution() {
-		conds = append(conds, ConditionTypeStorageResolved)
 	}
 	if len(in.Spec.EphemeralIPs) > 0 {
 		conds = append(conds, ConditionTypeEphemeralIPsResolved)

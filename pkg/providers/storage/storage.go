@@ -82,16 +82,11 @@ func Build(instanceName, token string, nodeClass *v1alpha1.OxideNodeClass) (Plan
 	if token == "" {
 		return Plan{}, errors.New("a launch token is required to plan disks")
 	}
-	spec := nodeClass.Spec.Storage
-
-	if total, max := spec.Disks(), v1alpha1.MaxDisks(); total > max {
-		return Plan{}, fmt.Errorf(
-			"%w: the layout asks for %d disks including the boot disk, and an instance can attach %d",
-			ErrTooManyDisks,
-			total,
-			max,
-		)
+	if err := validateStorage(nodeClass); err != nil {
+		return Plan{}, err
 	}
+	spec := nodeClass.Spec.Storage
+	bootImage := nodeClass.Status.Images[0]
 
 	prefix := Prefix(instanceName, token)
 	bootName := bootDiskName(prefix)
@@ -106,7 +101,7 @@ func Build(instanceName, token string, nodeClass *v1alpha1.OxideNodeClass) (Plan
 			Boot:      true,
 			SizeBytes: spec.Boot.Size.Value(),
 
-			ImageID: lo.FirstOrEmpty(nodeClass.Status.Images).ID,
+			ImageID: bootImage.ID,
 		},
 	}
 
@@ -123,6 +118,42 @@ func Build(instanceName, token string, nodeClass *v1alpha1.OxideNodeClass) (Plan
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+func validateStorage(nodeClass *v1alpha1.OxideNodeClass) error {
+	spec := nodeClass.Spec.Storage
+	if err := spec.Boot.ValidateSize(); err != nil {
+		return fmt.Errorf("invalid storage layout: %w", err)
+	}
+	for _, set := range spec.DiskSets {
+		if err := set.ValidateSize(); err != nil {
+			return fmt.Errorf("invalid storage layout: %w", err)
+		}
+	}
+	if total, max := spec.Disks(), v1alpha1.MaxDisks(); total > max {
+		return fmt.Errorf(
+			"%w: the layout asks for %d disks including the boot disk, and an instance can attach %d",
+			ErrTooManyDisks,
+			total,
+			max,
+		)
+	}
+	bootImage, found := lo.First(nodeClass.Status.Images)
+	if !found {
+		return errors.New("invalid storage layout: the boot disk has no resolved boot image")
+	}
+	if err := spec.Boot.ValidateSourceSize(bootImage.SizeBytes); err != nil {
+		return fmt.Errorf("invalid storage layout for the selected boot image: %w", err)
+	}
+	for _, set := range spec.DiskSets {
+		if !set.Sourced() {
+			continue
+		}
+		if _, _, err := source(nodeClass, set); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func buildSet(
@@ -159,7 +190,7 @@ func buildSet(
 			Index:      *index,
 			Ordinal:    ordinal,
 			Local:      set.EffectiveType() == v1alpha1.DiskSetTypeLocal,
-			ReadOnly:   set.ReadOnly != nil && *set.ReadOnly,
+			ReadOnly:   set.ReadOnlyEnabled(),
 			SizeBytes:  set.Size.Value(),
 			Filesystem: set.EffectiveFilesystem(),
 			ImageID:    imageID,
@@ -210,14 +241,8 @@ func source(nodeClass *v1alpha1.OxideNodeClass, set v1alpha1.DiskSet) (string, s
 		id, sourceSize, kind = snapshot.ID, snapshot.SizeBytes, "snapshot"
 	}
 
-	if size := set.Size.Value(); sourceSize > 0 && size < sourceSize {
-		return "", "", fmt.Errorf(
-			"diskSet %q asks for %d bytes per disk, which is smaller than the %s it is created from at %d bytes",
-			set.Name,
-			size,
-			kind,
-			sourceSize,
-		)
+	if err := set.ValidateSourceSize(sourceSize); err != nil {
+		return "", "", fmt.Errorf("%s source: %w", kind, err)
 	}
 	if len(set.ImageSelector) > 0 {
 		return id, "", nil

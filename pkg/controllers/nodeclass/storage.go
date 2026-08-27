@@ -15,17 +15,39 @@ func (c *Controller) resolveStorage(
 	nodeClass *v1alpha1.OxideNodeClass,
 ) error {
 	sets := nodeClass.Spec.Storage.DiskSets
+	var bootDiskPool *v1alpha1.BootDiskPoolStatus
+	if nodeClass.Status.Storage != nil {
+		bootDiskPool = nodeClass.Status.Storage.BootDiskPool
+	}
+	if bootDiskPool == nil {
+		nodeClass.Status.Storage = nil
+	} else {
+		nodeClass.Status.Storage = &v1alpha1.StorageStatus{BootDiskPool: bootDiskPool}
+	}
 	resolved := &v1alpha1.StorageStatus{
 		BootSizeBytes: nodeClass.Spec.Storage.Boot.Size.Value(),
 		DiskSets:      make([]v1alpha1.DiskSetStatus, 0, len(sets)),
+		BootDiskPool:  bootDiskPool,
 	}
-	if nodeClass.Status.Storage != nil {
-		resolved.BootDiskPool = nodeClass.Status.Storage.BootDiskPool
+
+	if err := nodeClass.Spec.Storage.Boot.ValidateSize(); err != nil {
+		setInvalidStorageCondition(
+			nodeClass, v1alpha1.ConditionReasonInvalidDiskSize, err.Error(),
+		)
+		return nil
+	}
+	for _, set := range sets {
+		if err := set.ValidateSize(); err != nil {
+			setInvalidStorageCondition(
+				nodeClass, v1alpha1.ConditionReasonInvalidDiskSize, err.Error(),
+			)
+			return nil
+		}
 	}
 
 	if total, max := nodeClass.Spec.Storage.Disks(), v1alpha1.MaxDisks(); total > max {
-		nodeClass.StatusConditions().SetFalse(
-			v1alpha1.ConditionTypeStorageResolved,
+		setInvalidStorageCondition(
+			nodeClass,
 			v1alpha1.ConditionReasonTooManyDisks,
 			fmt.Sprintf(
 				"the layout asks for %d disks including the boot disk, and an instance can attach %d",
@@ -36,8 +58,27 @@ func (c *Controller) resolveStorage(
 		return nil
 	}
 
+	if len(nodeClass.Status.Images) == 0 {
+		setInvalidStorageCondition(
+			nodeClass,
+			v1alpha1.ConditionReasonDiskSourceNotFound,
+			"the boot disk has no resolved boot image",
+		)
+		return nil
+	}
+	if err := nodeClass.Spec.Storage.Boot.ValidateSourceSize(
+		nodeClass.Status.Images[0].SizeBytes,
+	); err != nil {
+		setInvalidStorageCondition(
+			nodeClass,
+			v1alpha1.ConditionReasonDiskSourceSizeMismatch,
+			fmt.Sprintf("selected boot image: %v", err),
+		)
+		return nil
+	}
+
 	var unresolved []string
-	var tooSmall []string
+	var mismatched []string
 	for _, set := range sets {
 		status := v1alpha1.DiskSetStatus{
 			Name:        set.Name,
@@ -64,8 +105,8 @@ func (c *Controller) resolveStorage(
 				continue
 			}
 			status.Images = images.Resolved[:min(len(images.Resolved), maxStatusImages)]
-			if reason, ok := tooSmallFor(set, status.Images[0].SizeBytes, "image"); !ok {
-				tooSmall = append(tooSmall, reason)
+			if err := set.ValidateSourceSize(status.Images[0].SizeBytes); err != nil {
+				mismatched = append(mismatched, fmt.Sprintf("image: %v", err))
 				continue
 			}
 
@@ -82,29 +123,24 @@ func (c *Controller) resolveStorage(
 				continue
 			}
 			status.Snapshots = snapshots.Resolved[:min(len(snapshots.Resolved), maxStatusImages)]
-			if reason, ok := tooSmallFor(set, status.Snapshots[0].SizeBytes, "snapshot"); !ok {
-				tooSmall = append(tooSmall, reason)
+			if err := set.ValidateSourceSize(status.Snapshots[0].SizeBytes); err != nil {
+				mismatched = append(mismatched, fmt.Sprintf("snapshot: %v", err))
 				continue
 			}
 		}
 		resolved.DiskSets = append(resolved.DiskSets, status)
 	}
 
-	if !nodeClass.Spec.Storage.NeedsSourceResolution() {
-		nodeClass.Status.Storage = resolved
-		return nil
-	}
-
 	switch {
-	case len(tooSmall) > 0:
-		nodeClass.StatusConditions().SetFalse(
-			v1alpha1.ConditionTypeStorageResolved,
-			v1alpha1.ConditionReasonDiskTooSmall,
-			strings.Join(tooSmall, "; "),
+	case len(mismatched) > 0:
+		setInvalidStorageCondition(
+			nodeClass,
+			v1alpha1.ConditionReasonDiskSourceSizeMismatch,
+			strings.Join(mismatched, "; "),
 		)
 	case len(unresolved) > 0:
-		nodeClass.StatusConditions().SetFalse(
-			v1alpha1.ConditionTypeStorageResolved,
+		setInvalidStorageCondition(
+			nodeClass,
 			v1alpha1.ConditionReasonDiskSourceNotFound,
 			strings.Join(unresolved, "; "),
 		)
@@ -115,17 +151,16 @@ func (c *Controller) resolveStorage(
 	return nil
 }
 
-func tooSmallFor(set v1alpha1.DiskSet, sourceBytes int64, kind string) (string, bool) {
-	if sourceBytes <= 0 || set.Size.Value() >= sourceBytes {
-		return "", true
-	}
-	return fmt.Sprintf(
-		"diskSet %q asks for %d bytes per disk, which is smaller than the %s it is created from at %d bytes",
-		set.Name,
-		set.Size.Value(),
-		kind,
-		sourceBytes,
-	), false
+func setInvalidStorageCondition(
+	nodeClass *v1alpha1.OxideNodeClass,
+	reason string,
+	message string,
+) {
+	nodeClass.StatusConditions().SetFalse(
+		v1alpha1.ConditionTypeStorageResolved,
+		reason,
+		message,
+	)
 }
 
 func mountPoints(set v1alpha1.DiskSet) []string {
