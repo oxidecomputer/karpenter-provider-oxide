@@ -479,12 +479,21 @@ spec:
                       description: VPCName is the exact VPC name.
                       type: string
                   type: object
+                  x-kubernetes-validations:
+                  - message: a subnet selector needs a subnet id, VPC id, or VPC name
+                    rule: has(self.id) || has(self.vpcID) || has(self.vpcName)
+                  - message: a subnet name requires a VPC id or VPC name
+                    rule: '!has(self.name) || has(self.vpcID) || has(self.vpcName)'
+                  - message: a subnet selector cannot set both vpcID and vpcName
+                    rule: '!(has(self.vpcID) && has(self.vpcName))'
+                minItems: 1
                 type: array
               userData:
                 description: UserData to be applied to the provisioned nodes.
                 type: string
             required:
             - storage
+            - subnetSelector
             type: object
           status:
             description: OxideNodeClassStatus is the resolved node class state.

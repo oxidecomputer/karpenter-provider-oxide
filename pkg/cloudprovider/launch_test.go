@@ -1,6 +1,7 @@
 package cloudprovider
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,7 +12,19 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
+
+func TestSelectSubnetRejectsAnEmptyStatus(t *testing.T) {
+	_, err := selectSubnet(nil)
+	var createErr *karpcloudprovider.CreateError
+	if !errors.As(err, &createErr) {
+		t.Fatalf("selectSubnet() error = %v, want CreateError", err)
+	}
+	if createErr.ConditionReason != "SubnetResolutionFailed" {
+		t.Errorf("reason = %q, want SubnetResolutionFailed", createErr.ConditionReason)
+	}
+}
 
 func TestExternalIPsIsOneAttachmentPerEntry(t *testing.T) {
 	tests := []struct {

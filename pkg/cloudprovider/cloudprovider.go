@@ -234,7 +234,10 @@ func (c *OxideCloudProvider) Create(
 		}
 	}
 
-	subnet := nodeClass.Status.Subnets[rand.IntN(len(nodeClass.Status.Subnets))]
+	subnet, err := selectSubnet(nodeClass.Status.Subnets)
+	if err != nil {
+		return nil, err
+	}
 
 	owner := c.owner(nodeClaim)
 	describe := c.ownership(nodeClaim)
@@ -317,6 +320,17 @@ func (c *OxideCloudProvider) Create(
 	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
 
 	return resolvedNodeClaim, nil
+}
+
+func selectSubnet(subnets []v1alpha1.OxideSubnet) (v1alpha1.OxideSubnet, error) {
+	if len(subnets) == 0 {
+		return v1alpha1.OxideSubnet{}, cloudprovider.NewCreateError(
+			errors.New("nodeclass has no resolved subnets"),
+			"SubnetResolutionFailed",
+			"No Oxide subnet is available for this NodeClass",
+		)
+	}
+	return subnets[rand.IntN(len(subnets))], nil
 }
 
 func (c *OxideCloudProvider) bootDisk(

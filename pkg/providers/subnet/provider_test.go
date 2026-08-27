@@ -105,6 +105,13 @@ func TestResolveReturnsTheSubnetsWithTheirVPCName(t *testing.T) {
 	}
 }
 
+func TestDescribeSelectors(t *testing.T) {
+	got := DescribeSelectors([]v1alpha1.SubnetSelector{{Name: "web", VPCName: "prod"}})
+	if got != "{name=web, vpcName=prod}" {
+		t.Errorf("DescribeSelectors() = %q", got)
+	}
+}
+
 func TestASelectorNamingTheVPCNeedsNoLookup(t *testing.T) {
 	api := &fakeAPI{subnets: fakeSubnets()}
 	provider := NewProvider(api.server(t), time.Hour)

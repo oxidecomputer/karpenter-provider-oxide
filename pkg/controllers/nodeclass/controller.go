@@ -155,6 +155,7 @@ func (c *Controller) Reconcile(
 	}
 	logStale(ctx, "subnet", subnets.Stale, subnets.Age)
 	nodeClass.Status.Subnets = subnets.Resolved
+	setSubnetCondition(nodeClass, subnets)
 
 	sshKeys, err := c.sshKeys.Resolve(ctx, nodeClass)
 	if err != nil {
@@ -248,6 +249,18 @@ func (c *Controller) Reconcile(
 		requeue = policyRequeue
 	}
 	return reconcile.Result{RequeueAfter: requeue}, nil
+}
+
+func setSubnetCondition(nodeClass *v1alpha1.OxideNodeClass, result subnet.Result) {
+	if len(result.Resolved) == 0 {
+		nodeClass.StatusConditions().SetFalse(
+			v1alpha1.ConditionTypeSubnetsResolved,
+			"SubnetsNotFound",
+			"no subnets matched "+subnet.DescribeSelectors(nodeClass.Spec.SubnetSelector),
+		)
+		return
+	}
+	nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeSubnetsResolved)
 }
 
 func (c *Controller) finalize(

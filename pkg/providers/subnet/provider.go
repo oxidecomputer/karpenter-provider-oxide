@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
@@ -16,6 +17,28 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
+
+// DescribeSelectors renders subnet selectors as a concise condition message.
+func DescribeSelectors(selectors []v1alpha1.SubnetSelector) string {
+	described := make([]string, 0, len(selectors))
+	for _, selector := range selectors {
+		parts := make([]string, 0, 4)
+		if selector.ID != "" {
+			parts = append(parts, "id="+selector.ID)
+		}
+		if selector.Name != "" {
+			parts = append(parts, "name="+selector.Name)
+		}
+		if selector.VPCID != "" {
+			parts = append(parts, "vpcID="+selector.VPCID)
+		}
+		if selector.VPCName != "" {
+			parts = append(parts, "vpcName="+selector.VPCName)
+		}
+		described = append(described, "{"+strings.Join(parts, ", ")+"}")
+	}
+	return strings.Join(described, ", ")
+}
 
 // Result is one resolution of a nodeclass's subnet selectors.
 type Result = resolver.Resolution[v1alpha1.OxideSubnet, v1alpha1.SubnetSelector]

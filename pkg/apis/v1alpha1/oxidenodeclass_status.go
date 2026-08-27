@@ -8,6 +8,9 @@ import (
 // ConditionTypeImagesResolved reports whether the image selectors matched at least one image.
 const ConditionTypeImagesResolved = "ImagesResolved"
 
+// ConditionTypeSubnetsResolved reports whether at least one launch subnet is available.
+const ConditionTypeSubnetsResolved = "SubnetsResolved"
+
 // Condition types owned by the bootstrap providers.
 const (
 	// ConditionTypeTokenRefSecretAccessible reports whether the RKE2 agent token Secret can be read.
@@ -236,7 +239,7 @@ type OxideEphemeralIP struct {
 // StatusConditions returns the node class condition set.
 func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
 
-	conds := []string{ConditionTypeImagesResolved}
+	conds := []string{ConditionTypeImagesResolved, ConditionTypeSubnetsResolved}
 	switch in.Spec.Bootstrap.Kind() {
 	case BootstrapKindRKE2:
 		if in.Spec.Bootstrap.RKE2.TokenRefSecret.Name != "" {

@@ -32,7 +32,8 @@ type OxideNodeClassSpec struct {
 	// +kubebuilder:validation:Required
 	Storage Storage `json:"storage" hash:"ignore"`
 	// SubnetSelector is used to select subnets to launch nodes into.
-	SubnetSelector []SubnetSelector `json:"subnetSelector,omitempty" hash:"ignore"`
+	// +kubebuilder:validation:MinItems=1
+	SubnetSelector []SubnetSelector `json:"subnetSelector" hash:"ignore"`
 	// SSHKeySelector selects SSH keys to copy to the node.
 	// +optional
 	SSHKeySelector []SSHKeySelector `json:"sshKeySelector,omitempty" hash:"ignore"`
@@ -347,6 +348,9 @@ type ImageSelector struct {
 	Version string `json:"version,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.id) || has(self.vpcID) || has(self.vpcName)",message="a subnet selector needs a subnet id, VPC id, or VPC name"
+// +kubebuilder:validation:XValidation:rule="!has(self.name) || has(self.vpcID) || has(self.vpcName)",message="a subnet name requires a VPC id or VPC name"
+// +kubebuilder:validation:XValidation:rule="!(has(self.vpcID) && has(self.vpcName))",message="a subnet selector cannot set both vpcID and vpcName"
 type SubnetSelector struct {
 	// ID is the exact subnet ID.
 	// +optional

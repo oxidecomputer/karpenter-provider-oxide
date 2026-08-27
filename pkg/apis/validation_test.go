@@ -161,8 +161,46 @@ func TestEphemeralIPsValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 
 			spec := map[string]any{
-				"storage":      map[string]any{"boot": map[string]any{"size": "50Gi"}},
-				"ephemeralIPs": tt.ephemeralIPs,
+				"storage":        map[string]any{"boot": map[string]any{"size": "50Gi"}},
+				"subnetSelector": []any{map[string]any{"vpcName": "prod"}},
+				"ephemeralIPs":   tt.ephemeralIPs,
+			}
+			got := validate(t, props, schema, spec)
+			if tt.wantValid && len(got) > 0 {
+				t.Errorf("the spec was refused with %v, want it accepted", got)
+			}
+			if !tt.wantValid && len(got) == 0 {
+				t.Error("the spec was accepted, want it refused")
+			}
+		})
+	}
+}
+
+func TestSubnetSelectorValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		selectors []any
+		omit      bool
+		wantValid bool
+	}{
+		{name: "subnet id", selectors: []any{map[string]any{"id": "44444444-0000-4000-8000-000000000001"}}, wantValid: true},
+		{name: "vpc id", selectors: []any{map[string]any{"vpcID": "22222222-0000-4000-8000-000000000001"}}, wantValid: true},
+		{name: "scoped subnet name", selectors: []any{map[string]any{"name": "web", "vpcName": "prod"}}, wantValid: true},
+		{name: "omitted", omit: true},
+		{name: "empty list", selectors: []any{}},
+		{name: "empty selector", selectors: []any{map[string]any{}}},
+		{name: "unscoped subnet name", selectors: []any{map[string]any{"name": "web"}}},
+		{name: "both vpc locators", selectors: []any{map[string]any{"vpcID": "id", "vpcName": "prod"}}},
+	}
+
+	props, schema := nodeClassSchema(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := map[string]any{
+				"storage": map[string]any{"boot": map[string]any{"size": "50Gi"}},
+			}
+			if !tt.omit {
+				spec["subnetSelector"] = tt.selectors
 			}
 			got := validate(t, props, schema, spec)
 			if tt.wantValid && len(got) > 0 {
