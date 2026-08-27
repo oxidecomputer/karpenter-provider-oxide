@@ -200,7 +200,7 @@ func TestNoInventoryLeavesEveryShapeAvailable(t *testing.T) {
 	now := time.Now()
 	c := newTestCapacityManager(&now)
 
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 256, MemInGiB: 512}); unavailable {
+	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 254, MemInGiB: 512}); unavailable {
 		t.Error("a shape was ruled out with no inventory to rule it out")
 	}
 	if got := c.Generation(); got != c.Generation() {
@@ -310,7 +310,7 @@ func TestRackHeadroomMatchesWhatTheRackRefuses(t *testing.T) {
 		{
 
 			name:  "a rack larger than the catalog",
-			sleds: []capacity.Sled{sledWithFree(maxSledCPUs, maxSledMemGiB)},
+			sleds: []capacity.Sled{sledWithFree(maxInstanceVCPUs+1, maxInstanceMemoryGiB+1)},
 			want:  nil,
 		},
 		{

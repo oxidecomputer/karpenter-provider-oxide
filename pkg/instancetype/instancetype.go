@@ -29,9 +29,10 @@ const (
 
 	evictionMemBytes int64 = 100 * MiB
 
-	maxSledCPUs = 384
-
-	maxSledMemGiB = 1536
+	// These match Nexus MAX_VCPU_PER_INSTANCE and MAX_MEMORY_BYTES_PER_INSTANCE in
+	// omicron/nexus/src/app/mod.rs.
+	maxInstanceVCPUs     = 254
+	maxInstanceMemoryGiB = 1536
 
 	// DefaultShapeIncrementPercent is the default catalog step.
 	DefaultShapeIncrementPercent = 10.0
@@ -292,7 +293,7 @@ func RackHeadroom(rack capacity.Snapshot) []Specs {
 	}
 
 	for _, room := range maximal {
-		if room.Ncpus >= maxSledCPUs && room.MemInGiB >= maxSledMemGiB {
+		if room.Ncpus >= maxInstanceVCPUs && room.MemInGiB >= maxInstanceMemoryGiB {
 			return nil
 		}
 	}
@@ -308,7 +309,7 @@ func RackHeadroom(rack capacity.Snapshot) []Specs {
 
 // CatalogLimits is the largest of each dimension the provider's catalog contains.
 func CatalogLimits() Specs {
-	return Specs{Ncpus: maxSledCPUs, MemInGiB: maxSledMemGiB}
+	return Specs{Ncpus: maxInstanceVCPUs, MemInGiB: maxInstanceMemoryGiB}
 }
 
 func shapes() []Specs {
@@ -324,8 +325,8 @@ func generateShapes(incrementPercent float64) ([]Specs, error) {
 		return nil, err
 	}
 
-	cpus := geometricValues(1, maxSledCPUs, incrementPercent)
-	memory := geometricValues(minInstanceMemoryGiB, maxSledMemGiB, incrementPercent)
+	cpus := geometricValues(1, maxInstanceVCPUs, incrementPercent)
+	memory := geometricValues(minInstanceMemoryGiB, maxInstanceMemoryGiB, incrementPercent)
 	all := make([]Specs, 0, len(cpus)*len(memory))
 	for _, ncpus := range cpus {
 		for _, memInGiB := range memory {

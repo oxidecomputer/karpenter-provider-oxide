@@ -92,7 +92,7 @@ func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 	for _, tc := range []struct{ cheaper, dearer string }{
 		{"2-4", "4-8"},
 		{"4-8", "4-16"},
-		{"1-4", "384-757"},
+		{"1-4", "254-757"},
 		{"16-30", "16-64"},
 	} {
 		a, ok := p.Get(tc.cheaper)

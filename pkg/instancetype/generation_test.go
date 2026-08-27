@@ -10,8 +10,8 @@ import (
 )
 
 func TestGeometricValues(t *testing.T) {
-	wantCPUs := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 384}
-	if got := geometricValues(1, 384, 100); !slices.Equal(got, wantCPUs) {
+	wantCPUs := []int{1, 2, 4, 8, 16, 32, 64, 128, 254}
+	if got := geometricValues(1, 254, 100); !slices.Equal(got, wantCPUs) {
 		t.Fatalf("CPU values = %v, want %v", got, wantCPUs)
 	}
 
@@ -30,6 +30,7 @@ func TestGeneratedShapesHonorMemorySanityBound(t *testing.T) {
 		t.Fatal("no shapes generated")
 	}
 
+	foundMaximumCPU := false
 	for _, shape := range generated {
 		if shape.MemInGiB < minInstanceMemoryGiB || shape.MemInGiB*2 < shape.Ncpus {
 			t.Errorf(
@@ -37,9 +38,34 @@ func TestGeneratedShapesHonorMemorySanityBound(t *testing.T) {
 				SpecsToInstanceTypeName(shape.Ncpus, shape.MemInGiB),
 			)
 		}
+		if shape.Ncpus > maxInstanceVCPUs {
+			t.Errorf("generated shape %v exceeds the Nexus vCPU limit", shape)
+		}
+		foundMaximumCPU = foundMaximumCPU || shape.Ncpus == maxInstanceVCPUs
 	}
-	if got := generated[len(generated)-1]; got != (Specs{Ncpus: maxSledCPUs, MemInGiB: maxSledMemGiB}) {
+	if !foundMaximumCPU {
+		t.Errorf("no shape has the Nexus maximum of %d vCPUs", maxInstanceVCPUs)
+	}
+	if got := generated[len(generated)-1]; got != (Specs{Ncpus: maxInstanceVCPUs, MemInGiB: maxInstanceMemoryGiB}) {
 		t.Errorf("last shape = %v, want both catalog maxima", got)
+	}
+}
+
+func TestCatalogUsesNexusInstanceLimits(t *testing.T) {
+	if got := CatalogLimits(); got != (Specs{Ncpus: 254, MemInGiB: 1536}) {
+		t.Errorf("CatalogLimits() = %v, want the Nexus instance limits", got)
+	}
+
+	provider := NewProvider(nil, nil)
+	for _, name := range []string{"255-757", "384-757", "384-1536"} {
+		if _, ok := provider.Get(name); ok {
+			t.Errorf("Get(%q) found an instance type above the Nexus vCPU limit", name)
+		}
+	}
+	for _, name := range []string{"254-757", "254-1536"} {
+		if _, ok := provider.Get(name); !ok {
+			t.Errorf("Get(%q) did not find a maximum-vCPU instance type", name)
+		}
 	}
 }
 
