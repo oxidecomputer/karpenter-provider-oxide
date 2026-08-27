@@ -29,6 +29,8 @@ var (
 	OxideNodeClassCRD []byte
 	//go:embed crds/karpenter.oxide.computer_oxidecapacities.yaml
 	OxideCapacityCRD []byte
+	//go:embed crds/karpenter.oxide.computer_oxidebootdisks.yaml
+	OxideBootDiskCRD []byte
 	//go:embed crds/karpenter.sh_nodepools.yaml
 	NodePoolCRD []byte
 	//go:embed crds/karpenter.sh_nodeclaims.yaml
@@ -38,6 +40,7 @@ var (
 	CRDs           = []*apiextensionsv1.CustomResourceDefinition{
 		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](OxideNodeClassCRD),
 		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](OxideCapacityCRD),
+		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](OxideBootDiskCRD),
 		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodeClaimCRD),
 		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodePoolCRD),
 		object.Unmarshal[apiextensionsv1.CustomResourceDefinition](NodeOverlayCRD),

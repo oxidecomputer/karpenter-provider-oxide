@@ -20,6 +20,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
@@ -49,6 +50,7 @@ type OxideCloudProvider struct {
 	clusterUID types.UID
 
 	instanceProvider     *instance.Provider
+	bootDiskPool         *bootdisk.Provider
 	instanceTypeProvider *instancetype.Provider
 	instanceTypeStore    instanceTypeOverlayStore
 
@@ -63,12 +65,21 @@ type instanceTypeOverlayStore interface {
 	Apply(string, *cloudprovider.InstanceType) (*cloudprovider.InstanceType, error)
 }
 
+type launchBootDisk struct {
+	attachment   oxide.InstanceDiskAttachment
+	name         string
+	storageBytes int64
+	owned        []string
+	acquired     *bootdisk.Acquired
+}
+
 func NewOxideCloudProvider(
 	kubeClient client.Client,
 	ox *oxide.Client,
 	project string,
 	clusterUID types.UID,
 	instanceProvider *instance.Provider,
+	bootDiskPool *bootdisk.Provider,
 	instanceTypeProvider *instancetype.Provider,
 	instanceTypeStore *nodeoverlay.InstanceTypeStore,
 	affinityPolicy *affinitypolicy.Tracker,
@@ -83,6 +94,7 @@ func NewOxideCloudProvider(
 		clusterUID: clusterUID,
 
 		instanceProvider:     instanceProvider,
+		bootDiskPool:         bootDiskPool,
 		instanceTypeProvider: instanceTypeProvider,
 		instanceTypeStore:    instanceTypeStore,
 		affinityPolicy:       affinityPolicy,
@@ -202,10 +214,14 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to plan the disks for %s: %w", nodeClaim.Name, err)
 	}
 
+	boot := c.bootDisk(ctx, nodeClass, nodeClaim, plan)
+	launchStarted := false
+	defer c.retireUnstartedBootDisk(ctx, boot.acquired, &launchStarted)
+
 	request := utilization.Request{
 		CPUs:    int64(instanceType.Ncpus),
 		Memory:  uint64(instanceType.MemInGiB) * GiB,
-		Storage: uint64(plan.DistributedBytes()),
+		Storage: uint64(boot.storageBytes),
 	}
 	if quota, err := c.instanceTypeProvider.Quota(); err == nil {
 		if admits, resource := quota.Admits(request); !admits {
@@ -245,7 +261,7 @@ func (c *OxideCloudProvider) Create(
 
 			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
 
-			BootDisk: plan.BootAttachment(describe(ownership.KindBootDisk, "Boot disk")),
+			BootDisk: boot.attachment,
 			Disks: plan.DataAttachments(func(disk storage.Disk) string {
 				return describe(
 					ownership.KindDataDisk,
@@ -275,10 +291,12 @@ func (c *OxideCloudProvider) Create(
 	}, instance.Options{
 
 		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
+		OwnedDisks:     boot.owned,
 	})
 	if err != nil {
 		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, instanceType, request)
 	}
+	launchStarted = true
 
 	c.instanceTypeProvider.RecordSuccess(ctx, instanceType)
 
@@ -292,6 +310,7 @@ func (c *OxideCloudProvider) Create(
 		name,
 		subnet.ID,
 		plan.Prefix,
+		boot.name,
 	)
 	if err != nil {
 		return nil, err
@@ -299,6 +318,60 @@ func (c *OxideCloudProvider) Create(
 	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
 
 	return resolvedNodeClaim, nil
+}
+
+func (c *OxideCloudProvider) bootDisk(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	nodeClaim *karpcorev1.NodeClaim,
+	plan storage.Plan,
+) launchBootDisk {
+	launch := launchBootDisk{
+		attachment: plan.BootAttachment(
+			c.ownership(nodeClaim)(ownership.KindBootDisk, "Boot disk"),
+		),
+		name:         plan.Boot.Name,
+		storageBytes: plan.DistributedBytes(),
+	}
+	if c.bootDiskPool == nil {
+		return launch
+	}
+	acquired, err := c.bootDiskPool.Acquire(ctx, nodeClass, nodeClaim.Name, nodeClaim.UID)
+	if err != nil {
+		metrics.BootDiskPoolAcquisitions.WithLabelValues("error").Inc()
+		log.FromContext(ctx).V(1).Info("boot disk pool unavailable", "reason", err.Error())
+		return launch
+	}
+	if acquired == nil {
+		metrics.BootDiskPoolAcquisitions.WithLabelValues("miss").Inc()
+		return launch
+	}
+	metrics.BootDiskPoolAcquisitions.WithLabelValues("hit").Inc()
+	launch.attachment = oxide.InstanceDiskAttachment{
+		Value: &oxide.InstanceDiskAttachmentAttach{Name: oxide.Name(acquired.DiskName)},
+	}
+	launch.name = acquired.DiskName
+	launch.storageBytes -= plan.Boot.SizeBytes
+	launch.owned = []string{acquired.DiskName}
+	launch.acquired = acquired
+	return launch
+}
+
+func (c *OxideCloudProvider) retireUnstartedBootDisk(
+	ctx context.Context,
+	acquired *bootdisk.Acquired,
+	started *bool,
+) {
+	if acquired == nil || *started {
+		return
+	}
+	if err := c.bootDiskPool.Retire(ctx, acquired.RecordName); err != nil {
+		log.FromContext(ctx).V(1).Info(
+			"unable to retire a claimed boot disk",
+			"disk", acquired.DiskName,
+			"reason", err.Error(),
+		)
+	}
 }
 
 func (c *OxideCloudProvider) diagnoseLaunchFailure(
@@ -369,6 +442,7 @@ func (c *OxideCloudProvider) resolveLaunched(
 	instanceName string,
 	subnetID string,
 	diskPrefix string,
+	bootDiskName string,
 ) (*karpcorev1.NodeClaim, error) {
 	resolved, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
 	if err != nil {
@@ -386,6 +460,7 @@ func (c *OxideCloudProvider) resolveLaunched(
 		v1alpha1.AnnotationSubnet:                    subnetID,
 
 		v1alpha1.AnnotationDiskPrefix: diskPrefix,
+		v1alpha1.AnnotationBootDisk:   bootDiskName,
 
 		v1alpha1.AnnotationSSHKeys: v1alpha1.EncodeIDs(
 			v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys),
@@ -554,8 +629,10 @@ func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.N
 
 func teardownFor(nodeClaim *karpcorev1.NodeClaim, instanceName string) instance.Teardown {
 	if prefix := nodeClaim.Annotations[v1alpha1.AnnotationDiskPrefix]; prefix != "" {
-
-		return instance.Teardown{DiskPrefix: prefix}
+		return instance.Teardown{
+			BootDiskName: nodeClaim.Annotations[v1alpha1.AnnotationBootDisk],
+			DiskPrefix:   prefix,
+		}
 	}
 	return instance.Teardown{
 		BootDiskName: instanceName,

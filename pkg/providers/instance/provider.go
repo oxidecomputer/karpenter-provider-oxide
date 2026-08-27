@@ -40,6 +40,8 @@ var (
 type Options struct {
 	// AffinityGroups are the affinity groups, by ID, the instance joins between the create and the start.
 	AffinityGroups []string
+	// OwnedDisks are attached disks this launch must delete on failure.
+	OwnedDisks []string
 }
 
 // Released is the rack capacity an instance gave back when it was torn down.
@@ -104,59 +106,69 @@ func (p *Provider) Create(
 	params.Body.Start = new(false)
 	name := string(params.Body.Name)
 
-	diskNames := diskNames(params.Body)
+	createdDiskNames := diskNames(params.Body)
+	ownedDiskNames := append([]string{}, createdDiskNames...)
+	ownedDiskNames = appendUnique(ownedDiskNames, opts.OwnedDisks...)
 
-	if err := p.ensureDisks(ctx, params.Body, diskNames); err != nil {
+	log.FromContext(ctx).V(1).Info("creating disks", "disks", createdDiskNames)
+	if err := p.ensureDisks(ctx, params.Body, createdDiskNames); err != nil {
+		p.abandonDisks(ctx, opts.OwnedDisks, err)
 		return nil, err
 	}
+	log.FromContext(ctx).V(1).Info("disks created", "disks", createdDiskNames)
 
+	log.FromContext(ctx).V(1).Info("creating instance", "instance", params.Body.Name)
 	created, err := p.ox.InstanceCreate(ctx, params)
 	if err != nil {
 		switch {
 
 		case errors.Is(err, oxide.ErrInsufficientCapacity):
 
-			p.abandonDisks(ctx, diskNames, err)
+			p.abandonDisks(ctx, ownedDiskNames, err)
 			return nil, fmt.Errorf(
 				"unable to create instance %s, %w, %w", name, ErrInsufficientCapacity, err,
 			)
 		case errors.Is(err, oxide.ErrObjectAlreadyExists):
 
-			return p.adopt(ctx, name, diskNames, opts)
+			return p.adopt(ctx, name, createdDiskNames, ownedDiskNames, opts)
 		case ambiguous(ctx, err):
 
 			created, found := p.findInstance(ctx, name)
 			if !found {
-				p.abandonDisks(ctx, diskNames, err)
+				p.abandonDisks(ctx, ownedDiskNames, err)
 				return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 			}
 
-			return p.adoptInstance(ctx, created, diskNames, opts, true)
+			return p.adoptInstance(
+				ctx, created, createdDiskNames, ownedDiskNames, opts, true,
+			)
 		default:
-			p.abandonDisks(ctx, diskNames, err)
+			p.abandonDisks(ctx, ownedDiskNames, err)
 			return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 		}
 	}
+	log.FromContext(ctx).V(1).Info("instance created", "instance", params.Body.Name)
 
 	settled, err := p.awaitSettled(ctx, created)
 	if err != nil {
-		p.abandonUnlessStuck(ctx, created.Id, diskNames, err)
+		p.abandonUnlessStuck(ctx, created.Id, ownedDiskNames, err)
 		return nil, err
 	}
 	created = settled
 
 	if err := p.joinAffinityGroups(ctx, created.Id, opts.AffinityGroups); err != nil {
 
-		p.abandon(ctx, created.Id, diskNames, err)
+		p.abandon(ctx, created.Id, ownedDiskNames, err)
 		return nil, err
 	}
 
+	log.FromContext(ctx).V(1).Info("starting instance", "instance", params.Body.Name)
 	started, err := p.start(ctx, created.Id)
 	if err != nil {
-
-		p.abandon(ctx, created.Id, diskNames, err)
+		p.abandon(ctx, created.Id, ownedDiskNames, err)
 		return nil, err
 	}
+	log.FromContext(ctx).V(1).Info("instance started", "instance", params.Body.Name)
 	return started, nil
 }
 
@@ -263,6 +275,7 @@ func (p *Provider) ensureDisk(
 	name := string(spec.Name)
 
 	for attempt := 0; ; attempt++ {
+		log.FromContext(ctx).V(1).Info("Calling DiskCreate", "disk", spec.Name)
 		created, err := p.ox.DiskCreate(ctx, oxide.DiskCreateParams{
 			Project: oxide.NameOrId(p.project),
 			Body: &oxide.DiskCreate{
@@ -279,6 +292,7 @@ func (p *Provider) ensureDisk(
 			}
 			return nil
 		}
+		log.FromContext(ctx).V(1).Info("Called DiskCreate", "disk", spec.Name)
 
 		switch {
 		case errors.Is(err, oxide.ErrInsufficientCapacity):
@@ -489,7 +503,8 @@ func (p *Provider) abandonDisks(ctx context.Context, names []string, cause error
 func (p *Provider) adopt(
 	ctx context.Context,
 	name string,
-	diskNames []string,
+	createdDiskNames []string,
+	ownedDiskNames []string,
 	opts Options,
 ) (*oxide.Instance, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
@@ -508,13 +523,14 @@ func (p *Provider) adopt(
 		return nil, fmt.Errorf("unable to view existing instance %s, %w", name, err)
 	}
 
-	return p.adoptInstance(ctx, instance, diskNames, opts, false)
+	return p.adoptInstance(ctx, instance, createdDiskNames, ownedDiskNames, opts, false)
 }
 
 func (p *Provider) adoptInstance(
 	ctx context.Context,
 	instance *oxide.Instance,
-	diskNames []string,
+	createdDiskNames []string,
+	ownedDiskNames []string,
 	opts Options,
 	sameLaunch bool,
 ) (*oxide.Instance, error) {
@@ -539,22 +555,22 @@ func (p *Provider) adoptInstance(
 		oxide.InstanceStateStarting,
 		oxide.InstanceStateRebooting,
 		oxide.InstanceStateMigrating:
-		p.abandonUnusedDisks(ctx, diskNames, sameLaunch)
+		p.abandonUnusedDisks(ctx, createdDiskNames, sameLaunch)
 		return instance, nil
 
 	case oxide.InstanceStateStopped:
 
 		if err := p.joinAffinityGroups(ctx, instance.Id, opts.AffinityGroups); err != nil {
-			p.abandon(ctx, instance.Id, diskNames, err)
+			p.abandon(ctx, instance.Id, ownedDiskNames, err)
 			return nil, err
 		}
 		started, err := p.start(ctx, instance.Id)
 		if err != nil {
 
-			p.abandon(ctx, instance.Id, diskNames, err)
+			p.abandon(ctx, instance.Id, ownedDiskNames, err)
 			return nil, err
 		}
-		p.abandonUnusedDisks(ctx, diskNames, sameLaunch)
+		p.abandonUnusedDisks(ctx, createdDiskNames, sameLaunch)
 		return started, nil
 
 	default:
@@ -562,7 +578,7 @@ func (p *Provider) adoptInstance(
 			"instance %s already exists in run state %q and cannot be adopted",
 			name, instance.RunState,
 		)
-		if err := p.Delete(ctx, instance.Id, teardownFor(diskNames)); err != nil &&
+		if err := p.Delete(ctx, instance.Id, teardownFor(ownedDiskNames)); err != nil &&
 			!errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("%w, and it could not be terminated, %w", abandonErr, err)
 		}
@@ -894,6 +910,24 @@ func diskNames(body *oxide.InstanceCreate) []string {
 		names = append(names, string(spec.Name))
 	}
 	return names
+}
+
+func appendUnique(dst []string, refs ...string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(refs))
+	for _, ref := range dst {
+		seen[ref] = struct{}{}
+	}
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		dst = append(dst, ref)
+	}
+	return dst
 }
 
 func diskCreateSpecs(body *oxide.InstanceCreate) []*oxide.InstanceDiskAttachmentCreate {

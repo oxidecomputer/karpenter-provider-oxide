@@ -14,6 +14,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
 	affinitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/affinity"
+	bootdiskcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/bootdisk"
 	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
 	launchcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/launch"
@@ -24,6 +25,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
@@ -167,6 +169,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	bootDisks := bootdisk.NewProvider(
+		karpcore.GetClient(),
+		karpcore.GetAPIReader(),
+		ox,
+		project,
+		clusterUID,
+	)
 
 	deadlines, err := deadlinesFromEnv()
 	if err != nil {
@@ -192,6 +201,7 @@ func run() error {
 		project,
 		clusterUID,
 		instanceProvider,
+		bootDisks,
 		instanceTypes,
 		karpcore.InstanceTypeStore,
 		affinityPolicy,
@@ -236,6 +246,8 @@ func run() error {
 		),
 
 		nodeclass.NewHashController(karpcore.GetClient()),
+
+		bootdiskcontroller.NewController(karpcore.GetClient(), bootDisks, quotas),
 
 		capacitycontroller.NewController(
 			karpcore.GetClient(),

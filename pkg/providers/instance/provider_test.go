@@ -454,6 +454,62 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	}
 }
 
+func TestCreateRemovesAClaimedBootDiskOnFailure(t *testing.T) {
+	const name = "pooled-boot"
+	api := &launchAPI{
+		instanceCreateError: "InsufficientCapacity",
+		existing: &oxide.Disk{
+			Id:    "d15c0000-0000-4000-8000-0000000000aa",
+			Name:  name,
+			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		},
+	}
+	p := NewProvider(api.server(t), "project", nil)
+	params := launchParams()
+	params.Body.BootDisk = oxide.InstanceDiskAttachment{
+		Value: &oxide.InstanceDiskAttachmentAttach{Name: name},
+	}
+
+	_, err := p.Create(context.Background(), params, Options{OwnedDisks: []string{name}})
+	if !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("Create() error = %v, want insufficient capacity", err)
+	}
+	if api.diskCreates != 0 {
+		t.Errorf("disk creates = %d, want none", api.diskCreates)
+	}
+	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != name {
+		t.Errorf("disk deletes = %v, want [%s]", api.diskDeletes, name)
+	}
+}
+
+func TestCreateKeepsAClaimedBootDiskOnSuccess(t *testing.T) {
+	const name = "pooled-boot"
+	api := &launchAPI{existing: &oxide.Disk{
+		Id:    "d15c0000-0000-4000-8000-0000000000aa",
+		Name:  name,
+		State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+	}}
+	p := NewProvider(api.server(t), "project", nil)
+	params := launchParams()
+	params.Body.BootDisk = oxide.InstanceDiskAttachment{
+		Value: &oxide.InstanceDiskAttachmentAttach{Name: name},
+	}
+
+	if _, err := p.Create(
+		context.Background(),
+		params,
+		Options{OwnedDisks: []string{name}},
+	); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if len(api.diskDeletes) != 0 {
+		t.Errorf("disk deletes = %v, want none", api.diskDeletes)
+	}
+	if api.attachedBootDisk != name {
+		t.Errorf("attached boot disk = %q, want %q", api.attachedBootDisk, name)
+	}
+}
+
 func TestCreateAdoptsABootDiskLeftBehind(t *testing.T) {
 	api := &launchAPI{
 		existing: &oxide.Disk{

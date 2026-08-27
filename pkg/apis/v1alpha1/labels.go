@@ -115,6 +115,8 @@ var (
 
 	// AnnotationDiskPrefix is the prefix every disk of this launch was named with, boot disk included.
 	AnnotationDiskPrefix = apis.Group + "/disk-prefix"
+	// AnnotationBootDisk is the launch's boot disk name.
+	AnnotationBootDisk = apis.Group + "/boot-disk"
 
 	// AnnotationHourlyPrice records the effective hourly launch price.
 	AnnotationHourlyPrice = apis.Group + "/hourly-price"

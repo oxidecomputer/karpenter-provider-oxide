@@ -19,3 +19,6 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidecapacities", "oxidecapacities/status"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidebootdisks", "oxidebootdisks/status"]
+    verbs: ["get", "list", "watch"]

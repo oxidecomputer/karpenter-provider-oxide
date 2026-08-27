@@ -1,0 +1,319 @@
+package bootdisk
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base32"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	"github.com/oxidecomputer/oxide.go/oxide"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const pollInterval = 2 * time.Second
+
+type Config struct {
+	ImageID      string
+	SizeBytes    int64
+	Hash         string
+	NodeClass    string
+	NodeClassUID types.UID
+}
+
+type Acquired struct {
+	RecordName string
+	DiskName   string
+	DiskID     string
+}
+
+type Provider struct {
+	kubeClient client.Client
+	reader     client.Reader
+	ox         *oxide.Client
+	project    string
+	clusterUID types.UID
+}
+
+func NewProvider(
+	kubeClient client.Client,
+	reader client.Reader,
+	ox *oxide.Client,
+	project string,
+	clusterUID types.UID,
+) *Provider {
+	return &Provider{
+		kubeClient: kubeClient,
+		reader:     reader,
+		ox:         ox,
+		project:    project,
+		clusterUID: clusterUID,
+	}
+}
+
+func ConfigFor(nodeClass *v1alpha1.OxideNodeClass) (Config, bool) {
+	if len(nodeClass.Status.Images) == 0 || nodeClass.Spec.Storage.Boot.Size.Value() <= 0 {
+		return Config{}, false
+	}
+	imageID := nodeClass.Status.Images[0].ID
+	size := nodeClass.Spec.Storage.Boot.Size.Value()
+	sum := sha256.Sum256([]byte(imageID + "\x00" + strconv.FormatInt(size, 10)))
+	hash := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))[:12]
+	return Config{
+		ImageID:      imageID,
+		SizeBytes:    size,
+		Hash:         hash,
+		NodeClass:    nodeClass.Name,
+		NodeClassUID: nodeClass.UID,
+	}, true
+}
+
+func NewRecord(config Config, nodeClass *v1alpha1.OxideNodeClass) *v1alpha1.OxideBootDisk {
+	name := "kbd-" + config.Hash[:6] + "-" + strings.ReplaceAll(uuid.NewString()[:13], "-", "")
+	return &v1alpha1.OxideBootDisk{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       name,
+			Finalizers: []string{v1alpha1.BootDiskFinalizer},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1alpha1.GroupVersion.String(),
+				Kind:       "OxideNodeClass",
+				Name:       nodeClass.Name,
+				UID:        nodeClass.UID,
+			}},
+		},
+		Spec: v1alpha1.OxideBootDiskSpec{
+			NodeClassRef: v1alpha1.BootDiskOwnerRef{Name: nodeClass.Name, UID: nodeClass.UID},
+			DiskName:     name,
+			ImageID:      config.ImageID,
+			SizeBytes:    config.SizeBytes,
+			ConfigHash:   config.Hash,
+		},
+		Status: v1alpha1.OxideBootDiskStatus{State: v1alpha1.BootDiskStatePending},
+	}
+}
+
+func (p *Provider) Acquire(
+	ctx context.Context,
+	nodeClass *v1alpha1.OxideNodeClass,
+	nodeClaimName string,
+	nodeClaimUID types.UID,
+) (*Acquired, error) {
+	list := &v1alpha1.OxideBootDiskList{}
+	if err := p.reader.List(ctx, list); err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		record := &list.Items[i]
+		if record.DeletionTimestamp.IsZero() && !record.Spec.Retire &&
+			record.Spec.ClaimRef != nil &&
+			record.Spec.ClaimRef.Name == nodeClaimName &&
+			record.Spec.ClaimRef.UID == nodeClaimUID {
+			return acquired(record), nil
+		}
+	}
+
+	config, ok := ConfigFor(nodeClass)
+	if !ok || !nodeClass.Spec.Storage.Boot.PoolEnabled() {
+		return nil, nil
+	}
+	slices.SortFunc(list.Items, func(a, b v1alpha1.OxideBootDisk) int {
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
+	})
+	for i := range list.Items {
+		record := &list.Items[i]
+		if !available(record, nodeClass.UID, config.Hash) {
+			continue
+		}
+		disk, err := p.View(ctx, record)
+		if err != nil {
+			if errors.Is(err, oxide.ErrObjectNotFound) {
+				_ = p.Retire(ctx, record.Name)
+				continue
+			}
+			return nil, err
+		}
+		if disk.State.State() != oxide.DiskStateStateDetached {
+			_ = p.Retire(ctx, record.Name)
+			continue
+		}
+		stored := record.DeepCopy()
+		record.Spec.ClaimRef = &v1alpha1.BootDiskOwnerRef{Name: nodeClaimName, UID: nodeClaimUID}
+		if err := p.kubeClient.Patch(ctx, record, client.MergeFromWithOptions(
+			stored,
+			client.MergeFromWithOptimisticLock{},
+		)); err != nil {
+			continue
+		}
+		return acquired(record), nil
+	}
+	return nil, nil
+}
+
+func available(record *v1alpha1.OxideBootDisk, nodeClassUID types.UID, hash string) bool {
+	return record.DeletionTimestamp.IsZero() &&
+		!record.Spec.Retire &&
+		record.Spec.ClaimRef == nil &&
+		record.Spec.NodeClassRef.UID == nodeClassUID &&
+		record.Spec.ConfigHash == hash &&
+		record.Status.State == v1alpha1.BootDiskStateReady
+}
+
+func acquired(record *v1alpha1.OxideBootDisk) *Acquired {
+	return &Acquired{
+		RecordName: record.Name,
+		DiskName:   record.Spec.DiskName,
+		DiskID:     record.Status.ID,
+	}
+}
+
+func (p *Provider) Retire(ctx context.Context, name string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		record := &v1alpha1.OxideBootDisk{}
+		if err := p.reader.Get(ctx, client.ObjectKey{Name: name}, record); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if record.Spec.Retire {
+			return nil
+		}
+		stored := record.DeepCopy()
+		record.Spec.Retire = true
+		return p.kubeClient.Patch(ctx, record, client.MergeFromWithOptions(
+			stored,
+			client.MergeFromWithOptimisticLock{},
+		))
+	})
+}
+
+func (p *Provider) Ensure(
+	ctx context.Context,
+	record *v1alpha1.OxideBootDisk,
+) (*oxide.Disk, error) {
+	description := ownership.PoolMarker{
+		ClusterUID:   p.clusterUID,
+		BootDiskUID:  record.UID,
+		NodeClassUID: record.Spec.NodeClassRef.UID,
+		ConfigHash:   record.Spec.ConfigHash,
+	}.Description()
+	disk, err := p.ox.DiskCreate(ctx, oxide.DiskCreateParams{
+		Project: oxide.NameOrId(p.project),
+		Body: &oxide.DiskCreate{
+			Name:        oxide.Name(record.Spec.DiskName),
+			Description: description,
+			Size:        oxide.ByteCount(record.Spec.SizeBytes),
+			DiskBackend: oxide.DiskBackend{Value: &oxide.DiskBackendDistributed{
+				DiskSource: oxide.DiskSource{Value: &oxide.DiskSourceImage{
+					ImageId: record.Spec.ImageID,
+				}},
+			}},
+		},
+	})
+	if err != nil {
+		if !errors.Is(err, oxide.ErrObjectAlreadyExists) {
+			return nil, err
+		}
+		disk, err = p.View(ctx, record)
+		if err != nil {
+			return nil, err
+		}
+		marker, ok := ownership.ParsePool(disk.Description)
+		if !ok || marker.BootDiskUID != record.UID || marker.ClusterUID != p.clusterUID {
+			return nil, fmt.Errorf("disk %s is not owned by record %s", disk.Name, record.Name)
+		}
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return p.waitReady(waitCtx, disk)
+}
+
+func (p *Provider) View(ctx context.Context, record *v1alpha1.OxideBootDisk) (*oxide.Disk, error) {
+	ref := record.Status.ID
+	project := oxide.NameOrId("")
+	if ref == "" {
+		ref = record.Spec.DiskName
+		project = oxide.NameOrId(p.project)
+	}
+	return p.ox.DiskView(ctx, oxide.DiskViewParams{Disk: oxide.NameOrId(ref), Project: project})
+}
+
+func (p *Provider) Delete(ctx context.Context, record *v1alpha1.OxideBootDisk) error {
+	ref := record.Status.ID
+	project := oxide.NameOrId("")
+	if ref == "" {
+		ref = record.Spec.DiskName
+		project = oxide.NameOrId(p.project)
+	}
+	err := p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{
+		Disk: oxide.NameOrId(ref), Project: project,
+	})
+	if errors.Is(err, oxide.ErrObjectNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (p *Provider) CollectOrphans(ctx context.Context, known map[types.UID]struct{}) error {
+	disks, err := p.ox.DiskListAllPages(ctx, oxide.DiskListParams{
+		Project: oxide.NameOrId(p.project),
+	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for i := range disks {
+		disk := &disks[i]
+		marker, ok := ownership.ParsePool(disk.Description)
+		if !ok || marker.ClusterUID != p.clusterUID {
+			continue
+		}
+		if _, ok := known[marker.BootDiskUID]; ok {
+			continue
+		}
+		if disk.State.State() != oxide.DiskStateStateDetached {
+			continue
+		}
+		err := p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{Disk: oxide.NameOrId(disk.Id)})
+		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (p *Provider) waitReady(ctx context.Context, disk *oxide.Disk) (*oxide.Disk, error) {
+	current := disk
+	if current.State.State() == oxide.DiskStateStateDetached {
+		return current, nil
+	}
+	err := wait.PollUntilContextCancel(
+		ctx,
+		pollInterval,
+		false,
+		func(ctx context.Context) (bool, error) {
+			state := current.State.State()
+			if state == oxide.DiskStateStateDetached {
+				return true, nil
+			}
+			if state == oxide.DiskStateStateFaulted || state == oxide.DiskStateStateDestroyed {
+				return false, fmt.Errorf("disk %s entered state %s", disk.Name, state)
+			}
+			view, err := p.ox.DiskView(ctx, oxide.DiskViewParams{Disk: oxide.NameOrId(disk.Id)})
+			if err != nil {
+				return false, err
+			}
+			current = view
+			return false, nil
+		},
+	)
+	return current, err
+}

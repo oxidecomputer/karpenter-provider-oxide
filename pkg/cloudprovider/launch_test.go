@@ -145,8 +145,11 @@ func TestOwnershipMarksEveryResourceOfALaunch(t *testing.T) {
 func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 	nodeClaim := &karpcorev1.NodeClaim{
 		ObjectMeta: v1.ObjectMeta{
-			Name:        "default-abc12",
-			Annotations: map[string]string{v1alpha1.AnnotationDiskPrefix: "kd-abcdefghijkl-"},
+			Name: "default-abc12",
+			Annotations: map[string]string{
+				v1alpha1.AnnotationDiskPrefix: "kd-abcdefghijkl-",
+				v1alpha1.AnnotationBootDisk:   "pooled-boot",
+			},
 		},
 	}
 
@@ -155,8 +158,8 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 		t.Errorf("disk prefix = %q, want the prefix the launch recorded", teardown.DiskPrefix)
 	}
 
-	if teardown.BootDiskName != "" {
-		t.Errorf("boot disk name = %q, want it left to the prefix", teardown.BootDiskName)
+	if teardown.BootDiskName != "pooled-boot" {
+		t.Errorf("boot disk name = %q, want the recorded pooled disk", teardown.BootDiskName)
 	}
 }
 

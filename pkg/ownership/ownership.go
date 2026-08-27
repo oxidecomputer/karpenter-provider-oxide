@@ -22,7 +22,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const prefix = "karpenter.oxide.computer/owner/v1"
+const (
+	prefix     = "karpenter.oxide.computer/owner/v1"
+	poolPrefix = "karpenter.oxide.computer/boot-pool/v1"
+)
 
 type Kind string
 
@@ -39,6 +42,53 @@ type Marker struct {
 	// NodeClaimName is carried alongside the UID because a UID is not addressable.
 	NodeClaimName string
 	Kind          Kind
+}
+
+type PoolMarker struct {
+	ClusterUID   types.UID
+	BootDiskUID  types.UID
+	NodeClassUID types.UID
+	ConfigHash   string
+}
+
+func (m PoolMarker) Description() string {
+	return fmt.Sprintf(
+		"%s cluster=%s bootdisk=%s nodeclass=%s config=%s",
+		poolPrefix,
+		m.ClusterUID,
+		m.BootDiskUID,
+		m.NodeClassUID,
+		m.ConfigHash,
+	)
+}
+
+func ParsePool(description string) (PoolMarker, bool) {
+	fields := strings.Fields(description)
+	if len(fields) != 5 || fields[0] != poolPrefix {
+		return PoolMarker{}, false
+	}
+	cluster, ok := field(fields[1], "cluster")
+	if !ok || cluster == "" {
+		return PoolMarker{}, false
+	}
+	bootDisk, ok := field(fields[2], "bootdisk")
+	if !ok || bootDisk == "" {
+		return PoolMarker{}, false
+	}
+	nodeClass, ok := field(fields[3], "nodeclass")
+	if !ok || nodeClass == "" {
+		return PoolMarker{}, false
+	}
+	config, ok := field(fields[4], "config")
+	if !ok || config == "" {
+		return PoolMarker{}, false
+	}
+	return PoolMarker{
+		ClusterUID:   types.UID(cluster),
+		BootDiskUID:  types.UID(bootDisk),
+		NodeClassUID: types.UID(nodeClass),
+		ConfigHash:   config,
+	}, true
 }
 
 // Description prepends a machine-readable marker while retaining the operator-facing description.

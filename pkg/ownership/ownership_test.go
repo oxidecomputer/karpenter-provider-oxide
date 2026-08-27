@@ -38,3 +38,16 @@ func TestParseRejectsAnythingTheReaperCannotProveItOwns(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolMarkerRoundTrip(t *testing.T) {
+	want := PoolMarker{
+		ClusterUID:   types.UID("cluster-uid"),
+		BootDiskUID:  types.UID("disk-uid"),
+		NodeClassUID: types.UID("class-uid"),
+		ConfigHash:   "abc123",
+	}
+	got, ok := ParsePool(want.Description())
+	if !ok || got != want {
+		t.Fatalf("ParsePool() = %#v, %t, want %#v, true", got, ok, want)
+	}
+}

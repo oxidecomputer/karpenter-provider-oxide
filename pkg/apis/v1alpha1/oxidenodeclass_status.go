@@ -128,6 +128,19 @@ type StorageStatus struct {
 	// DiskSets is the resolved form of spec.storage.diskSets, in the same order.
 	// +optional
 	DiskSets []DiskSetStatus `json:"diskSets,omitempty"`
+	// BootDiskPool is the current unused boot disk pool.
+	// +optional
+	BootDiskPool *BootDiskPoolStatus `json:"bootDiskPool,omitempty"`
+}
+
+type BootDiskPoolStatus struct {
+	Desired    int32  `json:"desired"`
+	Ready      int32  `json:"ready"`
+	Creating   int32  `json:"creating"`
+	Claimed    int32  `json:"claimed"`
+	Stale      int32  `json:"stale"`
+	ConfigHash string `json:"configHash,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 // DiskSetStatus is one resolved disk set.

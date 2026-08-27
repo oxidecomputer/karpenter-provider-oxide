@@ -85,6 +85,66 @@ type BootDisk struct {
 	// Size is the boot disk's capacity.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
+
+	// Pool keeps unused boot disks ready.
+	// +optional
+	Pool *BootDiskPool `json:"pool,omitempty" hash:"ignore"`
+}
+
+const (
+	DefaultBootDiskPoolMinReady   = int32(2)
+	DefaultBootDiskPoolPercentage = int32(10)
+	DefaultBootDiskPoolMaxReady   = int32(20)
+)
+
+// BootDiskPool controls unused boot disks.
+// +kubebuilder:validation:XValidation:rule="!has(self.minReady) || !has(self.maxReady) || self.minReady <= self.maxReady",message="minReady must not exceed maxReady"
+type BootDiskPool struct {
+	// Enabled defaults to true.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// MinReady is the smallest ready pool.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=2
+	// +optional
+	MinReady *int32 `json:"minReady,omitempty"`
+	// Percentage is the ready disks per 100 nodes.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=10
+	// +optional
+	Percentage *int32 `json:"percentage,omitempty"`
+	// MaxReady is the largest ready pool.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=20
+	// +optional
+	MaxReady *int32 `json:"maxReady,omitempty"`
+}
+
+func (in BootDisk) PoolEnabled() bool {
+	return in.Pool == nil || in.Pool.Enabled == nil || *in.Pool.Enabled
+}
+
+func (in BootDisk) PoolMinReady() int32 {
+	if in.Pool != nil && in.Pool.MinReady != nil {
+		return *in.Pool.MinReady
+	}
+	return DefaultBootDiskPoolMinReady
+}
+
+func (in BootDisk) PoolPercentage() int32 {
+	if in.Pool != nil && in.Pool.Percentage != nil {
+		return *in.Pool.Percentage
+	}
+	return DefaultBootDiskPoolPercentage
+}
+
+func (in BootDisk) PoolMaxReady() int32 {
+	if in.Pool != nil && in.Pool.MaxReady != nil {
+		return *in.Pool.MaxReady
+	}
+	return DefaultBootDiskPoolMaxReady
 }
 
 // DiskSet is a group of identically configured disks attached to every launched instance.

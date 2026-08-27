@@ -22,6 +22,8 @@ func AddToScheme(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
 		&OxideNodeClass{},
 		&OxideNodeClassList{},
+		&OxideBootDisk{},
+		&OxideBootDiskList{},
 		&OxideCapacity{},
 		&OxideCapacityList{},
 	)

@@ -28,6 +28,7 @@ const (
 	capacitySubsystem  = "capacity"
 	launchSubsystem    = "launch"
 	reaperSubsystem    = "reaper"
+	bootDiskSubsystem  = "boot_disk_pool"
 	inventorySubsystem = "inventory"
 	providerSubsystem  = "provider"
 
@@ -42,7 +43,8 @@ const (
 	reasonLabel = "reason"
 	resultLabel = "result"
 
-	providerLabel = "provider"
+	providerLabel  = "provider"
+	nodeClassLabel = "nodeclass"
 )
 
 // Results of trying to reserve the single trial launch a reopened shape allows.
@@ -122,6 +124,42 @@ var (
 		Name:      "delete_failures_total",
 		Help:      "Number of orphan deletions the reaper could not complete, by kind.",
 	}, []string{kindLabel})
+
+	BootDiskPoolDisks = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: bootDiskSubsystem,
+		Name:      "disks",
+		Help:      "Boot disks by NodeClass and state.",
+	}, []string{nodeClassLabel, stateLabel})
+
+	BootDiskPoolAcquisitions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: bootDiskSubsystem,
+		Name:      "acquisitions_total",
+		Help:      "Boot disk pool acquisitions by result.",
+	}, []string{resultLabel})
+
+	BootDiskPoolCreationSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Subsystem: bootDiskSubsystem,
+		Name:      "creation_seconds",
+		Help:      "Time to create a pooled boot disk.",
+		Buckets:   prometheus.DefBuckets,
+	})
+
+	BootDiskPoolCreateFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: bootDiskSubsystem,
+		Name:      "create_failures_total",
+		Help:      "Failed pooled boot disk creates.",
+	})
+
+	BootDiskPoolDeleteFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: bootDiskSubsystem,
+		Name:      "delete_failures_total",
+		Help:      "Failed pooled boot disk deletes.",
+	})
 
 	// ICEs counts refused launches, by which limit was diagnosed as binding.
 	ICEs = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -328,6 +366,11 @@ func init() {
 		OrphanAgeSeconds,
 		ReaperDeleteAttempts,
 		ReaperDeleteFailures,
+		BootDiskPoolDisks,
+		BootDiskPoolAcquisitions,
+		BootDiskPoolCreationSeconds,
+		BootDiskPoolCreateFailures,
+		BootDiskPoolDeleteFailures,
 		ICEs,
 		Successes,
 		Probes,

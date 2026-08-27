@@ -19,6 +19,9 @@ func (c *Controller) resolveStorage(
 		BootSizeBytes: nodeClass.Spec.Storage.Boot.Size.Value(),
 		DiskSets:      make([]v1alpha1.DiskSetStatus, 0, len(sets)),
 	}
+	if nodeClass.Status.Storage != nil {
+		resolved.BootDiskPool = nodeClass.Status.Storage.BootDiskPool
+	}
 
 	if total, max := nodeClass.Spec.Storage.Disks(), v1alpha1.MaxDisks(); total > max {
 		nodeClass.StatusConditions().SetFalse(
