@@ -30,7 +30,7 @@ type OxideBootDisk struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.claimRef) || self.claimRef == oldSelf.claimRef",message="claimRef cannot change"
-// +kubebuilder:validation:XValidation:rule="!oldSelf.retire || self.retire",message="retire cannot be cleared"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.retire) || !oldSelf.retire || (has(self.retire) && self.retire)",message="retire cannot be cleared"
 type OxideBootDiskSpec struct {
 	NodeClassRef BootDiskOwnerRef `json:"nodeClassRef"`
 	DiskName     string           `json:"diskName"`

@@ -106,7 +106,8 @@ spec:
             - message: claimRef cannot change
               rule: '!has(oldSelf.claimRef) || self.claimRef == oldSelf.claimRef'
             - message: retire cannot be cleared
-              rule: '!oldSelf.retire || self.retire'
+              rule: '!has(oldSelf.retire) || !oldSelf.retire || (has(self.retire)
+                && self.retire)'
           status:
             properties:
               id:
