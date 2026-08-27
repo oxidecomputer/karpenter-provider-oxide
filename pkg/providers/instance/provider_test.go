@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -845,6 +847,25 @@ func TestDeleteLeavesOperatorAttachedDisksIntact(t *testing.T) {
 	}
 	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != owned.Id {
 		t.Errorf("disk deletes = %v, want only owned disk %s", api.diskDeletes, owned.Id)
+	}
+}
+
+func TestGenericCleanupQuietlySkipsPoolDisks(t *testing.T) {
+	pool := ownership.PoolMarker{
+		ClusterUID: "cluster-uid", BootDiskUID: "record-uid", NodeClassUID: "class-uid", ConfigHash: "hash",
+	}
+	counter := metrics.OwnershipRejections.WithLabelValues("cleanup", "disk", "unmarked")
+	before := testutil.ToFloat64(counter)
+
+	got := (&Provider{}).verifyDiskCandidates(context.Background(), []oxide.Disk{{
+		Id: "d15c0000-0000-4000-8000-000000000004", Name: "kbd-pool", Description: pool.Description(),
+	}}, testOwner)
+
+	if len(got) != 0 {
+		t.Errorf("verified disks = %#v, want a pool disk excluded from generic cleanup", got)
+	}
+	if after := testutil.ToFloat64(counter); after != before {
+		t.Errorf("ownership rejection counter changed from %v to %v for a valid pool disk", before, after)
 	}
 }
 

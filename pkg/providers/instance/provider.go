@@ -876,6 +876,9 @@ func (p *Provider) ownedAttachedDisks(
 	}
 	var owned []OwnedDisk
 	for _, disk := range attached {
+		if poolDisk(disk.Description) {
+			continue
+		}
 		marker, verifyErr := verifyNodeClaimDisk(disk.Description, expected)
 		if verifyErr != nil {
 			p.rejectOwnership(ctx, "cleanup", "disk", disk.Id, string(disk.Name), verifyErr)
@@ -1084,6 +1087,9 @@ func (p *Provider) verifyDiskCandidates(
 	var owned []OwnedDisk
 	for i := range candidates {
 		disk := &candidates[i]
+		if poolDisk(disk.Description) {
+			continue
+		}
 		marker, err := verifyNodeClaimDisk(disk.Description, expected)
 		if err != nil {
 			p.rejectOwnership(ctx, "cleanup", "disk", disk.Id, string(disk.Name), err)
@@ -1092,6 +1098,11 @@ func (p *Provider) verifyDiskCandidates(
 		owned = appendOwnedDisks(owned, OwnedDisk{ID: disk.Id, Marker: marker})
 	}
 	return owned
+}
+
+func poolDisk(description string) bool {
+	_, ok := ownership.ParsePool(description)
+	return ok
 }
 
 func plannedOwnedDisks(
