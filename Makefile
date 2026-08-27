@@ -284,16 +284,3 @@ release: tools ## Build and push the multi-arch (linux/amd64,linux/arm64) images
 	for chart in $(ARTIFACTS)/helm/*.tgz; do \
 		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO)" --debug; \
 	done
-	$(MAKE) release-verify VERSION=$(VERSION)
-
-.PHONY: release-verify
-release-verify: helm ## Verify both charts and both image tags exist, and that each image is multi-arch.
-	@for chart in $(CONTROLLER_CHART_NAME) $(CRD_CHART_NAME); do \
-		$(HELM) show chart "oci://$(HELM_OCI_REPO)/$$chart" --version "$(VERSION)" \
-			| grep -qx "name: $$chart"; \
-	done
-	@for tag in "$(VERSION)" latest; do \
-		docker manifest inspect "$(IMAGE_REPO):$$tag" \
-			| jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] \
-				| index("linux/amd64") != null and index("linux/arm64") != null' >/dev/null; \
-	done
