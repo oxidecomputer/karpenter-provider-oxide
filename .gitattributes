@@ -1,2 +1,2 @@
 pkg/apis/crds/karpenter.sh_*.yaml linguist-generated=true
-charts/karpenter-oxide-crd/templates/*.yaml linguist-generated=true
+charts/karpenter-provider-oxide-crds/templates/*.yaml linguist-generated=true

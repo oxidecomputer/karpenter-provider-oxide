@@ -334,7 +334,7 @@ func (c *Controller) logPublishFailure(ctx context.Context, err error) {
 	log.FromContext(ctx).Error(
 		err,
 		"the OxideCapacity CRD is not installed, so which instance shapes are unavailable is "+
-			"reported by metrics only. Upgrade the karpenter-oxide-crd chart to the same version as the "+
+			"reported by metrics only. Upgrade the karpenter-provider-oxide-crds chart to the same version as the "+
 			"controller. Node provisioning is unaffected",
 	)
 	c.crdMissingLogged = true

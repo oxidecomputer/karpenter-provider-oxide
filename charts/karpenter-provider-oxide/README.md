@@ -24,7 +24,7 @@ The controller reads its Oxide API token from a Secret in the release namespace
 kubectl create secret --namespace kube-system generic oxide-api-token --from-literal=token=${OXIDE_TOKEN}
 ```
 
-The CRDs live in the separate `karpenter-oxide-crd` chart and must be installed first.
+The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be installed first.
 
 ## Source Code
 

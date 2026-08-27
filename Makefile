@@ -4,7 +4,7 @@ MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter-provider-oxide
 IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter-provider-oxide
 HELM_OCI_REPO ?= ghcr.io/oxidecomputer/helm-charts
 CONTROLLER_CHART_NAME ?= karpenter-provider-oxide
-CRD_CHART_NAME ?= karpenter-oxide-crd
+CRD_CHART_NAME ?= karpenter-provider-oxide-crds
 CONTROLLER_CHART_DIR ?= charts/$(CONTROLLER_CHART_NAME)
 CRD_CHART_DIR ?= charts/$(CRD_CHART_NAME)
 IMAGE_TAG ?= dev
@@ -15,7 +15,7 @@ MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 TOOLS_MOD := $(MAKEFILE_PATH)/tools/go.mod
 GO_TOOL := go tool -modfile=$(TOOLS_MOD)
 KARPENTER_NAMESPACE ?= kube-system
-HELM_VERSION ?= v4.2.2
+HELM_VERSION ?= v4.2.4
 
 LDFLAGS ?= -ldflags=-X=sigs.k8s.io/karpenter/pkg/operator.Version=$(VERSION)
 GOFLAGS += $(LDFLAGS)
@@ -282,7 +282,7 @@ release: tools ## Build and push the multi-arch (linux/amd64,linux/arm64) images
 	}
 	$(GORELEASER) release --clean
 	for chart in $(ARTIFACTS)/helm/*.tgz; do \
-		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO)"; \
+		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO) --debug"; \
 	done
 	$(MAKE) release-verify VERSION=$(VERSION)
 
