@@ -60,12 +60,16 @@ func TestDeadlinesFromEnv(t *testing.T) {
 
 	t.Run("configured", func(t *testing.T) {
 		t.Setenv(envLaunchDiskCreatingDeadline, "45s")
+		t.Setenv(envLaunchCleanupDeadline, "90s")
 		deadlines, err := deadlinesFromEnv()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if deadlines.DiskCreating != 45*time.Second {
 			t.Errorf("disk creating deadline = %s, want 45s", deadlines.DiskCreating)
+		}
+		if deadlines.Cleanup != 90*time.Second {
+			t.Errorf("cleanup deadline = %s, want 90s", deadlines.Cleanup)
 		}
 	})
 

@@ -16,6 +16,8 @@ const (
 type Deadlines struct {
 	// Launch bounds the whole of one Create, across every call it makes.
 	Launch time.Duration
+	// Cleanup independently bounds post-failure cleanup after a launch context ends.
+	Cleanup time.Duration
 	// DiskCreating is how long a disk may sit in creating.
 	DiskCreating time.Duration
 	// InstanceCreating is how long an instance may sit in creating.
@@ -30,6 +32,7 @@ type Deadlines struct {
 func DefaultDeadlines() Deadlines {
 	return Deadlines{
 		Launch:           10 * time.Minute,
+		Cleanup:          5 * time.Minute,
 		DiskCreating:     2 * time.Minute,
 		InstanceCreating: 2 * time.Minute,
 		InstanceStarting: 5 * time.Minute,
@@ -44,6 +47,7 @@ func (d Deadlines) Validate() error {
 		value time.Duration
 	}{
 		{"launch deadline", d.Launch},
+		{"cleanup deadline", d.Cleanup},
 		{"disk creating deadline", d.DiskCreating},
 		{"instance creating deadline", d.InstanceCreating},
 		{"instance starting deadline", d.InstanceStarting},

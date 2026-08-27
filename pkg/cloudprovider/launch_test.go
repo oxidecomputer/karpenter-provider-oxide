@@ -1,16 +1,21 @@
 package cloudprovider
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
@@ -190,5 +195,32 @@ func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
 	}
 	if want := storage.LegacyPrefix("karpenter-default-abc12"); teardown.DiskPrefix != want {
 		t.Errorf("disk prefix = %q, want the legacy prefix %q", teardown.DiskPrefix, want)
+	}
+}
+
+func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
+	record := &v1alpha1.OxideBootDisk{ObjectMeta: v1.ObjectMeta{Name: "pool-record"}}
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(record).Build()
+	pool := bootdisk.NewProvider(kubeClient, kubeClient, nil, "project", "cluster")
+	provider := &OxideCloudProvider{bootDiskPool: pool}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := false
+	provider.retireUnstartedBootDisk(ctx, &bootdisk.Acquired{
+		RecordName: record.Name,
+		DiskName:   "pool-disk",
+	}, &started)
+
+	got := &v1alpha1.OxideBootDisk{}
+	if err := kubeClient.Get(context.Background(), client.ObjectKey{Name: record.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Spec.Retire {
+		t.Fatal("canceled launch did not retire its acquired boot disk")
 	}
 }

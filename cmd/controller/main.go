@@ -62,6 +62,7 @@ const (
 	envClusterID = "OXIDE_CLUSTER_ID"
 
 	envLaunchDeadline                 = "OXIDE_LAUNCH_DEADLINE"
+	envLaunchCleanupDeadline          = "OXIDE_LAUNCH_CLEANUP_DEADLINE"
 	envLaunchDiskCreatingDeadline     = "OXIDE_LAUNCH_DISK_CREATING_DEADLINE"
 	envLaunchInstanceCreatingDeadline = "OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE"
 	envLaunchInstanceStartingDeadline = "OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE"
@@ -326,6 +327,7 @@ func deadlinesFromEnv() (instance.Deadlines, error) {
 		target *time.Duration
 	}{
 		{envLaunchDeadline, &deadlines.Launch},
+		{envLaunchCleanupDeadline, &deadlines.Cleanup},
 		{envLaunchDiskCreatingDeadline, &deadlines.DiskCreating},
 		{envLaunchInstanceCreatingDeadline, &deadlines.InstanceCreating},
 		{envLaunchInstanceStartingDeadline, &deadlines.InstanceStarting},

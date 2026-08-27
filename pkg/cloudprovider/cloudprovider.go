@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/google/uuid"
@@ -40,6 +41,8 @@ import (
 const (
 	GiB                = 1 << 30
 	InstanceNamePrefix = "karpenter-"
+
+	bootDiskRetirementTimeout = 30 * time.Second
 )
 
 type OxideCloudProvider struct {
@@ -377,7 +380,12 @@ func (c *OxideCloudProvider) retireUnstartedBootDisk(
 	if acquired == nil || *started {
 		return
 	}
-	if err := c.bootDiskPool.Retire(ctx, acquired.RecordName); err != nil {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		bootDiskRetirementTimeout,
+	)
+	defer cancel()
+	if err := c.bootDiskPool.Retire(cleanupCtx, acquired.RecordName); err != nil {
 		log.FromContext(ctx).V(1).Info(
 			"unable to retire a claimed boot disk",
 			"disk", acquired.DiskName,

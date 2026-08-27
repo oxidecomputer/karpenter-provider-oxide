@@ -160,6 +160,12 @@ type launchAPI struct {
 	createdRunState oxide.InstanceState
 
 	instanceCreateTimeout bool
+
+	cancelOnInstanceCreate context.CancelFunc
+	cancelOnStart          context.CancelFunc
+	cleanupContextCanceled bool
+	stops                  int
+	instanceDeletes        int
 }
 
 func (f *launchAPI) serveDisks(
@@ -204,6 +210,7 @@ func (f *launchAPI) serveDisks(
 		writeJSON(t, w, http.StatusCreated, disk)
 
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "disks/"):
+		f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
 		disk, ok := f.disks[strings.TrimPrefix(path, "disks/")]
 		if !ok {
 			notFound(t, w)
@@ -212,6 +219,7 @@ func (f *launchAPI) serveDisks(
 		writeJSON(t, w, http.StatusOK, disk)
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
+		f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
 		ref := strings.TrimPrefix(path, "disks/")
 		f.diskDeletes = append(f.diskDeletes, ref)
 		disk, ok := f.disks[ref]
@@ -256,6 +264,9 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 			f.startRequested = body.Start
 			f.antiAffinityRequested = body.AntiAffinityGroups
 			if f.instanceCreateError != "" {
+				if f.cancelOnInstanceCreate != nil {
+					f.cancelOnInstanceCreate()
+				}
 				apiError(t, w, http.StatusInsufficientStorage, f.instanceCreateError)
 				return
 			}
@@ -292,16 +303,28 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
 			f.starts++
 			if f.startError != "" {
+				if f.cancelOnStart != nil {
+					f.instance.RunState = oxide.InstanceStateRunning
+					f.cancelOnStart()
+				}
 				apiError(t, w, http.StatusInsufficientStorage, f.startError)
 				return
 			}
 			f.instance.RunState = oxide.InstanceStateStarting
 			writeJSON(t, w, http.StatusAccepted, f.instance)
 
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
+			f.stops++
+			f.instance.RunState = oxide.InstanceStateStopped
+			writeJSON(t, w, http.StatusAccepted, f.instance)
+
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
 
 		case r.Method == http.MethodDelete && strings.HasPrefix(path, "instances/"):
+			f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
+			f.instanceDeletes++
 			f.instance = nil
 			w.WriteHeader(http.StatusNoContent)
 

@@ -271,6 +271,16 @@ func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance)
 	})
 }
 
+func (p *Provider) cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), p.deadlines.Cleanup)
+}
+
+func (p *Provider) cleanup(parent context.Context, fn func(context.Context)) {
+	ctx, cancel := p.cleanupContext(parent)
+	defer cancel()
+	fn(ctx)
+}
+
 func (p *Provider) ensureDisks(
 	ctx context.Context,
 	body *oxide.InstanceCreate,
@@ -546,6 +556,16 @@ func (p *Provider) awaitSettled(
 }
 
 func (p *Provider) abandonDisks(ctx context.Context, disks []OwnedDisk, cause error) {
+	p.cleanup(ctx, func(cleanupCtx context.Context) {
+		p.abandonDisksWithContext(cleanupCtx, disks, cause)
+	})
+}
+
+func (p *Provider) abandonDisksWithContext(
+	ctx context.Context,
+	disks []OwnedDisk,
+	cause error,
+) {
 	for _, disk := range disks {
 		if disk.ID == "" {
 			continue
@@ -574,6 +594,7 @@ func (p *Provider) adopt(
 		Project:  oxide.NameOrId(p.project),
 	})
 	if err != nil {
+		p.abandonDisks(ctx, plannedDisks, err)
 		if errors.Is(err, oxide.ErrObjectNotFound) {
 
 			return nil, fmt.Errorf(
@@ -603,6 +624,7 @@ func (p *Provider) adoptInstance(
 	if instance.RunState == oxide.InstanceStateCreating {
 		settled, err := p.awaitSettled(ctx, instance)
 		if err != nil {
+			p.abandonUnlessStuck(ctx, instance.Id, opts.Owner, plannedDisks, err)
 			if errors.Is(err, ErrNotFound) {
 				return nil, fmt.Errorf(
 					"instance %s already exists but was deleted before it could be adopted", name,
@@ -642,9 +664,14 @@ func (p *Provider) adoptInstance(
 			"instance %s already exists in run state %q and cannot be adopted",
 			name, instance.RunState,
 		)
-		if err := p.Delete(ctx, instance.Id, Teardown{Owner: opts.Owner}); err != nil &&
-			!errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("%w, and it could not be terminated, %w", abandonErr, err)
+		var deleteErr error
+		p.cleanup(ctx, func(cleanupCtx context.Context) {
+			deleteErr = p.Delete(cleanupCtx, instance.Id, Teardown{Owner: opts.Owner})
+		})
+		if deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+			return nil, fmt.Errorf(
+				"%w, and it could not be terminated, %w", abandonErr, deleteErr,
+			)
 		}
 		return nil, fmt.Errorf("%w, so it was terminated", abandonErr)
 	}
@@ -763,6 +790,18 @@ func (p *Provider) abandon(
 	disks []OwnedDisk,
 	cause error,
 ) {
+	p.cleanup(ctx, func(cleanupCtx context.Context) {
+		p.abandonWithContext(cleanupCtx, ref, owner, disks, cause)
+	})
+}
+
+func (p *Provider) abandonWithContext(
+	ctx context.Context,
+	ref string,
+	owner ownership.Marker,
+	disks []OwnedDisk,
+	cause error,
+) {
 	if err := p.Delete(
 		ctx,
 		ref,
@@ -776,7 +815,7 @@ func (p *Provider) abandon(
 			"cause", cause.Error(),
 		)
 	}
-	p.abandonDisks(ctx, disks, cause)
+	p.abandonDisksWithContext(ctx, disks, cause)
 }
 
 func (p *Provider) abandonUnusedDisks(ctx context.Context, disks []OwnedDisk, sameLaunch bool) {
@@ -787,7 +826,13 @@ func (p *Provider) abandonUnusedDisks(ctx context.Context, disks []OwnedDisk, sa
 		"removing the disks this attempt created, having adopted an instance attached to another attempt's",
 		"disks", diskIDs(disks),
 	)
-	p.abandonDisks(ctx, disks, errors.New("the launch adopted an existing instance"))
+	p.cleanup(ctx, func(cleanupCtx context.Context) {
+		p.abandonDisksWithContext(
+			cleanupCtx,
+			disks,
+			errors.New("the launch adopted an existing instance"),
+		)
+	})
 }
 
 func (p *Provider) abandonUnlessStuck(

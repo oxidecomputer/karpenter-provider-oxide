@@ -134,6 +134,8 @@ settings:
   launch:
     # -- Overall bound on a single launch, across every Oxide API call it makes.
     deadline: 10m
+    # -- Independent post-failure cleanup budget after the launch context ends.
+    cleanupDeadline: 5m
     # -- How long a disk may sit in the creating state.
     diskCreatingDeadline: 2m
     # -- How long an instance may sit in the creating state.

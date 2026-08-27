@@ -14,6 +14,7 @@ import (
 func shortDeadlines() Deadlines {
 	return Deadlines{
 		Launch:           5 * time.Second,
+		Cleanup:          time.Second,
 		DiskCreating:     10 * time.Millisecond,
 		InstanceCreating: 10 * time.Millisecond,
 		InstanceStarting: time.Minute,
@@ -69,6 +70,71 @@ func TestCreateStillCleansUpAfterARefusal(t *testing.T) {
 	}
 }
 
+func TestCreateCleansDisksAfterTheParentIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &launchAPI{instanceCreateError: "Internal", cancelOnInstanceCreate: cancel}
+	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
+
+	if _, err := p.Create(ctx, launchParams(), testOptions()); err == nil {
+		t.Fatal("Create() succeeded, want the canceled launch to fail")
+	}
+	if len(api.diskDeletes) == 0 {
+		t.Fatal("disk cleanup was skipped after the parent context was canceled")
+	}
+	if api.cleanupContextCanceled {
+		t.Fatal("a cleanup request used an already-canceled context")
+	}
+}
+
+func TestCreateCleansAnInstanceAfterTheParentIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &launchAPI{startError: "Internal", cancelOnStart: cancel}
+	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
+
+	if _, err := p.Create(ctx, launchParams(), testOptions()); err == nil {
+		t.Fatal("Create() succeeded, want the canceled launch to fail")
+	}
+	if api.stops == 0 || api.instanceDeletes == 0 {
+		t.Fatalf(
+			"cleanup made %d stop and %d delete requests, want both after cancellation",
+			api.stops,
+			api.instanceDeletes,
+		)
+	}
+	if len(api.diskDeletes) == 0 {
+		t.Fatal("instance cleanup left the launch disk behind")
+	}
+	if api.cleanupContextCanceled {
+		t.Fatal("a cleanup request used an already-canceled context")
+	}
+}
+
+func TestCleanupPreservesValuesAndUsesItsOwnDeadline(t *testing.T) {
+	type key struct{}
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), key{}, "value"))
+	cancel()
+	deadlines := shortDeadlines()
+	deadlines.Cleanup = 20 * time.Millisecond
+	p := NewProvider(nil, "project", nil, WithDeadlines(deadlines))
+
+	started := time.Now()
+	p.cleanup(parent, func(ctx context.Context) {
+		if got := ctx.Value(key{}); got != "value" {
+			t.Errorf("cleanup context value = %v, want value", got)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("cleanup context started canceled: %v", err)
+		}
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Errorf("cleanup context ended with %v, want its own deadline", ctx.Err())
+		}
+	})
+	if elapsed := time.Since(started); elapsed < deadlines.Cleanup {
+		t.Errorf("cleanup stopped after %s, before its %s deadline", elapsed, deadlines.Cleanup)
+	}
+}
+
 func TestCreateAbandonsAnInstanceStuckInCreating(t *testing.T) {
 	api := &launchAPI{createdRunState: oxide.InstanceStateCreating}
 	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
@@ -117,7 +183,7 @@ func TestDeadlinesValidate(t *testing.T) {
 	}
 
 	zero := DefaultDeadlines()
-	zero.DiskCreating = 0
+	zero.Cleanup = 0
 	if err := zero.Validate(); err == nil {
 		t.Error("Validate() accepted a zero deadline, want it refused")
 	}
