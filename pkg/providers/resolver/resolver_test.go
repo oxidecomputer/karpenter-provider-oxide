@@ -3,8 +3,10 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,19 +255,146 @@ func TestAnUnreadEntryIsPruned(t *testing.T) {
 
 func TestConcurrentGetsCollapse(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
-
-	resolver := &counter{value: "first"}
+	var calls atomic.Int64
+	resolve := func(context.Context) (string, error) {
+		calls.Add(1)
+		return "first", nil
+	}
 
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if _, err := cache.Get(context.Background(), "key", resolver.resolve); err != nil {
+			if _, err := cache.Get(context.Background(), "key", resolve); err != nil {
 				t.Errorf("Get() error = %v", err)
 			}
 		})
 	}
 	wg.Wait()
-	if resolver.calls != 1 {
-		t.Errorf("resolve called %d times across 8 concurrent gets, want 1", resolver.calls)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("resolve called %d times across 8 concurrent gets, want 1", got)
+	}
+}
+
+func TestDifferentKeysResolveConcurrently(t *testing.T) {
+	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	resolve := func(context.Context) (string, error) {
+		entered <- struct{}{}
+		<-release
+		return "value", nil
+	}
+
+	var wg sync.WaitGroup
+	for _, key := range []string{"first", "second"} {
+		wg.Go(func() {
+			if _, err := cache.Get(context.Background(), key, resolve); err != nil {
+				t.Errorf("Get() error = %v", err)
+			}
+		})
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("different keys did not enter their resolvers concurrently")
+		}
+	}
+	close(release)
+	wg.Wait()
+}
+
+func TestEntryBecomingActiveWhileEvictionWaitsIsKept(t *testing.T) {
+	clk := newClock()
+	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
+	if _, err := cache.Get(context.Background(), "active", (&counter{value: "value"}).resolve); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(entryTTLIdle + time.Minute)
+
+	active := cache.records["active"]
+	active.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cache.evictIdle("trigger")
+	}()
+	active.lastRead = clk.Now()
+	active.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("eviction did not finish")
+	}
+	cache.mu.Lock()
+	got := cache.records["active"]
+	cache.mu.Unlock()
+	if got != active {
+		t.Fatal("entry that became active while eviction waited was removed")
+	}
+}
+
+func TestGaugePublicationWaitsForActiveResolutionWithoutDeadlocking(t *testing.T) {
+	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	resolved := make(chan struct{})
+	go func() {
+		defer close(resolved)
+		_, _ = cache.Get(context.Background(), "key", func(context.Context) (string, error) {
+			close(entered)
+			<-release
+			return "value", nil
+		})
+	}()
+	<-entered
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		cache.publishGauges()
+	}()
+	close(release)
+
+	for name, done := range map[string]<-chan struct{}{"resolution": resolved, "publication": published} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s deadlocked", name)
+		}
+	}
+}
+
+func TestConcurrentResolutionEvictionAndPublication(t *testing.T) {
+	clk := newClock()
+	cache := NewCacheWithClock[string]("test", 0, clk.Now)
+	var calls atomic.Int64
+	resolve := func(context.Context) (string, error) {
+		calls.Add(1)
+		return "value", nil
+	}
+
+	var wg sync.WaitGroup
+	for worker := range 32 {
+		wg.Go(func() {
+			for iteration := range 100 {
+				key := fmt.Sprintf("key-%d", (worker+iteration)%8)
+				if _, err := cache.Get(context.Background(), key, resolve); err != nil {
+					t.Errorf("Get() error = %v", err)
+					return
+				}
+				if iteration%10 == 0 {
+					clk.advance(entryTTLIdle)
+					cache.evictIdle("eviction-trigger")
+				}
+				cache.publishGauges()
+			}
+		})
+	}
+	wg.Wait()
+	if calls.Load() == 0 {
+		t.Fatal("resolver was never called")
 	}
 }

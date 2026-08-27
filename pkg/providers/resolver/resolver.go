@@ -31,7 +31,14 @@ func (e Entry[T]) Age(now time.Time) time.Duration {
 	return now.Sub(e.TakenAt)
 }
 
+// Cache locking rules:
+//   - Cache.mu protects only map membership.
+//   - record.mu protects every record field.
+//   - resolution holds only the relevant record lock, so different keys remain concurrent.
+//   - code that needs both locks acquires record.mu before Cache.mu.
+//   - metrics snapshot map membership and record fields in separate locking passes.
 type record[T any] struct {
+	// mu protects every field in this record.
 	mu       sync.Mutex
 	value    T
 	takenAt  time.Time
@@ -48,6 +55,7 @@ type Cache[T any] struct {
 	ttl  time.Duration
 	now  func() time.Time
 
+	// mu protects only records. Code must not acquire a record lock while holding mu.
 	mu      sync.Mutex
 	records map[string]*record[T]
 }
@@ -73,16 +81,15 @@ func (c *Cache[T]) Get(
 	key string,
 	resolve func(context.Context) (T, error),
 ) (Entry[T], error) {
-	rec := c.record(key)
-
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-
+	rec := c.lockRecord(key)
 	now := c.now()
 	rec.lastRead = now
 	if rec.held && now.Sub(rec.takenAt) < c.ttl {
 		metrics.ProviderCacheHits.WithLabelValues(c.name).Inc()
-		return Entry[T]{Value: rec.value, TakenAt: rec.takenAt}, nil
+		entry := Entry[T]{Value: rec.value, TakenAt: rec.takenAt}
+		rec.mu.Unlock()
+		c.evictIdle(key)
+		return entry, nil
 	}
 
 	value, err := resolve(ctx)
@@ -90,6 +97,8 @@ func (c *Cache[T]) Get(
 	if err == nil {
 		metrics.ProviderResolutions.WithLabelValues(c.name, metrics.ResolutionSuccess).Inc()
 		rec.value, rec.takenAt, rec.held, rec.failingSince = value, now, true, time.Time{}
+		rec.mu.Unlock()
+		c.evictIdle(key)
 		c.publishGauges()
 		return Entry[T]{Value: value, TakenAt: now}, nil
 	}
@@ -100,63 +109,113 @@ func (c *Cache[T]) Get(
 	}
 
 	if !rec.held {
+		rec.mu.Unlock()
+		c.evictIdle(key)
 		c.publishGauges()
 		return Entry[T]{}, err
 	}
 	age := now.Sub(rec.takenAt)
 
 	if age > providers.StaleLimit {
-
+		failingFor := now.Sub(rec.failingSince).Round(time.Second)
+		rec.mu.Unlock()
+		c.evictIdle(key)
 		c.publishGauges()
 		return Entry[T]{}, fmt.Errorf(
 			"no %s resolution has succeeded for %s (last reading is %s old): %w",
 			c.name,
-			now.Sub(rec.failingSince).Round(time.Second),
+			failingFor,
 			age.Round(time.Second),
 			err,
 		)
 	}
 	metrics.ProviderStaleServed.WithLabelValues(c.name).Inc()
+	entry := Entry[T]{Value: rec.value, TakenAt: rec.takenAt, Stale: true}
+	rec.mu.Unlock()
+	c.evictIdle(key)
 	c.publishGauges()
-	return Entry[T]{Value: rec.value, TakenAt: rec.takenAt, Stale: true}, nil
+	return entry, nil
+}
+
+// lockRecord returns the current record for key with its mutex held. If eviction
+// removed the record before it could be locked, it retries with the replacement.
+func (c *Cache[T]) lockRecord(key string) *record[T] {
+	for {
+		rec := c.record(key)
+		rec.mu.Lock()
+		c.mu.Lock()
+		current := c.records[key] == rec
+		c.mu.Unlock()
+		if current {
+			return rec
+		}
+		rec.mu.Unlock()
+	}
 }
 
 func (c *Cache[T]) record(key string) *record[T] {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	cutoff := c.now().Add(-entryTTLIdle)
-	for k, rec := range c.records {
-		if k != key && rec.lastRead.Before(cutoff) {
-			delete(c.records, k)
-		}
-	}
-
 	rec, ok := c.records[key]
 	if !ok {
 		rec = &record[T]{}
 		c.records[key] = rec
 	}
+	c.mu.Unlock()
 	return rec
 }
 
-func (c *Cache[T]) publishGauges() {
+// evictIdle removes records that stayed idle through the final check under their record lock.
+func (c *Cache[T]) evictIdle(currentKey string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	candidates := make(map[string]*record[T], len(c.records))
+	for key, candidate := range c.records {
+		if key != currentKey {
+			candidates[key] = candidate
+		}
+	}
+	c.mu.Unlock()
 
+	cutoff := c.now().Add(-entryTTLIdle)
+	for key, candidate := range candidates {
+		candidate.mu.Lock()
+		if candidate.lastRead.Before(cutoff) {
+			c.mu.Lock()
+			if c.records[key] == candidate {
+				delete(c.records, key)
+			}
+			c.mu.Unlock()
+		}
+		candidate.mu.Unlock()
+	}
+}
+
+func (c *Cache[T]) recordSnapshot() []*record[T] {
+	c.mu.Lock()
+	records := make([]*record[T], 0, len(c.records))
+	for _, rec := range c.records {
+		records = append(records, rec)
+	}
+	c.mu.Unlock()
+	return records
+}
+
+func (c *Cache[T]) publishGauges() {
+	records := c.recordSnapshot()
 	now := c.now()
 	oldest := time.Duration(0)
-	for _, rec := range c.records {
-
-		if !rec.held {
+	for _, rec := range records {
+		rec.mu.Lock()
+		held, takenAt := rec.held, rec.takenAt
+		rec.mu.Unlock()
+		if !held {
 			continue
 		}
-		if age := now.Sub(rec.takenAt); age > oldest {
+		if age := now.Sub(takenAt); age > oldest {
 			oldest = age
 		}
 	}
 	metrics.ProviderOldestEntryAge.WithLabelValues(c.name).Set(metrics.Seconds(oldest))
-	metrics.ProviderCacheEntries.WithLabelValues(c.name).Set(float64(len(c.records)))
+	metrics.ProviderCacheEntries.WithLabelValues(c.name).Set(float64(len(records)))
 }
 
 // Fingerprint is the cache key for a resolution: a hash of the selectors that produced it.
