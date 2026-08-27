@@ -282,7 +282,7 @@ release: tools ## Build and push the multi-arch (linux/amd64,linux/arm64) images
 	}
 	$(GORELEASER) release --clean
 	for chart in $(ARTIFACTS)/helm/*.tgz; do \
-		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO) --debug"; \
+		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO)" --debug; \
 	done
 	$(MAKE) release-verify VERSION=$(VERSION)
 
