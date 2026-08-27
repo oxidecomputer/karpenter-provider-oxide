@@ -32,8 +32,9 @@ const (
 )
 
 type rackAPI struct {
-	instances []oxide.Instance
-	disks     []oxide.Disk
+	instances           []oxide.Instance
+	disks               []oxide.Disk
+	diskViewDescription string
 
 	deletedInstances []string
 	deletedDisks     []string
@@ -50,6 +51,20 @@ func (f *rackAPI) client(t *testing.T) *oxide.Client {
 
 		case r.Method == http.MethodGet && path == "disks":
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.disks})
+
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "disks/"):
+			id := strings.TrimPrefix(path, "disks/")
+			for i := range f.disks {
+				if f.disks[i].Id == id {
+					disk := f.disks[i]
+					if f.diskViewDescription != "" {
+						disk.Description = f.diskViewDescription
+					}
+					writeJSON(t, w, http.StatusOK, disk)
+					return
+				}
+			}
+			notFound(t, w)
 
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
@@ -77,7 +92,15 @@ func (f *rackAPI) client(t *testing.T) *oxide.Client {
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
-			f.deletedDisks = append(f.deletedDisks, strings.TrimPrefix(path, "disks/"))
+			id := strings.TrimPrefix(path, "disks/")
+			f.deletedDisks = append(f.deletedDisks, id)
+			remaining := f.disks[:0]
+			for _, existing := range f.disks {
+				if existing.Id != id {
+					remaining = append(remaining, existing)
+				}
+			}
+			f.disks = remaining
 			w.WriteHeader(http.StatusNoContent)
 
 		default:
@@ -339,5 +362,23 @@ func TestReconcileLeavesAnOrphanTheAPIWillNotDelete(t *testing.T) {
 			"deleted instances = %v, want an instance in creating left for a later pass",
 			api.deletedInstances,
 		)
+	}
+}
+
+func TestReconcileRevalidatesADiskImmediatelyBeforeDeletion(t *testing.T) {
+	api := &rackAPI{
+		disks: []oxide.Disk{
+			ownedDisk(describe(clusterUID, deadUID, ownership.KindBootDisk)),
+		},
+		diskViewDescription: describe("cluster-2", deadUID, ownership.KindBootDisk),
+	}
+	c := controllerFor(t, api, nil, nil)
+
+	reap(t, c)
+	elapse(c)
+	reap(t, c)
+
+	if len(api.deletedDisks) != 0 {
+		t.Errorf("deleted disks = %v, want a disk whose marker changed left intact", api.deletedDisks)
 	}
 }

@@ -153,7 +153,8 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 		},
 	}
 
-	teardown := teardownFor(nodeClaim, "karpenter-default-abc12")
+	owner := ownership.Marker{ClusterUID: "cluster", NodeClaimUID: "claim", NodeClaimName: nodeClaim.Name, Kind: ownership.KindInstance}
+	teardown := teardownFor(nodeClaim, "karpenter-default-abc12", owner)
 	if teardown.DiskPrefix != "kd-abcdefghijkl-" {
 		t.Errorf("disk prefix = %q, want the prefix the launch recorded", teardown.DiskPrefix)
 	}
@@ -161,12 +162,16 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 	if teardown.BootDiskName != "pooled-boot" {
 		t.Errorf("boot disk name = %q, want the recorded pooled disk", teardown.BootDiskName)
 	}
+	if teardown.Owner != owner {
+		t.Errorf("owner = %#v, want %#v", teardown.Owner, owner)
+	}
 }
 
 func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
 	nodeClaim := &karpcorev1.NodeClaim{ObjectMeta: v1.ObjectMeta{Name: "default-abc12"}}
 
-	teardown := teardownFor(nodeClaim, "karpenter-default-abc12")
+	owner := ownership.Marker{ClusterUID: "cluster", NodeClaimUID: "claim", NodeClaimName: nodeClaim.Name, Kind: ownership.KindInstance}
+	teardown := teardownFor(nodeClaim, "karpenter-default-abc12", owner)
 	if teardown.BootDiskName != "karpenter-default-abc12" {
 		t.Errorf("boot disk name = %q, want the legacy name", teardown.BootDiskName)
 	}

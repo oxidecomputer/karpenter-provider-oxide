@@ -180,8 +180,10 @@ func (c *Controller) owned(ctx context.Context) ([]resource, error) {
 
 	owned := make([]resource, 0, len(instances)+len(disks))
 	for _, listed := range instances {
-		marker, ok := ownership.Parse(listed.Description)
-		if !ok || marker.ClusterUID != c.clusterUID {
+		marker, verifyErr := ownership.VerifyClusterResource(
+			listed.Description, c.clusterUID, ownership.KindInstance,
+		)
+		if verifyErr != nil {
 			continue
 		}
 		owned = append(owned, resource{
@@ -194,7 +196,8 @@ func (c *Controller) owned(ctx context.Context) ([]resource, error) {
 	}
 	for _, listed := range disks {
 		marker, ok := ownership.Parse(listed.Description)
-		if !ok || marker.ClusterUID != c.clusterUID {
+		if !ok || marker.ClusterUID != c.clusterUID ||
+			(marker.Kind != ownership.KindBootDisk && marker.Kind != ownership.KindDataDisk) {
 			continue
 		}
 		owned = append(owned, resource{
@@ -339,13 +342,13 @@ func (c *Controller) confirm(ctx context.Context, orphan resource) (bool, error)
 
 func (c *Controller) delete(ctx context.Context, orphan resource) error {
 	if orphan.kind == instance.KindInstance {
-		err := c.instances.Delete(ctx, orphan.id, instance.Teardown{})
+		err := c.instances.Delete(ctx, orphan.id, instance.Teardown{Owner: orphan.marker})
 		if err == nil || errors.Is(err, instance.ErrNotFound) {
 			return nil
 		}
 		return err
 	}
-	return c.instances.DeleteDisks(ctx, []string{orphan.id})
+	return c.instances.DeleteOwnedDisk(ctx, orphan.id, orphan.marker)
 }
 
 func attachedInstance(disk oxide.Disk) string {

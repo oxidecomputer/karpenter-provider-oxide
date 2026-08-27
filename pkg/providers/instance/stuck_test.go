@@ -25,7 +25,7 @@ func TestCreateAbandonsAStuckDiskWithoutDeletingIt(t *testing.T) {
 	api := &launchAPI{stuckDisk: true}
 	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 	if err == nil {
 		t.Fatal("Create() succeeded, want it abandoned over the stuck disk")
 	}
@@ -57,7 +57,7 @@ func TestCreateStillCleansUpAfterARefusal(t *testing.T) {
 	api := &launchAPI{startError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("Create() error = %v, want an insufficient capacity refusal", err)
 	}
@@ -73,7 +73,7 @@ func TestCreateAbandonsAnInstanceStuckInCreating(t *testing.T) {
 	api := &launchAPI{createdRunState: oxide.InstanceStateCreating}
 	p := NewProvider(api.server(t), "project", nil, WithDeadlines(shortDeadlines()))
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 
 	var stuck *StuckLaunchResourceError
 	if !errors.As(err, &stuck) {
@@ -100,7 +100,7 @@ func TestAdoptWaitsForACreatingInstanceToSettle(t *testing.T) {
 	api.instance.RunState = oxide.InstanceStateCreating
 	api.instanceCreateError = "ObjectAlreadyExists"
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 
 	var stuck *StuckLaunchResourceError
 	if !errors.As(err, &stuck) {
@@ -136,14 +136,14 @@ func TestCreateRemovesItsOwnDisksWhenItAdoptsAnotherAttemptsInstance(t *testing.
 	api.instance = runningInstance()
 	api.instanceCreateError = "ObjectAlreadyExists"
 
-	adopted, err := p.Create(context.Background(), launchParams(), Options{})
+	adopted, err := p.Create(context.Background(), launchParams(), testOptions())
 	if err != nil {
 		t.Fatalf("Create() error = %v, want the running instance adopted", err)
 	}
 	if adopted == nil {
 		t.Fatal("Create() returned no instance")
 	}
-	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != "karpenter-node" {
+	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != "d15c0000-0000-4000-8000-000000000001" {
 		t.Errorf(
 			"disk deletes = %v, want the disks this attempt created removed as unused",
 			api.diskDeletes,
@@ -158,7 +158,7 @@ func TestCreateKeepsItsDisksWhenItRecoversItsOwnInstance(t *testing.T) {
 	api.instance = runningInstance()
 	api.instanceCreateTimeout = true
 
-	recovered, err := p.Create(context.Background(), launchParams(), Options{})
+	recovered, err := p.Create(context.Background(), launchParams(), testOptions())
 	if err != nil {
 		t.Fatalf("Create() error = %v, want the launch's own instance recovered", err)
 	}

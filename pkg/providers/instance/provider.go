@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/google/uuid"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,10 +40,16 @@ var (
 
 // Options is the per-launch configuration a create cannot carry in the Oxide API's own create shape.
 type Options struct {
+	// Owner is the expected owner of the instance and every NodeClaim-owned launch resource.
+	Owner ownership.Marker
 	// AffinityGroups are the affinity groups, by ID, the instance joins between the create and the start.
 	AffinityGroups []string
-	// OwnedDisks are attached disks this launch must delete on failure.
-	OwnedDisks []string
+}
+
+// OwnedDisk is a disk whose immutable ID and description marker have both been verified.
+type OwnedDisk struct {
+	ID     string
+	Marker ownership.Marker
 }
 
 // Released is the rack capacity an instance gave back when it was torn down.
@@ -105,14 +113,21 @@ func (p *Provider) Create(
 
 	params.Body.Start = new(false)
 	name := string(params.Body.Name)
+	if err := ownership.Verify(params.Body.Description, opts.Owner); err != nil {
+		return nil, err
+	}
 
+	plannedDisks, err := plannedOwnedDisks(params.Body, opts.Owner)
+	if err != nil {
+		return nil, err
+	}
 	createdDiskNames := diskNames(params.Body)
-	ownedDiskNames := append([]string{}, createdDiskNames...)
-	ownedDiskNames = appendUnique(ownedDiskNames, opts.OwnedDisks...)
 
 	log.FromContext(ctx).V(1).Info("creating disks", "disks", createdDiskNames)
-	if err := p.ensureDisks(ctx, params.Body, createdDiskNames); err != nil {
-		p.abandonDisks(ctx, opts.OwnedDisks, err)
+	if err := p.ensureDisks(ctx, params.Body, opts.Owner); err != nil {
+		if !errors.Is(err, ErrStuckLaunchResource) {
+			p.abandonDisks(ctx, plannedDisks, err)
+		}
 		return nil, err
 	}
 	log.FromContext(ctx).V(1).Info("disks created", "disks", createdDiskNames)
@@ -124,26 +139,26 @@ func (p *Provider) Create(
 
 		case errors.Is(err, oxide.ErrInsufficientCapacity):
 
-			p.abandonDisks(ctx, ownedDiskNames, err)
+			p.abandonDisks(ctx, plannedDisks, err)
 			return nil, fmt.Errorf(
 				"unable to create instance %s, %w, %w", name, ErrInsufficientCapacity, err,
 			)
 		case errors.Is(err, oxide.ErrObjectAlreadyExists):
 
-			return p.adopt(ctx, name, createdDiskNames, ownedDiskNames, opts)
+			return p.adopt(ctx, name, plannedDisks, opts)
 		case ambiguous(ctx, err):
 
 			created, found := p.findInstance(ctx, name)
 			if !found {
-				p.abandonDisks(ctx, ownedDiskNames, err)
+				p.abandonDisks(ctx, plannedDisks, err)
 				return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 			}
 
 			return p.adoptInstance(
-				ctx, created, createdDiskNames, ownedDiskNames, opts, true,
+				ctx, created, plannedDisks, opts, true,
 			)
 		default:
-			p.abandonDisks(ctx, ownedDiskNames, err)
+			p.abandonDisks(ctx, plannedDisks, err)
 			return nil, fmt.Errorf("unable to create instance %s, %w", name, err)
 		}
 	}
@@ -151,21 +166,21 @@ func (p *Provider) Create(
 
 	settled, err := p.awaitSettled(ctx, created)
 	if err != nil {
-		p.abandonUnlessStuck(ctx, created.Id, ownedDiskNames, err)
+		p.abandonUnlessStuck(ctx, created.Id, opts.Owner, plannedDisks, err)
 		return nil, err
 	}
 	created = settled
 
 	if err := p.joinAffinityGroups(ctx, created.Id, opts.AffinityGroups); err != nil {
 
-		p.abandon(ctx, created.Id, ownedDiskNames, err)
+		p.abandon(ctx, created.Id, opts.Owner, plannedDisks, err)
 		return nil, err
 	}
 
 	log.FromContext(ctx).V(1).Info("starting instance", "instance", params.Body.Name)
 	started, err := p.start(ctx, created.Id)
 	if err != nil {
-		p.abandon(ctx, created.Id, ownedDiskNames, err)
+		p.abandon(ctx, created.Id, opts.Owner, plannedDisks, err)
 		return nil, err
 	}
 	log.FromContext(ctx).V(1).Info("instance started", "instance", params.Body.Name)
@@ -180,38 +195,70 @@ func (p *Provider) Delete(ctx context.Context, ref string, teardown Teardown) er
 	})
 	if err != nil {
 		if errors.Is(err, oxide.ErrObjectNotFound) {
-
-			if diskErr := p.deleteDisks(ctx, p.ownedDisks(ctx, teardown)); diskErr != nil {
+			disks, diskErr := p.ownedTeardownDisks(ctx, teardown)
+			if diskErr != nil {
+				return diskErr
+			}
+			if diskErr = p.deleteOwnedDisks(ctx, disks); diskErr != nil {
 				return diskErr
 			}
 			return ErrNotFound
 		}
 		return fmt.Errorf("unable to view the instance, %w", err)
 	}
+	if err := ownership.Verify(instance.Description, teardown.Owner); err != nil {
+		p.rejectOwnership(ctx, "delete", "instance", instance.Id, string(instance.Name), err)
+		return err
+	}
 
-	disks := p.attachedDisks(ctx, instance, teardown)
+	disks, err := p.ownedAttachedDisks(ctx, instance, teardown.Owner)
+	if err != nil {
+		return err
+	}
+	planned, err := p.ownedTeardownDisks(ctx, teardown)
+	if err != nil {
+		return err
+	}
+	disks = appendOwnedDisks(disks, planned...)
 
 	if err := p.stop(ctx, instance); err != nil {
 		if errors.Is(err, ErrNotFound) {
 
 			p.notifyReleased(ctx, instance)
-			if diskErr := p.deleteDisks(ctx, disks); diskErr != nil {
+			if diskErr := p.deleteOwnedDisks(ctx, disks); diskErr != nil {
 				return diskErr
 			}
 			return ErrNotFound
 		}
 		return err
 	}
+	current, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
+		Instance: oxide.NameOrId(instance.Id),
+	})
+	if err != nil {
+		if errors.Is(err, oxide.ErrObjectNotFound) {
+			p.notifyReleased(ctx, instance)
+			if diskErr := p.deleteOwnedDisks(ctx, disks); diskErr != nil {
+				return diskErr
+			}
+			return ErrNotFound
+		}
+		return fmt.Errorf("unable to re-view the instance before deletion, %w", err)
+	}
+	if err := ownership.Verify(current.Description, teardown.Owner); err != nil {
+		p.rejectOwnership(ctx, "delete", "instance", current.Id, string(current.Name), err)
+		return err
+	}
 
 	if err := p.ox.InstanceDelete(ctx, oxide.InstanceDeleteParams{
-		Instance: oxide.NameOrId(instance.Id),
+		Instance: oxide.NameOrId(current.Id),
 	}); err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
 		return fmt.Errorf("unable to delete the instance, %w", err)
 	}
 
 	p.notifyReleased(ctx, instance)
 
-	return p.deleteDisks(ctx, disks)
+	return p.deleteOwnedDisks(ctx, disks)
 }
 
 func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance) {
@@ -227,7 +274,7 @@ func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance)
 func (p *Provider) ensureDisks(
 	ctx context.Context,
 	body *oxide.InstanceCreate,
-	owned []string,
+	owner ownership.Marker,
 ) error {
 	specs := diskCreateSpecs(body)
 	pre := make([]*oxide.InstanceDiskAttachmentCreate, 0, len(specs))
@@ -242,13 +289,9 @@ func (p *Provider) ensureDisks(
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	for _, spec := range pre {
-		group.Go(func() error { return p.ensureDisk(groupCtx, spec, string(body.Name)) })
+		group.Go(func() error { return p.ensureDisk(groupCtx, spec, string(body.Name), owner) })
 	}
 	if err := group.Wait(); err != nil {
-
-		if !errors.Is(err, ErrStuckLaunchResource) {
-			p.abandonDisks(ctx, owned, err)
-		}
 		return err
 	}
 
@@ -271,8 +314,13 @@ func (p *Provider) ensureDisk(
 	ctx context.Context,
 	spec *oxide.InstanceDiskAttachmentCreate,
 	instanceName string,
+	owner ownership.Marker,
 ) error {
 	name := string(spec.Name)
+	expected, err := expectedDiskMarker(spec.Description, owner)
+	if err != nil {
+		return err
+	}
 
 	for attempt := 0; ; attempt++ {
 		log.FromContext(ctx).V(1).Info("Calling DiskCreate", "disk", spec.Name)
@@ -286,6 +334,10 @@ func (p *Provider) ensureDisk(
 			},
 		})
 		if err == nil {
+			if err := ownership.Verify(created.Description, expected); err != nil {
+				p.rejectOwnership(ctx, "adopt", "disk", created.Id, string(created.Name), err)
+				return err
+			}
 			if err := p.waitForDiskReady(ctx, created); err != nil {
 
 				return err
@@ -306,10 +358,14 @@ func (p *Provider) ensureDisk(
 			if !found {
 				return fmt.Errorf("unable to create disk %s, %w", name, err)
 			}
+			if err := ownership.Verify(existing.Description, expected); err != nil {
+				p.rejectOwnership(ctx, "adopt", "disk", existing.Id, string(existing.Name), err)
+				return err
+			}
 			return p.waitForDiskReady(ctx, existing)
 
 		case errors.Is(err, oxide.ErrObjectAlreadyExists) && attempt == 0:
-			replace, err := p.adoptDisk(ctx, spec, instanceName)
+			replace, err := p.adoptDisk(ctx, spec, instanceName, expected)
 			if err != nil {
 				return err
 			}
@@ -327,6 +383,7 @@ func (p *Provider) adoptDisk(
 	ctx context.Context,
 	spec *oxide.InstanceDiskAttachmentCreate,
 	instanceName string,
+	expected ownership.Marker,
 ) (bool, error) {
 	name := string(spec.Name)
 	log.FromContext(ctx).V(1).Info("disk already exists, adopting it", "disk", name)
@@ -343,6 +400,10 @@ func (p *Provider) adoptDisk(
 			)
 		}
 		return false, fmt.Errorf("unable to view existing disk %s, %w", name, err)
+	}
+	if err := ownership.Verify(existing.Description, expected); err != nil {
+		p.rejectOwnership(ctx, "adopt", "disk", existing.Id, string(existing.Name), err)
+		return false, err
 	}
 
 	if attached, ok := existing.State.AsAttached(); ok && attached.Instance != "" {
@@ -365,7 +426,7 @@ func (p *Provider) adoptDisk(
 		return false, p.waitForDiskReady(ctx, existing)
 
 	default:
-		if err := p.deleteDisk(ctx, existing.Id); err != nil {
+		if err := p.DeleteOwnedDisk(ctx, existing.Id, expected); err != nil {
 			return false, fmt.Errorf(
 				"disk %s already exists in state %q and could not be removed, %w",
 				name, state, err,
@@ -484,16 +545,16 @@ func (p *Provider) awaitSettled(
 	return nil, err
 }
 
-func (p *Provider) abandonDisks(ctx context.Context, names []string, cause error) {
-	for _, name := range names {
-		if name == "" {
+func (p *Provider) abandonDisks(ctx context.Context, disks []OwnedDisk, cause error) {
+	for _, disk := range disks {
+		if disk.ID == "" {
 			continue
 		}
-		if err := p.deleteDisk(ctx, name); err != nil {
+		if err := p.DeleteOwnedDisk(ctx, disk.ID, disk.Marker); err != nil {
 			log.FromContext(ctx).Error(
 				err,
 				"unable to clean up a disk whose instance did not launch",
-				"disk", name,
+				"disk", disk.ID,
 				"cause", cause.Error(),
 			)
 		}
@@ -503,8 +564,7 @@ func (p *Provider) abandonDisks(ctx context.Context, names []string, cause error
 func (p *Provider) adopt(
 	ctx context.Context,
 	name string,
-	createdDiskNames []string,
-	ownedDiskNames []string,
+	plannedDisks []OwnedDisk,
 	opts Options,
 ) (*oxide.Instance, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
@@ -523,18 +583,22 @@ func (p *Provider) adopt(
 		return nil, fmt.Errorf("unable to view existing instance %s, %w", name, err)
 	}
 
-	return p.adoptInstance(ctx, instance, createdDiskNames, ownedDiskNames, opts, false)
+	return p.adoptInstance(ctx, instance, plannedDisks, opts, false)
 }
 
 func (p *Provider) adoptInstance(
 	ctx context.Context,
 	instance *oxide.Instance,
-	createdDiskNames []string,
-	ownedDiskNames []string,
+	plannedDisks []OwnedDisk,
 	opts Options,
 	sameLaunch bool,
 ) (*oxide.Instance, error) {
 	name := string(instance.Name)
+	if err := ownership.Verify(instance.Description, opts.Owner); err != nil {
+		p.rejectOwnership(ctx, "adopt", "instance", instance.Id, name, err)
+		p.abandonDisks(ctx, plannedDisks, err)
+		return nil, err
+	}
 
 	if instance.RunState == oxide.InstanceStateCreating {
 		settled, err := p.awaitSettled(ctx, instance)
@@ -555,22 +619,22 @@ func (p *Provider) adoptInstance(
 		oxide.InstanceStateStarting,
 		oxide.InstanceStateRebooting,
 		oxide.InstanceStateMigrating:
-		p.abandonUnusedDisks(ctx, createdDiskNames, sameLaunch)
+		p.abandonUnusedDisks(ctx, plannedDisks, sameLaunch)
 		return instance, nil
 
 	case oxide.InstanceStateStopped:
 
 		if err := p.joinAffinityGroups(ctx, instance.Id, opts.AffinityGroups); err != nil {
-			p.abandon(ctx, instance.Id, ownedDiskNames, err)
+			p.abandon(ctx, instance.Id, opts.Owner, plannedDisks, err)
 			return nil, err
 		}
 		started, err := p.start(ctx, instance.Id)
 		if err != nil {
 
-			p.abandon(ctx, instance.Id, ownedDiskNames, err)
+			p.abandon(ctx, instance.Id, opts.Owner, plannedDisks, err)
 			return nil, err
 		}
-		p.abandonUnusedDisks(ctx, createdDiskNames, sameLaunch)
+		p.abandonUnusedDisks(ctx, plannedDisks, sameLaunch)
 		return started, nil
 
 	default:
@@ -578,7 +642,7 @@ func (p *Provider) adoptInstance(
 			"instance %s already exists in run state %q and cannot be adopted",
 			name, instance.RunState,
 		)
-		if err := p.Delete(ctx, instance.Id, teardownFor(ownedDiskNames)); err != nil &&
+		if err := p.Delete(ctx, instance.Id, Teardown{Owner: opts.Owner}); err != nil &&
 			!errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("%w, and it could not be terminated, %w", abandonErr, err)
 		}
@@ -692,11 +756,17 @@ func (p *Provider) stop(ctx context.Context, instance *oxide.Instance) error {
 	return nil
 }
 
-func (p *Provider) abandon(ctx context.Context, ref string, diskNames []string, cause error) {
+func (p *Provider) abandon(
+	ctx context.Context,
+	ref string,
+	owner ownership.Marker,
+	disks []OwnedDisk,
+	cause error,
+) {
 	if err := p.Delete(
 		ctx,
 		ref,
-		teardownFor(diskNames),
+		Teardown{Owner: owner},
 	); err != nil &&
 		!errors.Is(err, ErrNotFound) {
 		log.FromContext(ctx).Error(
@@ -706,23 +776,25 @@ func (p *Provider) abandon(ctx context.Context, ref string, diskNames []string, 
 			"cause", cause.Error(),
 		)
 	}
+	p.abandonDisks(ctx, disks, cause)
 }
 
-func (p *Provider) abandonUnusedDisks(ctx context.Context, diskNames []string, sameLaunch bool) {
-	if sameLaunch || len(diskNames) == 0 {
+func (p *Provider) abandonUnusedDisks(ctx context.Context, disks []OwnedDisk, sameLaunch bool) {
+	if sameLaunch || len(disks) == 0 {
 		return
 	}
 	log.FromContext(ctx).V(1).Info(
 		"removing the disks this attempt created, having adopted an instance attached to another attempt's",
-		"disks", diskNames,
+		"disks", diskIDs(disks),
 	)
-	p.abandonDisks(ctx, diskNames, errors.New("the launch adopted an existing instance"))
+	p.abandonDisks(ctx, disks, errors.New("the launch adopted an existing instance"))
 }
 
 func (p *Provider) abandonUnlessStuck(
 	ctx context.Context,
 	ref string,
-	diskNames []string,
+	owner ownership.Marker,
+	disks []OwnedDisk,
 	cause error,
 ) {
 	if errors.Is(cause, ErrStuckLaunchResource) {
@@ -733,7 +805,7 @@ func (p *Provider) abandonUnlessStuck(
 		)
 		return
 	}
-	p.abandon(ctx, ref, diskNames, cause)
+	p.abandon(ctx, ref, owner, disks, cause)
 }
 
 func (p *Provider) findInstance(ctx context.Context, name string) (*oxide.Instance, bool) {
@@ -790,75 +862,54 @@ func ambiguous(ctx context.Context, err error) bool {
 	return strings.Contains(err.Error(), sendFailure)
 }
 
-// DeleteDisks removes disks by name or ID, reporting the failures together.
-func (p *Provider) DeleteDisks(ctx context.Context, disks []string) error {
-	return p.deleteDisks(ctx, disks)
-}
-
-func (p *Provider) attachedDisks(
+func (p *Provider) ownedAttachedDisks(
 	ctx context.Context,
 	instance *oxide.Instance,
-	teardown Teardown,
-) []string {
-	refs := []string{}
-	seen := map[string]struct{}{}
-	add := func(ref string) {
-		if ref == "" {
-			return
-		}
-		if _, ok := seen[ref]; ok {
-			return
-		}
-		seen[ref] = struct{}{}
-		refs = append(refs, ref)
-	}
-
-	if instance.BootDiskId != "" {
-		add(instance.BootDiskId)
-	} else {
-		add(teardown.BootDiskName)
-	}
-
-	for _, name := range p.disksMatchingPrefix(ctx, teardown.DiskPrefix) {
-		add(name)
-	}
-
+	expected ownership.Marker,
+) ([]OwnedDisk, error) {
 	attached, err := p.ox.InstanceDiskListAllPages(
 		ctx,
 		oxide.InstanceDiskListParams{Instance: oxide.NameOrId(instance.Id)},
 	)
 	if err != nil {
-		log.FromContext(ctx).V(1).Info(
-			"unable to list the disks attached to the instance, deleting the disks named by the plan only",
-			"instance-id", instance.Id,
-			"reason", err.Error(),
-		)
-		return refs
+		return nil, fmt.Errorf("unable to list disks attached to instance %s, %w", instance.Id, err)
 	}
+	var owned []OwnedDisk
 	for _, disk := range attached {
-		add(disk.Id)
+		marker, verifyErr := verifyNodeClaimDisk(disk.Description, expected)
+		if verifyErr != nil {
+			p.rejectOwnership(ctx, "cleanup", "disk", disk.Id, string(disk.Name), verifyErr)
+			log.FromContext(ctx).Info(
+				"leaving an attached disk intact because its ownership could not be verified",
+				"disk-id", disk.Id,
+				"disk", disk.Name,
+				"instance-id", instance.Id,
+			)
+			continue
+		}
+		owned = appendOwnedDisks(owned, OwnedDisk{ID: disk.Id, Marker: marker})
 	}
-	return refs
+	return owned, nil
 }
 
-func (p *Provider) deleteDisks(ctx context.Context, disks []string) error {
+func (p *Provider) deleteOwnedDisks(ctx context.Context, disks []OwnedDisk) error {
 	var errs []error
 	for _, disk := range disks {
-		if err := p.deleteDisk(ctx, disk); err != nil {
+		if err := p.DeleteOwnedDisk(ctx, disk.ID, disk.Marker); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (p *Provider) deleteDisk(ctx context.Context, disk string) error {
-	if disk == "" {
+// DeleteOwnedDisk re-reads and verifies a disk immediately before deleting it by immutable ID.
+func (p *Provider) DeleteOwnedDisk(
+	ctx context.Context,
+	ref string,
+	expected ownership.Marker,
+) error {
+	if ref == "" {
 		return nil
-	}
-
-	params := oxide.DiskDeleteParams{
-		Disk:    oxide.NameOrId(disk),
-		Project: p.projectFor(disk),
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, diskDeleteTimeout)
@@ -872,8 +923,24 @@ func (p *Provider) deleteDisk(ctx context.Context, disk string) error {
 		func(ctx context.Context) (bool, error) {
 			attemptCtx, cancelAttempt := context.WithTimeout(ctx, diskDeleteAttemptTimeout)
 			defer cancelAttempt()
+			disk, err := p.ox.DiskView(attemptCtx, oxide.DiskViewParams{
+				Disk: oxide.NameOrId(ref), Project: p.projectFor(ref),
+			})
+			if errors.Is(err, oxide.ErrObjectNotFound) {
+				return true, nil
+			}
+			if err != nil {
+				lastErr = err
+				return false, nil
+			}
+			if err := ownership.Verify(disk.Description, expected); err != nil {
+				p.rejectOwnership(ctx, "delete", "disk", disk.Id, string(disk.Name), err)
+				return false, err
+			}
 
-			err := p.ox.DiskDelete(attemptCtx, params)
+			err = p.ox.DiskDelete(attemptCtx, oxide.DiskDeleteParams{
+				Disk: oxide.NameOrId(disk.Id),
+			})
 
 			if err == nil || errors.Is(err, oxide.ErrObjectNotFound) {
 				return true, nil
@@ -881,7 +948,7 @@ func (p *Provider) deleteDisk(ctx context.Context, disk string) error {
 			lastErr = err
 			log.FromContext(ctx).V(1).Info(
 				"disk deletion failed, retrying",
-				"disk", disk,
+				"disk", ref,
 				"reason", err.Error(),
 			)
 			return false, nil
@@ -891,7 +958,7 @@ func (p *Provider) deleteDisk(ctx context.Context, disk string) error {
 		if wait.Interrupted(err) && lastErr != nil {
 			err = lastErr
 		}
-		return fmt.Errorf("unable to delete disk %s, %w", disk, err)
+		return fmt.Errorf("unable to delete disk %s, %w", ref, err)
 	}
 	return nil
 }
@@ -910,24 +977,6 @@ func diskNames(body *oxide.InstanceCreate) []string {
 		names = append(names, string(spec.Name))
 	}
 	return names
-}
-
-func appendUnique(dst []string, refs ...string) []string {
-	seen := make(map[string]struct{}, len(dst)+len(refs))
-	for _, ref := range dst {
-		seen[ref] = struct{}{}
-	}
-	for _, ref := range refs {
-		if ref == "" {
-			continue
-		}
-		if _, ok := seen[ref]; ok {
-			continue
-		}
-		seen[ref] = struct{}{}
-		dst = append(dst, ref)
-	}
-	return dst
 }
 
 func diskCreateSpecs(body *oxide.InstanceCreate) []*oxide.InstanceDiskAttachmentCreate {
@@ -985,56 +1034,165 @@ func deletable(state oxide.InstanceState) bool {
 
 // Teardown is how a delete finds the resources a launch created.
 type Teardown struct {
+	// Owner is the expected owner of the instance and its NodeClaim-owned disks.
+	Owner ownership.Marker
 	// BootDiskName is the name the boot disk was created with, for a launch whose boot disk is not under DiskPrefix.
 	BootDiskName string
 	// DiskPrefix is the prefix this launch named its disks with.
 	DiskPrefix string
 }
 
-func teardownFor(diskNames []string) Teardown {
-	teardown := Teardown{}
-	if len(diskNames) > 0 {
-		teardown.BootDiskName = diskNames[0]
-	}
-	return teardown
-}
-
-func (p *Provider) ownedDisks(ctx context.Context, teardown Teardown) []string {
-	names := []string{}
+func (p *Provider) ownedTeardownDisks(
+	ctx context.Context,
+	teardown Teardown,
+) ([]OwnedDisk, error) {
+	var candidates []oxide.Disk
 	if teardown.BootDiskName != "" {
-		names = append(names, teardown.BootDiskName)
+		disk, err := p.ox.DiskView(ctx, oxide.DiskViewParams{
+			Disk: oxide.NameOrId(teardown.BootDiskName), Project: oxide.NameOrId(p.project),
+		})
+		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
+			return nil, fmt.Errorf("unable to view boot disk candidate %s, %w", teardown.BootDiskName, err)
+		}
+		if err == nil {
+			candidates = append(candidates, *disk)
+		}
 	}
-	return append(names, p.disksMatchingPrefix(ctx, teardown.DiskPrefix)...)
-}
-
-func (p *Provider) disksMatchingPrefix(ctx context.Context, prefix string) []string {
-	if prefix == "" {
-		return nil
+	if teardown.DiskPrefix == "" {
+		return p.verifyDiskCandidates(ctx, candidates, teardown.Owner), nil
 	}
 	disks, err := p.ox.DiskListAllPages(ctx, oxide.DiskListParams{
 		Project: oxide.NameOrId(p.project),
 	})
 	if err != nil {
-		log.FromContext(ctx).V(1).Info(
-			"unable to list the project's disks, so any disk this launch created but never attached is left behind",
-			"prefix", prefix,
-			"reason", err.Error(),
-		)
-		return nil
+		return nil, fmt.Errorf("unable to list disk candidates with prefix %s, %w", teardown.DiskPrefix, err)
 	}
-
-	var names []string
 	for _, disk := range disks {
-		if !strings.HasPrefix(string(disk.Name), prefix) {
+		if !strings.HasPrefix(string(disk.Name), teardown.DiskPrefix) {
 			continue
 		}
-		if attached, ok := disk.State.AsAttached(); ok && attached.Instance != "" {
-
-			continue
-		}
-		names = append(names, disk.Id)
+		candidates = append(candidates, disk)
 	}
-	return names
+	return p.verifyDiskCandidates(ctx, candidates, teardown.Owner), nil
+}
+
+func (p *Provider) verifyDiskCandidates(
+	ctx context.Context,
+	candidates []oxide.Disk,
+	expected ownership.Marker,
+) []OwnedDisk {
+	var owned []OwnedDisk
+	for i := range candidates {
+		disk := &candidates[i]
+		marker, err := verifyNodeClaimDisk(disk.Description, expected)
+		if err != nil {
+			p.rejectOwnership(ctx, "cleanup", "disk", disk.Id, string(disk.Name), err)
+			continue
+		}
+		owned = appendOwnedDisks(owned, OwnedDisk{ID: disk.Id, Marker: marker})
+	}
+	return owned
+}
+
+func plannedOwnedDisks(
+	body *oxide.InstanceCreate,
+	owner ownership.Marker,
+) ([]OwnedDisk, error) {
+	var owned []OwnedDisk
+	for _, spec := range diskCreateSpecs(body) {
+		marker, err := expectedDiskMarker(spec.Description, owner)
+		if err != nil {
+			return nil, err
+		}
+		owned = appendOwnedDisks(owned, OwnedDisk{ID: string(spec.Name), Marker: marker})
+	}
+	return owned, nil
+}
+
+func expectedDiskMarker(description string, owner ownership.Marker) (ownership.Marker, error) {
+	return verifyNodeClaimDisk(description, owner)
+}
+
+func verifyNodeClaimDisk(
+	description string,
+	owner ownership.Marker,
+) (ownership.Marker, error) {
+	marker, ok := ownership.Parse(description)
+	if !ok {
+		expected := owner
+		expected.Kind = ownership.KindBootDisk
+		return ownership.Marker{}, ownership.Verify(description, expected)
+	}
+	if marker.Kind != ownership.KindBootDisk && marker.Kind != ownership.KindDataDisk {
+		return ownership.Marker{}, &ownership.ErrOwnershipConflict{
+			Reason: ownership.ReasonWrongKind, Expected: owner, Observed: marker,
+		}
+	}
+	expected := owner
+	expected.Kind = marker.Kind
+	if err := ownership.Verify(description, expected); err != nil {
+		return ownership.Marker{}, err
+	}
+	return marker, nil
+}
+
+func appendOwnedDisks(dst []OwnedDisk, disks ...OwnedDisk) []OwnedDisk {
+	seen := make(map[string]struct{}, len(dst)+len(disks))
+	for _, disk := range dst {
+		seen[disk.ID] = struct{}{}
+	}
+	for _, disk := range disks {
+		if disk.ID == "" {
+			continue
+		}
+		if _, ok := seen[disk.ID]; ok {
+			continue
+		}
+		seen[disk.ID] = struct{}{}
+		dst = append(dst, disk)
+	}
+	return dst
+}
+
+func diskIDs(disks []OwnedDisk) []string {
+	ids := make([]string, 0, len(disks))
+	for _, disk := range disks {
+		ids = append(ids, disk.ID)
+	}
+	return ids
+}
+
+func (p *Provider) rejectOwnership(
+	ctx context.Context,
+	operation string,
+	resourceKind string,
+	id string,
+	name string,
+	err error,
+) {
+	conflict, ok := ownership.Conflict(err)
+	if !ok {
+		return
+	}
+	metrics.OwnershipRejections.WithLabelValues(
+		operation, resourceKind, string(conflict.Reason),
+	).Inc()
+	log.FromContext(ctx).Info(
+		"rejected an Oxide resource whose ownership could not be verified",
+		"operation", operation,
+		"resource-kind", resourceKind,
+		"resource-id", id,
+		"resource", name,
+		"reason", conflict.Reason,
+		"expected-cluster-uid", conflict.Expected.ClusterUID,
+		"observed-cluster-uid", conflict.Observed.ClusterUID,
+		"expected-nodeclaim", conflict.Expected.NodeClaimName,
+		"observed-nodeclaim", conflict.Observed.NodeClaimName,
+		"expected-nodeclaim-uid", conflict.Expected.NodeClaimUID,
+		"observed-nodeclaim-uid", conflict.Observed.NodeClaimUID,
+		"expected-kind", conflict.Expected.Kind,
+		"observed-kind", conflict.Observed.Kind,
+	)
 }
 
 func (p *Provider) instanceIs(ctx context.Context, id, name string) bool {

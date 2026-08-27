@@ -16,6 +16,7 @@ limitations under the License.
 package ownership
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -29,11 +30,50 @@ const (
 
 type Kind string
 
+// RejectionReason is a low-cardinality explanation for an ownership mismatch.
+type RejectionReason string
+
 const (
 	KindInstance Kind = "instance"
 	KindBootDisk Kind = "boot-disk"
 	KindDataDisk Kind = "data-disk"
 )
+
+const (
+	ReasonUnmarked       RejectionReason = "unmarked"
+	ReasonMalformed      RejectionReason = "malformed"
+	ReasonForeignCluster RejectionReason = "foreign_cluster"
+	ReasonWrongNodeClaim RejectionReason = "wrong_nodeclaim"
+	ReasonWrongKind      RejectionReason = "wrong_kind"
+)
+
+// ErrOwnershipConflict reports only marker fields that are safe to expose in diagnostics.
+type ErrOwnershipConflict struct {
+	Reason   RejectionReason
+	Expected Marker
+	Observed Marker
+}
+
+func (e *ErrOwnershipConflict) Error() string {
+	return fmt.Sprintf(
+		"ownership conflict (%s): expected cluster=%q nodeclaim=%q name=%q kind=%q, observed cluster=%q nodeclaim=%q name=%q kind=%q",
+		e.Reason,
+		e.Expected.ClusterUID,
+		e.Expected.NodeClaimUID,
+		e.Expected.NodeClaimName,
+		e.Expected.Kind,
+		e.Observed.ClusterUID,
+		e.Observed.NodeClaimUID,
+		e.Observed.NodeClaimName,
+		e.Observed.Kind,
+	)
+}
+
+// Conflict returns the typed ownership conflict wrapped by err, if any.
+func Conflict(err error) (*ErrOwnershipConflict, bool) {
+	var conflict *ErrOwnershipConflict
+	return conflict, errors.As(err, &conflict)
+}
 
 // Marker identifies the cluster and immutable NodeClaim incarnation that owns one Oxide resource.
 type Marker struct {
@@ -137,6 +177,76 @@ func Parse(description string) (Marker, bool) {
 		NodeClaimName: name,
 		Kind:          Kind(kind),
 	}, true
+}
+
+// Verify requires a description marker to exactly match the expected owner.
+func Verify(description string, expected Marker) error {
+	observed, err := parseForVerification(description, expected)
+	if err != nil {
+		return err
+	}
+	if expected.ClusterUID == "" || expected.NodeClaimUID == "" ||
+		expected.NodeClaimName == "" || !validKind(expected.Kind) {
+		return &ErrOwnershipConflict{
+			Reason:   ReasonMalformed,
+			Expected: expected,
+			Observed: observed,
+		}
+	}
+	if observed.ClusterUID != expected.ClusterUID {
+		return &ErrOwnershipConflict{Reason: ReasonForeignCluster, Expected: expected, Observed: observed}
+	}
+	if observed.NodeClaimUID != expected.NodeClaimUID ||
+		observed.NodeClaimName != expected.NodeClaimName {
+		return &ErrOwnershipConflict{Reason: ReasonWrongNodeClaim, Expected: expected, Observed: observed}
+	}
+	if observed.Kind != expected.Kind {
+		return &ErrOwnershipConflict{Reason: ReasonWrongKind, Expected: expected, Observed: observed}
+	}
+	return nil
+}
+
+// VerifyClusterResource verifies the cluster and kind of a NodeClaim-owned resource.
+func VerifyClusterResource(
+	description string,
+	clusterUID types.UID,
+	kind Kind,
+) (Marker, error) {
+	expected := Marker{ClusterUID: clusterUID, Kind: kind}
+	observed, err := parseForVerification(description, expected)
+	if err != nil {
+		return Marker{}, err
+	}
+	if clusterUID == "" || !validKind(kind) {
+		return Marker{}, &ErrOwnershipConflict{
+			Reason:   ReasonMalformed,
+			Expected: expected,
+			Observed: observed,
+		}
+	}
+	if observed.ClusterUID != clusterUID {
+		return Marker{}, &ErrOwnershipConflict{
+			Reason: ReasonForeignCluster, Expected: expected, Observed: observed,
+		}
+	}
+	if observed.Kind != kind {
+		return Marker{}, &ErrOwnershipConflict{
+			Reason: ReasonWrongKind, Expected: expected, Observed: observed,
+		}
+	}
+	return observed, nil
+}
+
+func parseForVerification(description string, expected Marker) (Marker, error) {
+	observed, ok := Parse(description)
+	if ok {
+		return observed, nil
+	}
+	reason := ReasonUnmarked
+	if strings.HasPrefix(strings.TrimSpace(description), prefix) {
+		reason = ReasonMalformed
+	}
+	return Marker{}, &ErrOwnershipConflict{Reason: reason, Expected: expected}
 }
 
 func field(value, name string) (string, bool) {

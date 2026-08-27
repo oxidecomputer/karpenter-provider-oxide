@@ -69,7 +69,6 @@ type launchBootDisk struct {
 	attachment   oxide.InstanceDiskAttachment
 	name         string
 	storageBytes int64
-	owned        []string
 	acquired     *bootdisk.Acquired
 }
 
@@ -237,6 +236,7 @@ func (c *OxideCloudProvider) Create(
 
 	subnet := nodeClass.Status.Subnets[rand.IntN(len(nodeClass.Status.Subnets))]
 
+	owner := c.owner(nodeClaim)
 	describe := c.ownership(nodeClaim)
 
 	userData, err := bootstrapper.UserData(ctx, nodeClass, bootstrap.Request{
@@ -289,9 +289,8 @@ func (c *OxideCloudProvider) Create(
 			),
 		},
 	}, instance.Options{
-
+		Owner:          owner,
 		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
-		OwnedDisks:     boot.owned,
 	})
 	if err != nil {
 		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, instanceType, request)
@@ -352,7 +351,6 @@ func (c *OxideCloudProvider) bootDisk(
 	}
 	launch.name = acquired.DiskName
 	launch.storageBytes -= plan.Boot.SizeBytes
-	launch.owned = []string{acquired.DiskName}
 	launch.acquired = acquired
 	return launch
 }
@@ -484,13 +482,20 @@ func (c *OxideCloudProvider) resolveLaunched(
 func (c *OxideCloudProvider) ownership(
 	nodeClaim *karpcorev1.NodeClaim,
 ) func(ownership.Kind, string) string {
+	owner := c.owner(nodeClaim)
 	return func(kind ownership.Kind, human string) string {
-		return ownership.Marker{
-			ClusterUID:    c.clusterUID,
-			NodeClaimUID:  nodeClaim.UID,
-			NodeClaimName: nodeClaim.Name,
-			Kind:          kind,
-		}.Description(human)
+		marker := owner
+		marker.Kind = kind
+		return marker.Description(human)
+	}
+}
+
+func (c *OxideCloudProvider) owner(nodeClaim *karpcorev1.NodeClaim) ownership.Marker {
+	return ownership.Marker{
+		ClusterUID:    c.clusterUID,
+		NodeClaimUID:  nodeClaim.UID,
+		NodeClaimName: nodeClaim.Name,
+		Kind:          ownership.KindInstance,
 	}
 }
 
@@ -617,7 +622,9 @@ func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.N
 
 	name := InstanceNamePrefix + nodeClaim.Name
 
-	if err := c.instanceProvider.Delete(ctx, instanceID, teardownFor(nodeClaim, name)); err != nil {
+	if err := c.instanceProvider.Delete(
+		ctx, instanceID, teardownFor(nodeClaim, name, c.owner(nodeClaim)),
+	); err != nil {
 		if errors.Is(err, instance.ErrNotFound) {
 			return cloudprovider.NewNodeClaimNotFoundError(err)
 		}
@@ -627,14 +634,20 @@ func (c *OxideCloudProvider) Delete(ctx context.Context, nodeClaim *karpcorev1.N
 	return cloudprovider.NewNodeClaimNotFoundError(instance.ErrNotFound)
 }
 
-func teardownFor(nodeClaim *karpcorev1.NodeClaim, instanceName string) instance.Teardown {
+func teardownFor(
+	nodeClaim *karpcorev1.NodeClaim,
+	instanceName string,
+	owner ownership.Marker,
+) instance.Teardown {
 	if prefix := nodeClaim.Annotations[v1alpha1.AnnotationDiskPrefix]; prefix != "" {
 		return instance.Teardown{
+			Owner:        owner,
 			BootDiskName: nodeClaim.Annotations[v1alpha1.AnnotationBootDisk],
 			DiskPrefix:   prefix,
 		}
 	}
 	return instance.Teardown{
+		Owner:        owner,
 		BootDiskName: instanceName,
 		DiskPrefix:   storage.LegacyPrefix(instanceName),
 	}
@@ -660,7 +673,16 @@ func (c *OxideCloudProvider) Get(
 		}
 		return nil, fmt.Errorf("unable to get instance with instance ID %s, %w", instanceID, err)
 	}
-	nodeClaim, err := c.InstanceToNodeClaim(oxideInstance, nil, nil)
+	marker, verifyErr := ownership.VerifyClusterResource(
+		oxideInstance.Description, c.clusterUID, ownership.KindInstance,
+	)
+	if verifyErr != nil {
+		c.rejectOwnership(ctx, "get", "instance", oxideInstance.Id, string(oxideInstance.Name), verifyErr)
+		return nil, cloudprovider.NewNodeClaimNotFoundError(verifyErr)
+	}
+	nodeClaim, err := c.InstanceToNodeClaim(oxideInstance, nil, &karpcorev1.NodeClaim{
+		ObjectMeta: v1.ObjectMeta{Name: marker.NodeClaimName},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -743,13 +765,57 @@ func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim,
 		if !strings.HasPrefix(string(oxideInstance.Name), InstanceNamePrefix) {
 			continue
 		}
-		nodeClaim, err := c.InstanceToNodeClaim(&oxideInstance, nil, nil)
+		marker, verifyErr := ownership.VerifyClusterResource(
+			oxideInstance.Description, c.clusterUID, ownership.KindInstance,
+		)
+		if verifyErr != nil {
+			c.rejectOwnership(
+				ctx, "list", "instance", oxideInstance.Id, string(oxideInstance.Name), verifyErr,
+			)
+			continue
+		}
+		nodeClaim, err := c.InstanceToNodeClaim(&oxideInstance, nil, &karpcorev1.NodeClaim{
+			ObjectMeta: v1.ObjectMeta{Name: marker.NodeClaimName},
+		})
 		if err != nil {
 			return nil, err
 		}
 		nodeClaims = append(nodeClaims, nodeClaim)
 	}
 	return nodeClaims, nil
+}
+
+func (c *OxideCloudProvider) rejectOwnership(
+	ctx context.Context,
+	operation string,
+	resourceKind string,
+	id string,
+	name string,
+	err error,
+) {
+	conflict, ok := ownership.Conflict(err)
+	if !ok {
+		return
+	}
+	metrics.OwnershipRejections.WithLabelValues(
+		operation, resourceKind, string(conflict.Reason),
+	).Inc()
+	log.FromContext(ctx).Info(
+		"rejected an Oxide resource whose ownership could not be verified",
+		"operation", operation,
+		"resource-kind", resourceKind,
+		"resource-id", id,
+		"resource", name,
+		"reason", conflict.Reason,
+		"expected-cluster-uid", conflict.Expected.ClusterUID,
+		"observed-cluster-uid", conflict.Observed.ClusterUID,
+		"expected-nodeclaim", conflict.Expected.NodeClaimName,
+		"observed-nodeclaim", conflict.Observed.NodeClaimName,
+		"expected-nodeclaim-uid", conflict.Expected.NodeClaimUID,
+		"observed-nodeclaim-uid", conflict.Observed.NodeClaimUID,
+		"expected-kind", conflict.Expected.Kind,
+		"observed-kind", conflict.Observed.Kind,
+	)
 }
 
 // GetInstanceTypes returns instance types supported by the cloudprovider.

@@ -43,8 +43,10 @@ const (
 	reasonLabel = "reason"
 	resultLabel = "result"
 
-	providerLabel  = "provider"
-	nodeClassLabel = "nodeclass"
+	providerLabel     = "provider"
+	nodeClassLabel    = "nodeclass"
+	operationLabel    = "operation"
+	resourceKindLabel = "resource_kind"
 )
 
 // Results of trying to reserve the single trial launch a reopened shape allows.
@@ -356,6 +358,13 @@ var (
 		Name:      "cache_entries",
 		Help:      "Number of cached readings a resource provider currently holds.",
 	}, []string{providerLabel})
+
+	// OwnershipRejections counts resources excluded from lifecycle operations by marker checks.
+	OwnershipRejections = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "karpenter_oxide",
+		Name:      "ownership_rejections_total",
+		Help:      "Number of Oxide resources rejected by ownership verification.",
+	}, []string{operationLabel, resourceKindLabel, reasonLabel})
 )
 
 func init() {
@@ -394,6 +403,7 @@ func init() {
 		ProviderStaleServed,
 		ProviderOldestEntryAge,
 		ProviderCacheEntries,
+		OwnershipRejections,
 	)
 }
 

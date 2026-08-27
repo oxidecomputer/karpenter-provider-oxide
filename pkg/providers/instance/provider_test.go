@@ -10,20 +10,41 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const giB = 1 << 30
 
+var testOwner = ownership.Marker{
+	ClusterUID:    types.UID("cluster-uid"),
+	NodeClaimUID:  types.UID("nodeclaim-uid"),
+	NodeClaimName: "node",
+	Kind:          ownership.KindInstance,
+}
+
+func testOptions() Options { return Options{Owner: testOwner} }
+
+func testDiskMarker(kind ownership.Kind) ownership.Marker {
+	marker := testOwner
+	marker.Kind = kind
+	return marker
+}
+
 type fakeAPI struct {
 	instance *oxide.Instance
 
-	stopped *oxide.Instance
+	stopped  *oxide.Instance
+	disks    map[string]*oxide.Disk
+	listed   []oxide.Disk
+	attached []oxide.Disk
 
 	deleteStatus int
 
-	stops   int
-	deletes int
+	stops       int
+	deletes     int
+	diskDeletes []string
 }
 
 func (f *fakeAPI) server(t *testing.T) *oxide.Client {
@@ -40,7 +61,19 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			writeJSON(t, w, http.StatusAccepted, f.instance)
 
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
-			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
+			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.attached})
+
+		case r.Method == http.MethodGet && path == "disks":
+			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.listed})
+
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "disks/"):
+			ref := strings.TrimPrefix(path, "disks/")
+			disk, ok := f.disks[ref]
+			if !ok {
+				notFound(t, w)
+				return
+			}
+			writeJSON(t, w, http.StatusOK, disk)
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "instances/"):
 			if f.instance == nil {
@@ -59,7 +92,9 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.Method == http.MethodDelete && strings.HasPrefix(path, "disks/"):
-			notFound(t, w)
+			ref := strings.TrimPrefix(path, "disks/")
+			f.diskDeletes = append(f.diskDeletes, ref)
+			w.WriteHeader(http.StatusNoContent)
 
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -156,10 +191,11 @@ func (f *launchAPI) serveDisks(
 			state = oxide.DiskState{Value: &oxide.DiskStateCreating{}}
 		}
 		disk := &oxide.Disk{
-			Id:    fmt.Sprintf("d15c0000-0000-4000-8000-%012d", f.diskCreates),
-			Name:  body.Name,
-			Size:  body.Size,
-			State: state,
+			Id:          fmt.Sprintf("d15c0000-0000-4000-8000-%012d", f.diskCreates),
+			Name:        body.Name,
+			Description: body.Description,
+			Size:        body.Size,
+			State:       state,
 		}
 		f.disks[name] = disk
 		f.disks[disk.Id] = disk
@@ -228,6 +264,7 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 			}
 
 			f.instance = runningInstance()
+			f.instance.Description = body.Description
 			f.instance.RunState = oxide.InstanceStateStopped
 			if f.createdRunState != "" {
 				f.instance.RunState = f.createdRunState
@@ -308,17 +345,19 @@ func apiError(t *testing.T, w http.ResponseWriter, status int, code string) {
 }
 
 func launchParams() oxide.InstanceCreateParams {
+	bootOwner := testOwner
+	bootOwner.Kind = ownership.KindBootDisk
 	return oxide.InstanceCreateParams{
 		Body: &oxide.InstanceCreate{
 			Name:        "karpenter-node",
 			Hostname:    "karpenter-node",
-			Description: "node",
+			Description: testOwner.Description("node"),
 			Ncpus:       8,
 			Memory:      oxide.ByteCount(16 * giB),
 			BootDisk: oxide.InstanceDiskAttachment{
 				Value: &oxide.InstanceDiskAttachmentCreate{
 					Name:        "karpenter-node",
-					Description: "Boot disk",
+					Description: bootOwner.Description("Boot disk"),
 					Size:        oxide.ByteCount(50 * giB),
 					DiskBackend: oxide.DiskBackend{
 						Value: &oxide.DiskBackendDistributed{
@@ -337,7 +376,7 @@ func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	instance, err := p.Create(context.Background(), launchParams(), Options{})
+	instance, err := p.Create(context.Background(), launchParams(), testOptions())
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -357,7 +396,7 @@ func TestCreateReportsACapacityRefusalFromTheStart(t *testing.T) {
 	api := &launchAPI{startError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("error is %v, want insufficient capacity", err)
 	}
@@ -377,7 +416,7 @@ func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	instance, err := p.Create(context.Background(), launchParams(), Options{})
+	instance, err := p.Create(context.Background(), launchParams(), testOptions())
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -394,7 +433,7 @@ func TestCreateProvisionsTheBootDiskBeforeTheInstance(t *testing.T) {
 	api := &launchAPI{}
 	p := NewProvider(api.server(t), "project", nil)
 
-	if _, err := p.Create(context.Background(), launchParams(), Options{}); err != nil {
+	if _, err := p.Create(context.Background(), launchParams(), testOptions()); err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
 
@@ -416,7 +455,7 @@ func TestCreateReportsAStorageRefusalSeparately(t *testing.T) {
 	api := &launchAPI{diskCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 	if !errors.Is(err, ErrInsufficientStorage) {
 		t.Fatalf("create returned %v, want it to wrap %v", err, ErrInsufficientStorage)
 	}
@@ -437,7 +476,7 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	api := &launchAPI{instanceCreateError: "InsufficientCapacity"}
 	p := NewProvider(api.server(t), "project", nil)
 
-	_, err := p.Create(context.Background(), launchParams(), Options{})
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("create returned %v, want it to wrap %v", err, ErrInsufficientCapacity)
 	}
@@ -454,14 +493,15 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	}
 }
 
-func TestCreateRemovesAClaimedBootDiskOnFailure(t *testing.T) {
+func TestCreateLeavesAPoolOwnedBootDiskForItsControllerOnFailure(t *testing.T) {
 	const name = "pooled-boot"
 	api := &launchAPI{
 		instanceCreateError: "InsufficientCapacity",
 		existing: &oxide.Disk{
-			Id:    "d15c0000-0000-4000-8000-0000000000aa",
-			Name:  name,
-			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+			Id:          "d15c0000-0000-4000-8000-0000000000aa",
+			Name:        name,
+			Description: ownership.PoolMarker{ClusterUID: "cluster-uid", BootDiskUID: "pool-record", NodeClassUID: "nodeclass", ConfigHash: "hash"}.Description(),
+			State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
 		},
 	}
 	p := NewProvider(api.server(t), "project", nil)
@@ -470,24 +510,25 @@ func TestCreateRemovesAClaimedBootDiskOnFailure(t *testing.T) {
 		Value: &oxide.InstanceDiskAttachmentAttach{Name: name},
 	}
 
-	_, err := p.Create(context.Background(), params, Options{OwnedDisks: []string{name}})
+	_, err := p.Create(context.Background(), params, testOptions())
 	if !errors.Is(err, ErrInsufficientCapacity) {
 		t.Fatalf("Create() error = %v, want insufficient capacity", err)
 	}
 	if api.diskCreates != 0 {
 		t.Errorf("disk creates = %d, want none", api.diskCreates)
 	}
-	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != name {
-		t.Errorf("disk deletes = %v, want [%s]", api.diskDeletes, name)
+	if len(api.diskDeletes) != 0 {
+		t.Errorf("disk deletes = %v, want the pool disk left intact", api.diskDeletes)
 	}
 }
 
 func TestCreateKeepsAClaimedBootDiskOnSuccess(t *testing.T) {
 	const name = "pooled-boot"
 	api := &launchAPI{existing: &oxide.Disk{
-		Id:    "d15c0000-0000-4000-8000-0000000000aa",
-		Name:  name,
-		State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		Id:          "d15c0000-0000-4000-8000-0000000000aa",
+		Name:        name,
+		Description: ownership.PoolMarker{ClusterUID: "cluster-uid", BootDiskUID: "pool-record", NodeClassUID: "nodeclass", ConfigHash: "hash"}.Description(),
+		State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
 	}}
 	p := NewProvider(api.server(t), "project", nil)
 	params := launchParams()
@@ -498,7 +539,7 @@ func TestCreateKeepsAClaimedBootDiskOnSuccess(t *testing.T) {
 	if _, err := p.Create(
 		context.Background(),
 		params,
-		Options{OwnedDisks: []string{name}},
+		testOptions(),
 	); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -513,15 +554,20 @@ func TestCreateKeepsAClaimedBootDiskOnSuccess(t *testing.T) {
 func TestCreateAdoptsABootDiskLeftBehind(t *testing.T) {
 	api := &launchAPI{
 		existing: &oxide.Disk{
-			Id:    "d15c0000-0000-4000-8000-0000000000ff",
-			Name:  "karpenter-node",
+			Id:   "d15c0000-0000-4000-8000-0000000000ff",
+			Name: "karpenter-node",
+			Description: func() string {
+				marker := testOwner
+				marker.Kind = ownership.KindBootDisk
+				return marker.Description("Boot disk")
+			}(),
 			Size:  oxide.ByteCount(50 * giB),
 			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
 		},
 	}
 	p := NewProvider(api.server(t), "project", nil)
 
-	if _, err := p.Create(context.Background(), launchParams(), Options{}); err != nil {
+	if _, err := p.Create(context.Background(), launchParams(), testOptions()); err != nil {
 		t.Fatalf("create failed with a boot disk left over from an earlier attempt: %v", err)
 	}
 	if len(api.diskDeletes) != 0 {
@@ -534,12 +580,13 @@ func TestCreateAdoptsABootDiskLeftBehind(t *testing.T) {
 
 func runningInstance() *oxide.Instance {
 	return &oxide.Instance{
-		Id:       "e6bff1ff-24fb-49dc-a54e-c6a350cd4d6c",
-		Name:     "karpenter-node",
-		Hostname: "karpenter-node",
-		Ncpus:    8,
-		Memory:   oxide.ByteCount(16 * giB),
-		RunState: oxide.InstanceStateRunning,
+		Id:          "e6bff1ff-24fb-49dc-a54e-c6a350cd4d6c",
+		Name:        "karpenter-node",
+		Hostname:    "karpenter-node",
+		Ncpus:       8,
+		Memory:      oxide.ByteCount(16 * giB),
+		RunState:    oxide.InstanceStateRunning,
+		Description: testOwner.Description("node"),
 	}
 }
 
@@ -556,7 +603,7 @@ func TestDeleteReportsTheCapacityItReleased(t *testing.T) {
 	if err := p.Delete(
 		context.Background(),
 		"karpenter-node",
-		Teardown{BootDiskName: "karpenter-node"},
+		Teardown{Owner: testOwner},
 	); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
@@ -586,7 +633,7 @@ func TestDeleteReportsNothingUntilTheRackConfirms(t *testing.T) {
 	if err := p.Delete(
 		context.Background(),
 		"karpenter-node",
-		Teardown{BootDiskName: "karpenter-node"},
+		Teardown{Owner: testOwner},
 	); err == nil {
 		t.Fatal("delete succeeded despite the API refusing it")
 	}
@@ -609,7 +656,7 @@ func TestDeleteReportsNothingForAnInstanceAlreadyGone(t *testing.T) {
 	err := p.Delete(
 		context.Background(),
 		"karpenter-node",
-		Teardown{BootDiskName: "karpenter-node"},
+		Teardown{Owner: testOwner},
 	)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete returned %v, want %v", err, ErrNotFound)
@@ -629,7 +676,7 @@ func TestDeleteWorksWithoutAReleaseCallback(t *testing.T) {
 	if err := p.Delete(
 		context.Background(),
 		"karpenter-node",
-		Teardown{BootDiskName: "karpenter-node"},
+		Teardown{Owner: testOwner},
 	); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
@@ -645,7 +692,7 @@ func TestCreateJoinsAffinityGroupsBeforeTheStart(t *testing.T) {
 	if _, err := p.Create(
 		context.Background(),
 		launchParams(),
-		Options{AffinityGroups: []string{"group-a", "group-b"}},
+		Options{Owner: testOwner, AffinityGroups: []string{"group-a", "group-b"}},
 	); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -668,7 +715,7 @@ func TestCreateTreatsAnExistingAffinityMembershipAsSuccess(t *testing.T) {
 	if _, err := p.Create(
 		context.Background(),
 		launchParams(),
-		Options{AffinityGroups: []string{"group-a"}},
+		Options{Owner: testOwner, AffinityGroups: []string{"group-a"}},
 	); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -684,7 +731,7 @@ func TestCreateAbandonsTheInstanceWhenAnAffinityJoinFails(t *testing.T) {
 	if _, err := p.Create(
 		context.Background(),
 		launchParams(),
-		Options{AffinityGroups: []string{"group-a"}},
+		Options{Owner: testOwner, AffinityGroups: []string{"group-a"}},
 	); err == nil {
 		t.Fatal("Create() error = nil, want the launch to have failed")
 	}
@@ -705,7 +752,7 @@ func TestCreatePassesAntiAffinityGroupsToTheCreate(t *testing.T) {
 
 	params := launchParams()
 	params.Body.AntiAffinityGroups = []oxide.NameOrId{"spread-a"}
-	if _, err := p.Create(context.Background(), params, Options{}); err != nil {
+	if _, err := p.Create(context.Background(), params, testOptions()); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
@@ -714,5 +761,114 @@ func TestCreatePassesAntiAffinityGroupsToTheCreate(t *testing.T) {
 	}
 	if len(api.affinityJoins) != 0 {
 		t.Errorf("joined %v by a separate call, want none", api.affinityJoins)
+	}
+}
+
+func TestCreateRefusesForeignInstancesWithoutMutatingThem(t *testing.T) {
+	for _, state := range []oxide.InstanceState{
+		oxide.InstanceStateRunning,
+		oxide.InstanceStateFailed,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			api := &launchAPI{instanceCreateError: "ObjectAlreadyExists"}
+			client := api.server(t)
+			api.instance = runningInstance()
+			api.instance.RunState = state
+			foreign := testOwner
+			foreign.ClusterUID = "other-cluster"
+			api.instance.Description = foreign.Description("foreign")
+			p := NewProvider(client, "project", nil)
+
+			_, err := p.Create(context.Background(), launchParams(), testOptions())
+			var conflict *ownership.ErrOwnershipConflict
+			if !errors.As(err, &conflict) || conflict.Reason != ownership.ReasonForeignCluster {
+				t.Fatalf("Create() error = %v, want a foreign-cluster ownership conflict", err)
+			}
+			if api.instance == nil {
+				t.Fatal("the foreign instance was deleted")
+			}
+			if api.starts != 0 || len(api.affinityJoins) != 0 {
+				t.Errorf("foreign instance was mutated: starts=%d affinity joins=%v", api.starts, api.affinityJoins)
+			}
+		})
+	}
+}
+
+func TestCreateRefusesAForeignDiskNameCollision(t *testing.T) {
+	foreign := testDiskMarker(ownership.KindBootDisk)
+	foreign.NodeClaimUID = "other-claim"
+	api := &launchAPI{existing: &oxide.Disk{
+		Id:          "d15c0000-0000-4000-8000-0000000000ff",
+		Name:        "karpenter-node",
+		Description: foreign.Description("foreign"),
+		State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+	}}
+	p := NewProvider(api.server(t), "project", nil)
+
+	_, err := p.Create(context.Background(), launchParams(), testOptions())
+	var conflict *ownership.ErrOwnershipConflict
+	if !errors.As(err, &conflict) || conflict.Reason != ownership.ReasonWrongNodeClaim {
+		t.Fatalf("Create() error = %v, want a wrong-nodeclaim ownership conflict", err)
+	}
+	if len(api.diskDeletes) != 0 {
+		t.Errorf("foreign disk was deleted: %v", api.diskDeletes)
+	}
+	if api.instanceCreates != 0 {
+		t.Errorf("instance creates = %d, want launch stopped at the disk collision", api.instanceCreates)
+	}
+}
+
+func TestDeleteLeavesOperatorAttachedDisksIntact(t *testing.T) {
+	owned := &oxide.Disk{
+		Id:          "d15c0000-0000-4000-8000-000000000001",
+		Name:        "owned",
+		Description: testDiskMarker(ownership.KindBootDisk).Description("owned"),
+		State:       oxide.DiskState{Value: &oxide.DiskStateAttached{Instance: runningInstance().Id}},
+	}
+	operator := &oxide.Disk{
+		Id:          "d15c0000-0000-4000-8000-000000000002",
+		Name:        "operator",
+		Description: "operator attached",
+		State:       oxide.DiskState{Value: &oxide.DiskStateAttached{Instance: runningInstance().Id}},
+	}
+	stopped := runningInstance()
+	stopped.RunState = oxide.InstanceStateStopped
+	api := &fakeAPI{
+		instance: stopped,
+		disks:    map[string]*oxide.Disk{owned.Id: owned, operator.Id: operator},
+		attached: []oxide.Disk{*owned, *operator},
+	}
+	p := NewProvider(api.server(t), "project", nil)
+
+	if err := p.Delete(context.Background(), stopped.Id, Teardown{Owner: testOwner}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != owned.Id {
+		t.Errorf("disk deletes = %v, want only owned disk %s", api.diskDeletes, owned.Id)
+	}
+}
+
+func TestDeleteDoesNotTrustAPrefixWhenTheInstanceIsGone(t *testing.T) {
+	foreign := &oxide.Disk{
+		Id:          "d15c0000-0000-4000-8000-000000000003",
+		Name:        "kd-launch-foreign",
+		Description: "operator disk",
+		State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+	}
+	api := &fakeAPI{
+		disks:  map[string]*oxide.Disk{foreign.Id: foreign},
+		listed: []oxide.Disk{*foreign},
+	}
+	p := NewProvider(api.server(t), "project", nil)
+
+	err := p.Delete(
+		context.Background(), runningInstance().Id,
+		Teardown{Owner: testOwner, DiskPrefix: "kd-launch-"},
+	)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete() error = %v, want ErrNotFound", err)
+	}
+	if len(api.diskDeletes) != 0 {
+		t.Errorf("prefix-matching foreign disk was deleted: %v", api.diskDeletes)
 	}
 }

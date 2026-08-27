@@ -247,15 +247,48 @@ func (p *Provider) View(ctx context.Context, record *v1alpha1.OxideBootDisk) (*o
 }
 
 func (p *Provider) Delete(ctx context.Context, record *v1alpha1.OxideBootDisk) error {
+	expected := ownership.PoolMarker{
+		ClusterUID:   p.clusterUID,
+		BootDiskUID:  record.UID,
+		NodeClassUID: record.Spec.NodeClassRef.UID,
+		ConfigHash:   record.Spec.ConfigHash,
+	}
 	ref := record.Status.ID
-	project := oxide.NameOrId("")
 	if ref == "" {
 		ref = record.Spec.DiskName
+	}
+	return p.deleteOwned(ctx, ref, expected)
+}
+
+func (p *Provider) deleteOwned(
+	ctx context.Context,
+	ref string,
+	expected ownership.PoolMarker,
+) error {
+	project := oxide.NameOrId("")
+	if _, err := uuid.Parse(ref); err != nil {
 		project = oxide.NameOrId(p.project)
 	}
-	err := p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{
+	disk, err := p.ox.DiskView(ctx, oxide.DiskViewParams{
 		Disk: oxide.NameOrId(ref), Project: project,
 	})
+	if errors.Is(err, oxide.ErrObjectNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	marker, ok := ownership.ParsePool(disk.Description)
+	if !ok {
+		return fmt.Errorf("disk %s has no valid boot-pool ownership marker", disk.Name)
+	}
+	if marker != expected {
+		return fmt.Errorf(
+			"disk %s does not match its expected boot-pool owner",
+			disk.Name,
+		)
+	}
+	err = p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{Disk: oxide.NameOrId(disk.Id)})
 	if errors.Is(err, oxide.ErrObjectNotFound) {
 		return nil
 	}
@@ -282,8 +315,8 @@ func (p *Provider) CollectOrphans(ctx context.Context, known map[types.UID]struc
 		if disk.State.State() != oxide.DiskStateStateDetached {
 			continue
 		}
-		err := p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{Disk: oxide.NameOrId(disk.Id)})
-		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
+		err := p.deleteOwned(ctx, disk.Id, marker)
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
