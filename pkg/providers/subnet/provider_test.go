@@ -24,9 +24,10 @@ const (
 )
 
 type fakeAPI struct {
-	subnets  []oxide.VpcSubnet
-	lists    int
-	vpcViews int
+	subnets      []oxide.VpcSubnet
+	subnetsByVPC map[string][]oxide.VpcSubnet
+	lists        int
+	vpcViews     int
 }
 
 func (f *fakeAPI) server(t *testing.T) *oxide.Client {
@@ -37,7 +38,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 		switch {
 		case r.Method == http.MethodGet && path == "vpc-subnets":
 			f.lists++
-			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.subnets})
+			subnets := f.subnets
+			if f.subnetsByVPC != nil {
+				subnets = f.subnetsByVPC[r.URL.Query().Get("vpc")]
+			}
+			writeJSON(t, w, http.StatusOK, map[string]any{"items": subnets})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "vpcs/"):
 			f.vpcViews++
@@ -113,7 +118,9 @@ func TestDescribeSelectors(t *testing.T) {
 }
 
 func TestASelectorNamingTheVPCNeedsNoLookup(t *testing.T) {
-	api := &fakeAPI{subnets: fakeSubnets()}
+	subnets := fakeSubnets()
+	subnets[1].VpcId = "22222222-0000-4000-8000-000000000002"
+	api := &fakeAPI{subnets: subnets}
 	provider := NewProvider(api.server(t), time.Hour)
 
 	class := &v1alpha1.OxideNodeClass{
@@ -129,6 +136,59 @@ func TestASelectorNamingTheVPCNeedsNoLookup(t *testing.T) {
 			"the VPC was viewed %d times, want none for a selector that named it",
 			api.vpcViews,
 		)
+	}
+}
+
+func TestResolveHandlesEmptyVPCsInAnySelectorOrder(t *testing.T) {
+	tests := []struct {
+		name      string
+		selectors []v1alpha1.SubnetSelector
+		want      int
+	}{
+		{name: "one empty VPC", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}}},
+		{name: "empty after non-empty", selectors: []v1alpha1.SubnetSelector{{VPCName: "prod"}, {VPCName: "empty"}}, want: 2},
+		{name: "empty before non-empty", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "prod"}}, want: 2},
+		{name: "several empty VPCs", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "also-empty"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{subnetsByVPC: map[string][]oxide.VpcSubnet{
+				"prod": fakeSubnets(), "empty": nil, "also-empty": nil,
+			}}
+			provider := NewProvider(api.server(t), 0)
+			got, err := provider.Resolve(context.Background(), &v1alpha1.OxideNodeClass{
+				Spec: v1alpha1.OxideNodeClassSpec{SubnetSelector: tt.selectors},
+			})
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if len(got.Resolved) != tt.want {
+				t.Errorf("resolved %d subnets, want %d", len(got.Resolved), tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveDeduplicatesOverlappingSelectorsByID(t *testing.T) {
+	api := &fakeAPI{subnetsByVPC: map[string][]oxide.VpcSubnet{
+		vpcID: fakeSubnets(), "prod": fakeSubnets(),
+	}}
+	provider := NewProvider(api.server(t), 0)
+	got, err := provider.Resolve(context.Background(), &v1alpha1.OxideNodeClass{
+		Spec: v1alpha1.OxideNodeClassSpec{SubnetSelector: []v1alpha1.SubnetSelector{
+			{VPCID: vpcID}, {VPCName: "prod"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(got.Resolved) != 2 {
+		t.Fatalf("Resolve() returned %d subnets, want two unique IDs", len(got.Resolved))
+	}
+	for _, resolved := range got.Resolved {
+		if resolved.VPCName != "prod" {
+			t.Errorf("subnet %s VPC name = %q, want prod", resolved.ID, resolved.VPCName)
+		}
 	}
 }
 

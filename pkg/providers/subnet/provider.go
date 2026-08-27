@@ -94,72 +94,22 @@ func (p *Provider) resolve(
 	var resolvedSubnets []oxide.VpcSubnet
 	vpcIDToName := map[string]string{}
 	for _, subnetSelector := range subnetSelectors {
-		nameOrID := ""
-		project := subnetSelector.Project
-		vpcNameOrID := ""
-
-		if subnetSelector.VPCID != "" {
-			vpcNameOrID = subnetSelector.VPCID
-
-			project = ""
-		} else if subnetSelector.VPCName != "" {
-			vpcNameOrID = subnetSelector.VPCName
+		selected, err := p.resolveSelector(ctx, subnetSelector)
+		if err != nil {
+			return nil, err
 		}
-
-		if subnetSelector.ID != "" {
-			nameOrID = subnetSelector.ID
-
-			project = ""
-		} else if subnetSelector.Name != "" {
-			nameOrID = subnetSelector.Name
-		}
-
-		if nameOrID != "" {
-			subnet, err := p.ox.VpcSubnetView(ctx, oxide.VpcSubnetViewParams{
-				Subnet:  oxide.NameOrId(nameOrID),
-				Vpc:     oxide.NameOrId(vpcNameOrID),
-				Project: oxide.NameOrId(project),
-			})
-			if err != nil {
-				if errors.Is(err, oxide.ErrObjectNotFound) {
-					continue
-				}
-				return nil, fmt.Errorf(
-					"subnet %q from VPC %q and project %q: %w",
-					nameOrID,
-					vpcNameOrID,
-					project,
-					err,
-				)
+		for _, subnet := range selected {
+			if subnetSelector.VPCName != "" {
+				vpcIDToName[subnet.VpcId] = subnetSelector.VPCName
 			}
-			resolvedSubnets = append(resolvedSubnets, *subnet)
-		} else if vpcNameOrID != "" {
-			subnets, err := p.ox.VpcSubnetListAllPages(ctx, oxide.VpcSubnetListParams{
-				Vpc:     oxide.NameOrId(vpcNameOrID),
-				Project: oxide.NameOrId(project),
-			})
-			if err != nil {
-				if errors.Is(err, oxide.ErrObjectNotFound) {
-					continue
-				}
-				return nil, fmt.Errorf(
-					"subnets from VPC %q and project %q: %w",
-					vpcNameOrID,
-					project,
-					err,
-				)
-			}
-			resolvedSubnets = append(resolvedSubnets, subnets...)
+			resolvedSubnets = append(resolvedSubnets, subnet)
 		}
-
-		if subnetSelector.VPCName != "" {
-			vpcIDToName[resolvedSubnets[len(resolvedSubnets)-1].VpcId] = subnetSelector.VPCName
-		}
-
 	}
 
 	var oxideSubnets []v1alpha1.OxideSubnet
-	for _, subnet := range lo.Uniq(resolvedSubnets) {
+	for _, subnet := range lo.UniqBy(resolvedSubnets, func(subnet oxide.VpcSubnet) string {
+		return subnet.Id
+	}) {
 		vpcName, ok := vpcIDToName[subnet.VpcId]
 		if !ok {
 			var err error
@@ -179,6 +129,59 @@ func (p *Provider) resolve(
 
 	}
 	return oxideSubnets, nil
+}
+
+func (p *Provider) resolveSelector(
+	ctx context.Context,
+	selector v1alpha1.SubnetSelector,
+) ([]oxide.VpcSubnet, error) {
+	nameOrID := ""
+	project := selector.Project
+	vpcNameOrID := ""
+
+	if selector.VPCID != "" {
+		vpcNameOrID = selector.VPCID
+		project = ""
+	} else if selector.VPCName != "" {
+		vpcNameOrID = selector.VPCName
+	}
+	if selector.ID != "" {
+		nameOrID = selector.ID
+		project = ""
+	} else if selector.Name != "" {
+		nameOrID = selector.Name
+	}
+
+	if nameOrID != "" {
+		subnet, err := p.ox.VpcSubnetView(ctx, oxide.VpcSubnetViewParams{
+			Subnet: oxide.NameOrId(nameOrID), Vpc: oxide.NameOrId(vpcNameOrID), Project: oxide.NameOrId(project),
+		})
+		if err != nil {
+			if errors.Is(err, oxide.ErrObjectNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf(
+				"subnet %q from VPC %q and project %q: %w",
+				nameOrID, vpcNameOrID, project, err,
+			)
+		}
+		return []oxide.VpcSubnet{*subnet}, nil
+	}
+	if vpcNameOrID == "" {
+		return nil, nil
+	}
+	subnets, err := p.ox.VpcSubnetListAllPages(ctx, oxide.VpcSubnetListParams{
+		Vpc: oxide.NameOrId(vpcNameOrID), Project: oxide.NameOrId(project),
+	})
+	if err != nil {
+		if errors.Is(err, oxide.ErrObjectNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"subnets from VPC %q and project %q: %w", vpcNameOrID, project, err,
+		)
+	}
+	return subnets, nil
 }
 
 func (p *Provider) lookUpVPCName(ctx context.Context, vpcID string) (string, error) {
