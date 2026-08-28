@@ -4,8 +4,10 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -31,6 +33,35 @@ type Request struct {
 	Hostname string
 	// Storage is the resolved disk layout for this node: the Oxide disk names the launch is creating.
 	Storage *storage.Plan
+	// InstanceType is the shape being launched, which fixes the node's kubelet reservations.
+	InstanceType instancetype.Specs
+}
+
+// KubeletArgs returns the kubelet arguments for a node of this shape: the
+// reservations the instance type provider modeled, then the nodeclass's own
+// arguments. A flag set twice takes its last value, so operators can override.
+//
+// Without this the provider models reservations kubelet never applies, and the
+// scheduler's idea of allocatable drifts from the node's.
+func KubeletArgs(specs instancetype.Specs, extra []string) []string {
+	var args []string
+	if specs.Ncpus > 0 && specs.MemInGiB > 0 {
+		args = instancetype.ReservedFor(specs).KubeletArgs()
+	}
+	args = append(args, extra...)
+
+	at := map[string]int{}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		if i, ok := at[name]; ok {
+			out[i] = arg
+			continue
+		}
+		at[name] = len(out)
+		out = append(out, arg)
+	}
+	return out
 }
 
 // Bootstrapper joins nodes to the cluster for a single bootstrap provider.

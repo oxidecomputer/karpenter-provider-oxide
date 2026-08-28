@@ -109,7 +109,7 @@ func (b *Bootstrapper) UserData(
 
 	configYAML, err := yaml.Marshal(Config{
 		Server:      nodeClass.Status.Server,
-		KubeletArgs: nodeClass.Status.KubeletArgs,
+		KubeletArgs: bootstrap.KubeletArgs(req.InstanceType, nodeClass.Status.KubeletArgs),
 		NodeTaints:  req.NodeTaints,
 		Token:       token,
 	})

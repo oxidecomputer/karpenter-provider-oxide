@@ -323,7 +323,7 @@ func (b *Bootstrapper) joinConfiguration(
 		nodeRegistration["name"] = req.Hostname
 	}
 	if kubeletArgs := kubeletExtraArgs(
-		nodeClass.Status.KubeletArgs,
+		bootstrap.KubeletArgs(req.InstanceType, nodeClass.Status.KubeletArgs),
 		configVersion,
 	); kubeletArgs != nil {
 		nodeRegistration["kubeletExtraArgs"] = kubeletArgs

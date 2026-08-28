@@ -246,10 +246,11 @@ func (c *OxideCloudProvider) Create(
 	describe := c.ownership(nodeClaim)
 
 	userData, err := bootstrapper.UserData(ctx, nodeClass, bootstrap.Request{
-		NodeClaim:  nodeClaim,
-		NodeTaints: nodeTaints,
-		Hostname:   name,
-		Storage:    &plan,
+		NodeClaim:    nodeClaim,
+		NodeTaints:   nodeTaints,
+		Hostname:     name,
+		Storage:      &plan,
+		InstanceType: instanceType,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)

@@ -443,10 +443,11 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		cpus, mem := specs.Ncpus, specs.MemInGiB
 		resources := corev1.ResourceList{
 			corev1.ResourceCPU:    *resource.NewQuantity(int64(cpus), resource.DecimalSI),
-			corev1.ResourceMemory: resource.MustParse(fmt.Sprintf("%dGi", mem)),
+			corev1.ResourceMemory: *resource.NewQuantity(guestMemory(mem), resource.BinarySI),
 			corev1.ResourcePods:   *resource.NewQuantity(int64(110), resource.DecimalSI),
 		}
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
+		reserved := ReservedFor(specs)
 		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
 		refused, _ := availability.Unavailable(specs)
 
@@ -496,15 +497,15 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			},
 			Overhead: &cloudprovider.InstanceTypeOverhead{
 				KubeReserved: corev1.ResourceList{
-					corev1.ResourceCPU:    *resource.NewMilliQuantity(cpuReserved(resources.Cpu().MilliValue()), resource.DecimalSI),
-					corev1.ResourceMemory: *resource.NewQuantity(memReserved(resources.Memory().Value()), resource.BinarySI),
+					corev1.ResourceCPU:    *resource.NewMilliQuantity(reserved.CPU, resource.DecimalSI),
+					corev1.ResourceMemory: *resource.NewQuantity(reserved.Memory, resource.BinarySI),
 				},
 				SystemReserved: corev1.ResourceList{
 					corev1.ResourceCPU:    *resource.NewMilliQuantity(systemReservedMilliCPU, resource.DecimalSI),
 					corev1.ResourceMemory: *resource.NewQuantity(systemReservedMemBytes, resource.BinarySI),
 				},
 				EvictionThreshold: corev1.ResourceList{
-					corev1.ResourceMemory: *resource.NewQuantity(evictionMemBytes, resource.BinarySI),
+					corev1.ResourceMemory: *resource.NewQuantity(reserved.EvictionMemory, resource.BinarySI),
 				},
 			},
 			Offerings: cloudprovider.Offerings{
@@ -532,6 +533,60 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.generation = current
 	i.built = true
 	return instanceTypes
+}
+
+// Nexus sells memory in whole GiB, but the guest kernel never sees all of it:
+// firmware and struct page overhead take a cut that grows with the shape.
+// Measured on a rack: 4 GiB loses 185 MiB, 5 GiB loses 211 MiB, 10 GiB loses
+// 306 MiB. These constants bound all three from above, so modeled allocatable
+// stays at or under the node's real allocatable and the scheduler cannot
+// over-commit a node it has never seen.
+const (
+	guestMemoryFixedBytes int64 = 128 * MiB
+	guestMemoryLossBasisP int64 = 250
+)
+
+// guestMemory is how much of a shape's memory the guest kernel actually reports.
+func guestMemory(memGiB int) int64 {
+	total := int64(memGiB) * GiB
+	return total - guestMemoryFixedBytes - total*guestMemoryLossBasisP/10000
+}
+
+// Reserved is what kubelet must be told to hold back so that a node's real
+// allocatable matches the allocatable the scheduler was promised. Bootstrap
+// renders these into kubelet flags; anything that changes here changes the
+// instance type overhead in lockstep.
+type Reserved struct {
+	// CPU is kube-reserved CPU in milliCPU.
+	CPU int64
+	// Memory is kube-reserved memory in bytes.
+	Memory int64
+	// EvictionMemory is the hard memory.available eviction threshold in bytes.
+	EvictionMemory int64
+}
+
+// ReservedFor returns the reservations for a shape.
+func ReservedFor(specs Specs) Reserved {
+	return Reserved{
+		CPU:            cpuReserved(int64(specs.Ncpus) * 1000),
+		Memory:         memReserved(int64(specs.MemInGiB) * GiB),
+		EvictionMemory: evictionMemBytes,
+	}
+}
+
+// KubeletArgs renders the reservations as kubelet "name=value" arguments.
+func (r Reserved) KubeletArgs() []string {
+	return []string{
+		fmt.Sprintf(
+			"kube-reserved=cpu=%s,memory=%s",
+			resource.NewMilliQuantity(r.CPU, resource.DecimalSI),
+			resource.NewQuantity(r.Memory, resource.BinarySI),
+		),
+		fmt.Sprintf(
+			"eviction-hard=memory.available<%s",
+			resource.NewQuantity(r.EvictionMemory, resource.BinarySI),
+		),
+	}
 }
 
 func reducedCPUMemoryRatio(cpus, memGiB int) string {

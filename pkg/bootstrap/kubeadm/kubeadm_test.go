@@ -8,6 +8,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -171,5 +172,39 @@ func TestUserDataHeredocsAreNotShadowed(t *testing.T) {
 	}
 	if !strings.Contains(out, "JoinConfiguration") {
 		t.Error("the join configuration is missing from the rendered user-data")
+	}
+}
+
+func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
+	nc := nodeClass(t)
+	nc.Status.KubeletArgs = []string{"cloud-provider=external"}
+
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+	out, err := NewBootstrapper(kubeClient, kubeClient).UserData(context.Background(), nc, bootstrap.Request{
+		NodeClaim:    &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		Hostname:     "karpenter-default-x7k2p",
+		InstanceType: instancetype.Specs{Ncpus: 9, MemInGiB: 5},
+	})
+	if err != nil {
+		t.Fatalf("UserData() returned an unexpected error: %v", err)
+	}
+
+	for _, want := range []string{
+		"name: kube-reserved",
+		"value: cpu=92m,memory=1288490188",
+		"name: eviction-hard",
+		"value: memory.available<100Mi",
+		"name: cloud-provider",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("join configuration is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestJoinConfigurationWithoutInstanceTypeOmitsReservations(t *testing.T) {
+	out := userDataFor(t)
+	if strings.Contains(out, "kube-reserved") {
+		t.Fatalf("unexpected reservations without a shape:\n%s", out)
 	}
 }
