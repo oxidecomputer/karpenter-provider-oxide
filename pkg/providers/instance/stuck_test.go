@@ -16,6 +16,7 @@ func shortDeadlines() Deadlines {
 		Launch:           5 * time.Second,
 		Cleanup:          time.Second,
 		DiskCreating:     10 * time.Millisecond,
+		DiskDeleting:     10 * time.Millisecond,
 		InstanceCreating: 10 * time.Millisecond,
 		InstanceStarting: time.Minute,
 		InstanceStopping: 10 * time.Millisecond,
@@ -183,7 +184,7 @@ func TestDeadlinesValidate(t *testing.T) {
 	}
 
 	zero := DefaultDeadlines()
-	zero.Cleanup = 0
+	zero.DiskDeleting = 0
 	if err := zero.Validate(); err == nil {
 		t.Error("Validate() accepted a zero deadline, want it refused")
 	}

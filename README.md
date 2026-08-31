@@ -23,7 +23,9 @@ helm upgrade --install karpenter \
 Karpenter uses an Oxide token secret to managed instances via the Oxide API:
 
 ```console
-kubectl create secret --namespace kube-system generic oxide-api-token --from-literal=token=${OXIDE_TOKEN}
+kubectl create secret generic oxide-api-token \
+  --namespace kube-system \
+  --from-literal=token=${OXIDE_TOKEN}
 ```
 
 ## Example

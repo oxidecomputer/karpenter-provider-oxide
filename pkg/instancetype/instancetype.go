@@ -535,12 +535,8 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	return instanceTypes
 }
 
-// Nexus sells memory in whole GiB, but the guest kernel never sees all of it:
-// firmware and struct page overhead take a cut that grows with the shape.
-// Measured on a rack: 4 GiB loses 185 MiB, 5 GiB loses 211 MiB, 10 GiB loses
-// 306 MiB. These constants bound all three from above, so modeled allocatable
-// stays at or under the node's real allocatable and the scheduler cannot
-// over-commit a node it has never seen.
+// There is some overhead when allocating memory to a guest that scales as the shape increases in size.
+// These constants take that memory loss into account.
 const (
 	guestMemoryFixedBytes int64 = 128 * MiB
 	guestMemoryLossBasisP int64 = 250

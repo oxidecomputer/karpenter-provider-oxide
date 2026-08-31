@@ -14,15 +14,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-const pollInterval = 2 * time.Second
 
 type Config struct {
 	ImageID      string
@@ -41,23 +39,20 @@ type Acquired struct {
 type Provider struct {
 	kubeClient client.Client
 	reader     client.Reader
-	ox         *oxide.Client
-	project    string
+	disks      *diskprovider.Provider
 	clusterUID types.UID
 }
 
 func NewProvider(
 	kubeClient client.Client,
 	reader client.Reader,
-	ox *oxide.Client,
-	project string,
+	disks *diskprovider.Provider,
 	clusterUID types.UID,
 ) *Provider {
 	return &Provider{
 		kubeClient: kubeClient,
 		reader:     reader,
-		ox:         ox,
-		project:    project,
+		disks:      disks,
 		clusterUID: clusterUID,
 	}
 }
@@ -205,18 +200,15 @@ func (p *Provider) Ensure(
 		NodeClassUID: record.Spec.NodeClassRef.UID,
 		ConfigHash:   record.Spec.ConfigHash,
 	}.Description()
-	disk, err := p.ox.DiskCreate(ctx, oxide.DiskCreateParams{
-		Project: oxide.NameOrId(p.project),
-		Body: &oxide.DiskCreate{
-			Name:        oxide.Name(record.Spec.DiskName),
-			Description: description,
-			Size:        oxide.ByteCount(record.Spec.SizeBytes),
-			DiskBackend: oxide.DiskBackend{Value: &oxide.DiskBackendDistributed{
-				DiskSource: oxide.DiskSource{Value: &oxide.DiskSourceImage{
-					ImageId: record.Spec.ImageID,
-				}},
+	disk, err := p.disks.Create(ctx, &oxide.DiskCreate{
+		Name:        oxide.Name(record.Spec.DiskName),
+		Description: description,
+		Size:        oxide.ByteCount(record.Spec.SizeBytes),
+		DiskBackend: oxide.DiskBackend{Value: &oxide.DiskBackendDistributed{
+			DiskSource: oxide.DiskSource{Value: &oxide.DiskSourceImage{
+				ImageId: record.Spec.ImageID,
 			}},
-		},
+		}},
 	})
 	if err != nil {
 		if !errors.Is(err, oxide.ErrObjectAlreadyExists) {
@@ -233,17 +225,11 @@ func (p *Provider) Ensure(
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return p.waitReady(waitCtx, disk)
+	return p.disks.WaitDetached(waitCtx, disk)
 }
 
 func (p *Provider) View(ctx context.Context, record *v1alpha1.OxideBootDisk) (*oxide.Disk, error) {
-	ref := record.Status.ID
-	project := oxide.NameOrId("")
-	if ref == "" {
-		ref = record.Spec.DiskName
-		project = oxide.NameOrId(p.project)
-	}
-	return p.ox.DiskView(ctx, oxide.DiskViewParams{Disk: oxide.NameOrId(ref), Project: project})
+	return p.disks.View(ctx, diskRef(record))
 }
 
 func (p *Provider) Delete(ctx context.Context, record *v1alpha1.OxideBootDisk) error {
@@ -253,11 +239,7 @@ func (p *Provider) Delete(ctx context.Context, record *v1alpha1.OxideBootDisk) e
 		NodeClassUID: record.Spec.NodeClassRef.UID,
 		ConfigHash:   record.Spec.ConfigHash,
 	}
-	ref := record.Status.ID
-	if ref == "" {
-		ref = record.Spec.DiskName
-	}
-	return p.deleteOwned(ctx, ref, expected)
+	return p.deleteOwned(ctx, diskRef(record), expected)
 }
 
 func (p *Provider) deleteOwned(
@@ -265,40 +247,23 @@ func (p *Provider) deleteOwned(
 	ref string,
 	expected ownership.PoolMarker,
 ) error {
-	project := oxide.NameOrId("")
-	if _, err := uuid.Parse(ref); err != nil {
-		project = oxide.NameOrId(p.project)
-	}
-	disk, err := p.ox.DiskView(ctx, oxide.DiskViewParams{
-		Disk: oxide.NameOrId(ref), Project: project,
+	return p.disks.DeleteOwned(ctx, ref, func(disk *oxide.Disk) error {
+		marker, ok := ownership.ParsePool(disk.Description)
+		if !ok {
+			return fmt.Errorf("disk %s has no valid boot-pool ownership marker", disk.Name)
+		}
+		if marker != expected {
+			return fmt.Errorf(
+				"disk %s does not match its expected boot-pool owner",
+				disk.Name,
+			)
+		}
+		return nil
 	})
-	if errors.Is(err, oxide.ErrObjectNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	marker, ok := ownership.ParsePool(disk.Description)
-	if !ok {
-		return fmt.Errorf("disk %s has no valid boot-pool ownership marker", disk.Name)
-	}
-	if marker != expected {
-		return fmt.Errorf(
-			"disk %s does not match its expected boot-pool owner",
-			disk.Name,
-		)
-	}
-	err = p.ox.DiskDelete(ctx, oxide.DiskDeleteParams{Disk: oxide.NameOrId(disk.Id)})
-	if errors.Is(err, oxide.ErrObjectNotFound) {
-		return nil
-	}
-	return err
 }
 
 func (p *Provider) CollectOrphans(ctx context.Context, known map[types.UID]struct{}) error {
-	disks, err := p.ox.DiskListAllPages(ctx, oxide.DiskListParams{
-		Project: oxide.NameOrId(p.project),
-	})
+	disks, err := p.disks.List(ctx)
 	if err != nil {
 		return err
 	}
@@ -323,30 +288,9 @@ func (p *Provider) CollectOrphans(ctx context.Context, known map[types.UID]struc
 	return errors.Join(errs...)
 }
 
-func (p *Provider) waitReady(ctx context.Context, disk *oxide.Disk) (*oxide.Disk, error) {
-	current := disk
-	if current.State.State() == oxide.DiskStateStateDetached {
-		return current, nil
+func diskRef(record *v1alpha1.OxideBootDisk) string {
+	if record.Status.ID != "" {
+		return record.Status.ID
 	}
-	err := wait.PollUntilContextCancel(
-		ctx,
-		pollInterval,
-		false,
-		func(ctx context.Context) (bool, error) {
-			state := current.State.State()
-			if state == oxide.DiskStateStateDetached {
-				return true, nil
-			}
-			if state == oxide.DiskStateStateFaulted || state == oxide.DiskStateStateDestroyed {
-				return false, fmt.Errorf("disk %s entered state %s", disk.Name, state)
-			}
-			view, err := p.ox.DiskView(ctx, oxide.DiskViewParams{Disk: oxide.NameOrId(disk.Id)})
-			if err != nil {
-				return false, err
-			}
-			current = view
-			return false, nil
-		},
-	)
-	return current, err
+	return record.Spec.DiskName
 }

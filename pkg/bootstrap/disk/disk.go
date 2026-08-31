@@ -120,11 +120,6 @@ func writeFile(out *strings.Builder, path, mode, content string) error {
 func dropInFile(plan *storage.Plan) string {
 	var out strings.Builder
 	out.WriteString("[Unit]\n")
-	out.WriteString(
-		"# Requires rather than Wants: a kubelet that starts without its data disks advertises\n" +
-			"# ephemeral storage the node does not have and writes pod data onto the root filesystem,\n" +
-			"# quietly filling the boot disk. Better that it stays down and the node never registers.\n",
-	)
 	fmt.Fprintf(&out, "Requires=%s\n", UnitName)
 	fmt.Fprintf(&out, "After=%s\n", UnitName)
 

@@ -138,6 +138,8 @@ settings:
     cleanupDeadline: 5m
     # -- How long a disk may sit in the creating state.
     diskCreatingDeadline: 2m
+    # -- How long deleting one disk may be retried.
+    diskDeletingDeadline: 1m30s
     # -- How long an instance may sit in the creating state.
     instanceCreatingDeadline: 2m
     # -- Node registration deadline for a placed instance.

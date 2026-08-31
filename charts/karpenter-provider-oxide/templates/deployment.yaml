@@ -135,6 +135,8 @@ spec:
               value: {{ .Values.settings.launch.cleanupDeadline | quote }}
             - name: OXIDE_LAUNCH_DISK_CREATING_DEADLINE
               value: {{ .Values.settings.launch.diskCreatingDeadline | quote }}
+            - name: OXIDE_LAUNCH_DISK_DELETING_DEADLINE
+              value: {{ .Values.settings.launch.diskDeletingDeadline | quote }}
             - name: OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE
               value: {{ .Values.settings.launch.instanceCreatingDeadline | quote }}
             - name: OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE

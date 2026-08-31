@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 )
 
 // Kinds of resource a launch can be left waiting on.
@@ -12,7 +14,7 @@ const (
 	KindInstance = "instance"
 )
 
-// Deadlines bound every transitional state a launch can be caught in.
+// Deadlines bound long-running provider operations and transitional states.
 type Deadlines struct {
 	// Launch bounds the whole of one Create, across every call it makes.
 	Launch time.Duration
@@ -20,6 +22,8 @@ type Deadlines struct {
 	Cleanup time.Duration
 	// DiskCreating is how long a disk may sit in creating.
 	DiskCreating time.Duration
+	// DiskDeleting is how long deleting one disk may be retried.
+	DiskDeleting time.Duration
 	// InstanceCreating is how long an instance may sit in creating.
 	InstanceCreating time.Duration
 	// InstanceStarting is how long an instance may sit in starting after it has been placed.
@@ -34,6 +38,7 @@ func DefaultDeadlines() Deadlines {
 		Launch:           10 * time.Minute,
 		Cleanup:          5 * time.Minute,
 		DiskCreating:     2 * time.Minute,
+		DiskDeleting:     diskprovider.DefaultDeleteTimeout,
 		InstanceCreating: 2 * time.Minute,
 		InstanceStarting: 5 * time.Minute,
 		InstanceStopping: 3 * time.Minute,
@@ -49,6 +54,7 @@ func (d Deadlines) Validate() error {
 		{"launch deadline", d.Launch},
 		{"cleanup deadline", d.Cleanup},
 		{"disk creating deadline", d.DiskCreating},
+		{"disk deleting deadline", d.DiskDeleting},
 		{"instance creating deadline", d.InstanceCreating},
 		{"instance starting deadline", d.InstanceStarting},
 		{"instance stopping deadline", d.InstanceStopping},

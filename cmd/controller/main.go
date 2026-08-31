@@ -26,6 +26,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
+	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
@@ -64,6 +65,7 @@ const (
 	envLaunchDeadline                 = "OXIDE_LAUNCH_DEADLINE"
 	envLaunchCleanupDeadline          = "OXIDE_LAUNCH_CLEANUP_DEADLINE"
 	envLaunchDiskCreatingDeadline     = "OXIDE_LAUNCH_DISK_CREATING_DEADLINE"
+	envLaunchDiskDeletingDeadline     = "OXIDE_LAUNCH_DISK_DELETING_DEADLINE"
 	envLaunchInstanceCreatingDeadline = "OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE"
 	envLaunchInstanceStartingDeadline = "OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE"
 	envLaunchInstanceStoppingDeadline = "OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE"
@@ -170,18 +172,21 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	bootDisks := bootdisk.NewProvider(
-		karpcore.GetClient(),
-		karpcore.GetAPIReader(),
-		ox,
-		project,
-		clusterUID,
-	)
-
 	deadlines, err := deadlinesFromEnv()
 	if err != nil {
 		return err
 	}
+	disks := diskprovider.NewProvider(
+		ox,
+		project,
+		diskprovider.WithDeleteTimeout(deadlines.DiskDeleting),
+	)
+	bootDisks := bootdisk.NewProvider(
+		karpcore.GetClient(),
+		karpcore.GetAPIReader(),
+		disks,
+		clusterUID,
+	)
 
 	instanceProvider := instance.NewProvider(
 		ox,
@@ -194,6 +199,7 @@ func run() error {
 			})
 		},
 		instance.WithDeadlines(deadlines),
+		instance.WithDiskProvider(disks),
 	)
 
 	oxideCloudProivder := cloudprovider.NewOxideCloudProvider(
@@ -329,6 +335,7 @@ func deadlinesFromEnv() (instance.Deadlines, error) {
 		{envLaunchDeadline, &deadlines.Launch},
 		{envLaunchCleanupDeadline, &deadlines.Cleanup},
 		{envLaunchDiskCreatingDeadline, &deadlines.DiskCreating},
+		{envLaunchDiskDeletingDeadline, &deadlines.DiskDeleting},
 		{envLaunchInstanceCreatingDeadline, &deadlines.InstanceCreating},
 		{envLaunchInstanceStartingDeadline, &deadlines.InstanceStarting},
 		{envLaunchInstanceStoppingDeadline, &deadlines.InstanceStopping},

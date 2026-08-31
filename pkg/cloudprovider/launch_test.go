@@ -9,6 +9,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
+	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -205,7 +206,12 @@ func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(record).Build()
-	pool := bootdisk.NewProvider(kubeClient, kubeClient, nil, "project", "cluster")
+	pool := bootdisk.NewProvider(
+		kubeClient,
+		kubeClient,
+		diskprovider.NewProvider(nil, "project"),
+		"cluster",
+	)
 	provider := &OxideCloudProvider{bootDiskPool: pool}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

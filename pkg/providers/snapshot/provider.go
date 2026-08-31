@@ -55,7 +55,6 @@ func (p *Provider) Resolve(
 		return Result{}, err
 	}
 	result := Result{
-
 		Resolved: slices.Clone(entry.Value),
 		Age:      entry.Age(time.Now()),
 		Stale:    entry.Stale,
@@ -79,12 +78,10 @@ func (p *Provider) resolve(
 		project := p.projectFor(selector)
 		if selector.ID != "" {
 			nameOrID = selector.ID
-
 			project = ""
 		} else if selector.Name != "" && !strings.Contains(selector.Name, "*") {
 			nameOrID = selector.Name
 		} else {
-
 			listSelectors = append(listSelectors, selector)
 			continue
 		}

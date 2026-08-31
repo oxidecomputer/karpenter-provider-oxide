@@ -241,6 +241,10 @@ helm-apply:
 		$(HELM_OPTS) \
 		--set controller.image.repository="$${REF%:*}" \
 		--set controller.image.tag="$${REF##*:}" \
+		--set settings.inventory.enabled="true" \
+		--set settings.featureGates.nodeOverlay="true" \
+		--set settings.featureGates.nodeRepair="true" \
+		--set settings.featureGates.staticCapacity="true" \
 		--wait
 
 .PHONY: apply

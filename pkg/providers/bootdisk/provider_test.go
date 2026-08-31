@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,7 +66,12 @@ func TestAcquireIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := NewProvider(kubeClient, kubeClient, ox, "project", types.UID("cluster-uid"))
+	provider := NewProvider(
+		kubeClient,
+		kubeClient,
+		diskprovider.NewProvider(ox, "project"),
+		types.UID("cluster-uid"),
+	)
 
 	var group sync.WaitGroup
 	results := make(chan *Acquired, 8)

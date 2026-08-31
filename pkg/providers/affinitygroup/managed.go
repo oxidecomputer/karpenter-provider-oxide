@@ -30,7 +30,6 @@ func (p *Provider) ensureManagedGroup(
 	existing, err := api.view(ctx, name)
 	switch {
 	case err == nil:
-
 		if existing.description != description {
 			return v1alpha1.OxideAffinityGroup{}, Result{
 				Reason: v1alpha1.ConditionReasonGroupNotOwned,
