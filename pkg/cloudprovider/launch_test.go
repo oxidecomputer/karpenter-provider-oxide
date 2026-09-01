@@ -2,7 +2,6 @@ package cloudprovider
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -15,6 +14,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -23,12 +23,8 @@ import (
 
 func TestSelectSubnetRejectsAnEmptyStatus(t *testing.T) {
 	_, err := selectSubnet(nil)
-	var createErr *karpcloudprovider.CreateError
-	if !errors.As(err, &createErr) {
-		t.Fatalf("selectSubnet() error = %v, want CreateError", err)
-	}
-	if createErr.ConditionReason != "SubnetResolutionFailed" {
-		t.Errorf("reason = %q, want SubnetResolutionFailed", createErr.ConditionReason)
+	if !karpcloudprovider.IsNodeClassNotReadyError(err) {
+		t.Fatalf("selectSubnet() error = %v, want NodeClassNotReadyError", err)
 	}
 }
 
@@ -242,5 +238,32 @@ func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
 	}
 	if !got.Spec.Retire {
 		t.Fatal("canceled launch did not retire its acquired boot disk")
+	}
+}
+
+func TestCreateRejectsAnUnreadyNodeClass(t *testing.T) {
+	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: v1.ObjectMeta{Name: "default"}}
+	nodeClass.StatusConditions().SetFalse(
+		v1alpha1.ConditionTypeSubnetsResolved,
+		"SubnetsNotFound",
+		"no subnets matched",
+	)
+	c := &OxideCloudProvider{
+		kubeClient: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(nodeClass).
+			WithStatusSubresource(nodeClass).
+			Build(),
+	}
+	nodeClaim := &karpcorev1.NodeClaim{
+		ObjectMeta: v1.ObjectMeta{Name: "claim"},
+		Spec: karpcorev1.NodeClaimSpec{
+			NodeClassRef: &karpcorev1.NodeClassReference{Name: "default"},
+		},
+	}
+
+	_, err := c.Create(context.Background(), nodeClaim)
+	if !karpcloudprovider.IsNodeClassNotReadyError(err) {
+		t.Fatalf("Create() error = %v, want NodeClassNotReadyError", err)
 	}
 }

@@ -131,6 +131,15 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
 	}
 
+	// Fail fast so the launch reconciler replaces the NodeClaim rather than
+	// retrying against a nodeclass that can't resolve its images, subnets, or storage.
+	if !nodeClass.StatusConditions().Root().IsTrue() {
+		return nil, cloudprovider.NewNodeClassNotReadyError(fmt.Errorf(
+			"resolving nodeclass readiness, %s",
+			nodeClass.StatusConditions().Root().Message,
+		))
+	}
+
 	nodeTaints := append(
 		append(nodeClaim.Spec.Taints, nodeClaim.Spec.StartupTaints...),
 		corev1.Taint{
@@ -347,10 +356,8 @@ func (c *OxideCloudProvider) Create(
 
 func selectSubnet(subnets []v1alpha1.OxideSubnet) (v1alpha1.OxideSubnet, error) {
 	if len(subnets) == 0 {
-		return v1alpha1.OxideSubnet{}, cloudprovider.NewCreateError(
+		return v1alpha1.OxideSubnet{}, cloudprovider.NewNodeClassNotReadyError(
 			errors.New("nodeclass has no resolved subnets"),
-			"SubnetResolutionFailed",
-			"No Oxide subnet is available for this NodeClass",
 		)
 	}
 	return subnets[rand.IntN(len(subnets))], nil
