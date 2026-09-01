@@ -16,16 +16,26 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/samber/lo"
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	karpcorev1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/events"
+	nodeclaimutils "sigs.k8s.io/karpenter/pkg/utils/nodeclaim"
+	"sigs.k8s.io/karpenter/pkg/utils/pretty"
 )
 
 var kubeletArgsAlways = []string{"cloud-provider=external"}
@@ -40,6 +50,8 @@ type Controller struct {
 	kubeClient client.Client
 
 	reader client.Reader
+
+	recorder events.Recorder
 
 	images *image.Provider
 
@@ -59,6 +71,7 @@ type Controller struct {
 func NewController(
 	kubeClient client.Client,
 	reader client.Reader,
+	recorder events.Recorder,
 	images *image.Provider,
 	subnets *subnet.Provider,
 	sshKeys *sshkey.Provider,
@@ -70,6 +83,7 @@ func NewController(
 	return &Controller{
 		kubeClient:     kubeClient,
 		reader:         reader,
+		recorder:       recorder,
 		images:         images,
 		subnets:        subnets,
 		sshKeys:        sshKeys,
@@ -249,6 +263,27 @@ func (c *Controller) finalize(
 		return reconcile.Result{}, nil
 	}
 
+	nodeClaims := &karpcorev1.NodeClaimList{}
+	if err := c.kubeClient.List(ctx, nodeClaims, nodeclaimutils.ForNodeClass(nodeClass)); err != nil {
+		return reconcile.Result{}, fmt.Errorf("unable to list NodeClaims for the nodeclass: %w", err)
+	}
+	// Dropping the finalizer while NodeClaims still reference the nodeclass strands them: drift
+	// can no longer resolve the nodeclass, so those nodes are never replaced.
+	if len(nodeClaims.Items) > 0 {
+		names := lo.Map(nodeClaims.Items, func(nodeClaim karpcorev1.NodeClaim, _ int) string {
+			return nodeClaim.Name
+		})
+		c.recorder.Publish(events.Event{
+			InvolvedObject: nodeClass,
+			Type:           corev1.EventTypeNormal,
+			Reason:         "WaitingOnNodeClaimTermination",
+			Message:        fmt.Sprintf("Waiting on NodeClaim termination for %s", pretty.Slice(names, 5)),
+			DedupeValues:   []string{string(nodeClass.UID)},
+		})
+		log.FromContext(ctx).V(1).Info("waiting for the nodeclass's NodeClaims to terminate before deleting it")
+		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
+	}
+
 	held, err := c.affinityGroups.Collect(ctx, nodeClass, nil)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("unable to collect managed affinity groups: %w", err)
@@ -272,6 +307,23 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named(c.Name()).
 		For(&v1alpha1.OxideNodeClass{}).
+		Watches(
+			&karpcorev1.NodeClaim{},
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, o client.Object) []reconcile.Request {
+				nodeClaim := o.(*karpcorev1.NodeClaim)
+				if nodeClaim.Spec.NodeClassRef == nil {
+					return nil
+				}
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeClaim.Spec.NodeClassRef.Name}}}
+			}),
+			// Only deletions matter: they're what lets a terminating nodeclass finish finalizing.
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return false },
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				DeleteFunc:  func(event.DeleteEvent) bool { return true },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			}),
+		).
 		WithOptions(controller.Options{
 			RateLimiter:             reasonable.RateLimiter(),
 			MaxConcurrentReconciles: 10,

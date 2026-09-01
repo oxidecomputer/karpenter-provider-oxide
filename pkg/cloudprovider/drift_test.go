@@ -286,8 +286,8 @@ func TestIsDriftedWithoutANodeClass(t *testing.T) {
 	}
 
 	got, err := c.IsDrifted(context.Background(), launched("hash-1"))
-	if err != nil {
-		t.Fatalf("IsDrifted() error = %v", err)
+	if !cloudprovider.IsNodeClassNotReadyError(err) {
+		t.Fatalf("IsDrifted() error = %v, want NodeClassNotReadyError", err)
 	}
 	if got != "" {
 		t.Errorf("IsDrifted() = %q, want no drift", got)

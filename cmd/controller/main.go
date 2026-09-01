@@ -244,6 +244,7 @@ func run() error {
 		nodeclass.NewController(
 			karpcore.GetClient(),
 			karpcore.GetAPIReader(),
+			karpcore.EventRecorder,
 			images,
 			subnets,
 			sshKeys,

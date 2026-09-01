@@ -24,9 +24,8 @@ func (c *OxideCloudProvider) IsDrifted(
 		client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name},
 		nodeClass,
 	); err != nil {
-
 		if kerrors.IsNotFound(err) {
-			return "", nil
+			return "", cloudprovider.NewNodeClassNotReadyError(err)
 		}
 		return "", fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
 	}
