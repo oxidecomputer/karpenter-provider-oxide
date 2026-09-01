@@ -26,7 +26,7 @@ func TestInstanceTypesReflectSharedAvailability(t *testing.T) {
 	manager := availability.New(nil)
 	provider := providerUsing(t, nil, manager)
 
-	before, ok := provider.Get("8-16")
+	before, ok := provider.Get("8-16", 0)
 	if !ok || !before.Offerings[0].Available {
 		t.Fatal("instance type 8-16 is unavailable before anything is refused")
 	}
@@ -41,7 +41,7 @@ func TestInstanceTypesReflectSharedAvailability(t *testing.T) {
 		{"16-30", false},
 		{"4-8", true},
 	} {
-		instanceType, ok := provider.Get(tc.name)
+		instanceType, ok := provider.Get(tc.name, 0)
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.name)
 		}
@@ -83,7 +83,7 @@ func TestInstanceTypesReflectSharedInventory(t *testing.T) {
 		{"16-30", false},
 		{"8-64", false},
 	} {
-		instanceType, ok := provider.Get(tc.name)
+		instanceType, ok := provider.Get(tc.name, 0)
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.name)
 		}
@@ -96,7 +96,7 @@ func TestInstanceTypesReflectSharedInventory(t *testing.T) {
 func TestAvailabilityDoesNotChangePrice(t *testing.T) {
 	manager := availability.New(nil)
 	provider := providerUsing(t, nil, manager)
-	before, ok := provider.Get("8-16")
+	before, ok := provider.Get("8-16", 0)
 	if !ok {
 		t.Fatal("instance type 8-16 does not exist")
 	}
@@ -108,7 +108,7 @@ func TestAvailabilityDoesNotChangePrice(t *testing.T) {
 		availability.ReasonCapacity,
 	)
 
-	after, _ := provider.Get("8-16")
+	after, _ := provider.Get("8-16", 0)
 	if after.Offerings[0].Available {
 		t.Fatal("instance type 8-16 is still available after being marked")
 	}

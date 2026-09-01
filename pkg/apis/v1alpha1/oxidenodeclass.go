@@ -612,6 +612,18 @@ func (in Storage) Disks() int {
 	return total
 }
 
+// BootSizeBytes is the boot disk size a launch from this nodeclass gets,
+// falling back to the spec while the status has yet to resolve.
+func (in *OxideNodeClass) BootSizeBytes() int64 {
+	if in == nil {
+		return 0
+	}
+	if in.Status.Storage != nil && in.Status.Storage.BootSizeBytes > 0 {
+		return in.Status.Storage.BootSizeBytes
+	}
+	return in.Spec.Storage.Boot.Size.Value()
+}
+
 // MaxDisks is the Oxide API's limit on disks attached to one instance.
 func MaxDisks() int { return maxAttachedDisks }
 

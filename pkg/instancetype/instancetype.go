@@ -30,6 +30,11 @@ const (
 
 	evictionMemBytes int64 = 100 * MiB
 
+	// kubelet's own ephemeral-storage defaults, restated so that what the
+	// scheduler models and what the node computes agree.
+	ephemeralReservedBytes int64 = 1 * GiB
+	evictionNodeFSPercent  int64 = 10
+
 	// These match Nexus MAX_VCPU_PER_INSTANCE and MAX_MEMORY_BYTES_PER_INSTANCE in
 	// omicron/nexus/src/app/mod.rs.
 	maxInstanceVCPUs     = 254
@@ -44,11 +49,12 @@ const (
 )
 
 type Provider struct {
-	mu            sync.Mutex
-	instanceTypes []*cloudprovider.InstanceType
+	mu sync.Mutex
+	// instanceTypes is the built catalog keyed by the boot disk size its
+	// ephemeral storage was derived from.
+	instanceTypes map[int64][]*cloudprovider.InstanceType
 
 	generation generation
-	built      bool
 
 	availability *availability.Manager
 
@@ -146,8 +152,11 @@ func InstanceTypeToSpecs(instanceType string) (Specs, error) {
 	}, nil
 }
 
-func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) {
-	for _, it := range i.InstanceTypes() {
+func (i *Provider) Get(
+	instanceType string,
+	bootSizeBytes int64,
+) (*cloudprovider.InstanceType, bool) {
+	for _, it := range i.InstanceTypes(bootSizeBytes) {
 		if it.Name == instanceType {
 			return it, true
 		}
@@ -157,7 +166,8 @@ func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) 
 
 // UnavailableInstanceTypeCount is how many instance types the scheduler is currently not being offered.
 func (i *Provider) UnavailableInstanceTypeCount() (unavailable, total int) {
-	instanceTypes := i.InstanceTypes()
+	// Availability does not vary with the boot disk, so any catalog answers this.
+	instanceTypes := i.InstanceTypes(0)
 	for _, it := range instanceTypes {
 		if len(it.Offerings.Available()) == 0 {
 			unavailable++
@@ -365,8 +375,10 @@ func requestFor(specs Specs) utilization.Request {
 	}
 }
 
-// InstanceTypes returns the current instance type catalog.
-func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
+// InstanceTypes returns the current instance type catalog for nodes whose boot
+// disk is bootSizeBytes. A non-positive size leaves ephemeral storage
+// unadvertised, which only fits callers that never schedule against it.
+func (i *Provider) InstanceTypes(bootSizeBytes int64) []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -374,9 +386,13 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	if i.quotas != nil {
 		current.quota = i.quotas.Generation()
 	}
-	if i.built && i.generation == current {
-		return i.instanceTypes
+	if i.generation != current {
+		i.instanceTypes = nil
 	}
+	if cached, ok := i.instanceTypes[bootSizeBytes]; ok {
+		return cached
+	}
+	ephemeral, hasEphemeral := EphemeralStorageFor(bootSizeBytes)
 
 	reading := i.availability.Snapshot()
 
@@ -388,6 +404,11 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			corev1.ResourceCPU:    *resource.NewQuantity(int64(cpus), resource.DecimalSI),
 			corev1.ResourceMemory: *resource.NewQuantity(guestMemory(mem), resource.BinarySI),
 			corev1.ResourcePods:   *resource.NewQuantity(int64(110), resource.DecimalSI),
+		}
+		if hasEphemeral {
+			resources[corev1.ResourceEphemeralStorage] = *resource.NewQuantity(
+				ephemeral.Capacity, resource.BinarySI,
+			)
 		}
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 		reserved := ReservedFor(specs)
@@ -439,17 +460,12 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 				),
 			},
 			Overhead: &cloudprovider.InstanceTypeOverhead{
-				KubeReserved: corev1.ResourceList{
-					corev1.ResourceCPU:    *resource.NewMilliQuantity(reserved.CPU, resource.DecimalSI),
-					corev1.ResourceMemory: *resource.NewQuantity(reserved.Memory, resource.BinarySI),
-				},
+				KubeReserved: kubeReserved(reserved, ephemeral, hasEphemeral),
 				SystemReserved: corev1.ResourceList{
 					corev1.ResourceCPU:    *resource.NewMilliQuantity(systemReservedMilliCPU, resource.DecimalSI),
 					corev1.ResourceMemory: *resource.NewQuantity(systemReservedMemBytes, resource.BinarySI),
 				},
-				EvictionThreshold: corev1.ResourceList{
-					corev1.ResourceMemory: *resource.NewQuantity(reserved.EvictionMemory, resource.BinarySI),
-				},
+				EvictionThreshold: evictionThreshold(reserved, ephemeral, hasEphemeral),
 			},
 			Offerings: cloudprovider.Offerings{
 				&cloudprovider.Offering{
@@ -472,10 +488,45 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 			},
 		})
 	}
-	i.instanceTypes = instanceTypes
+	if i.instanceTypes == nil {
+		i.instanceTypes = map[int64][]*cloudprovider.InstanceType{}
+	}
+	i.instanceTypes[bootSizeBytes] = instanceTypes
 	i.generation = current
-	i.built = true
 	return instanceTypes
+}
+
+func kubeReserved(
+	reserved Reserved,
+	ephemeral EphemeralStorage,
+	hasEphemeral bool,
+) corev1.ResourceList {
+	list := corev1.ResourceList{
+		corev1.ResourceCPU:    *resource.NewMilliQuantity(reserved.CPU, resource.DecimalSI),
+		corev1.ResourceMemory: *resource.NewQuantity(reserved.Memory, resource.BinarySI),
+	}
+	if hasEphemeral {
+		list[corev1.ResourceEphemeralStorage] = *resource.NewQuantity(
+			ephemeral.KubeReserved, resource.BinarySI,
+		)
+	}
+	return list
+}
+
+func evictionThreshold(
+	reserved Reserved,
+	ephemeral EphemeralStorage,
+	hasEphemeral bool,
+) corev1.ResourceList {
+	list := corev1.ResourceList{
+		corev1.ResourceMemory: *resource.NewQuantity(reserved.EvictionMemory, resource.BinarySI),
+	}
+	if hasEphemeral {
+		list[corev1.ResourceEphemeralStorage] = *resource.NewQuantity(
+			ephemeral.EvictionNodeFS, resource.BinarySI,
+		)
+	}
+	return list
 }
 
 // There is some overhead when allocating memory to a guest that scales as the shape increases in size.
@@ -491,6 +542,47 @@ func guestMemory(memGiB int) int64 {
 	return total - guestMemoryFixedBytes - total*guestMemoryLossBasisP/10000
 }
 
+// A boot disk is not all usable filesystem: the image's partition table and
+// boot partitions come off the front, and the root filesystem spends a further
+// fraction on metadata. Under-reporting the remainder is safe, over-reporting
+// puts pods on nodes that then hit disk pressure.
+const (
+	rootFSFixedBytes int64 = 1 * GiB
+	rootFSLossBasisP int64 = 500
+)
+
+// EphemeralStorage is the ephemeral-storage side of an instance type: what
+// kubelet will report for a boot disk of a given size, and what it holds back.
+type EphemeralStorage struct {
+	// Capacity is the ephemeral-storage capacity in bytes.
+	Capacity int64
+	// KubeReserved is kube-reserved ephemeral-storage in bytes.
+	KubeReserved int64
+	// EvictionNodeFS is the hard nodefs.available eviction threshold in bytes.
+	EvictionNodeFS int64
+}
+
+// EphemeralStorageFor returns the ephemeral storage a node booting off a disk
+// of this size has, and whether the disk is big enough to advertise any. A
+// diskSet mounted over the kubelet root makes this an under-estimate, which is
+// the safe direction.
+func EphemeralStorageFor(bootSizeBytes int64) (EphemeralStorage, bool) {
+	usable := bootSizeBytes - rootFSFixedBytes
+	if usable <= 0 {
+		return EphemeralStorage{}, false
+	}
+	available := usable - usable*rootFSLossBasisP/10000
+	eviction := available * evictionNodeFSPercent / 100
+	if available-eviction <= ephemeralReservedBytes {
+		return EphemeralStorage{}, false
+	}
+	return EphemeralStorage{
+		Capacity:       available,
+		KubeReserved:   ephemeralReservedBytes,
+		EvictionNodeFS: eviction,
+	}, true
+}
+
 // Reserved is what kubelet must be told to hold back so that a node's real
 // allocatable matches the allocatable the scheduler was promised. Bootstrap
 // renders these into kubelet flags; anything that changes here changes the
@@ -502,14 +594,21 @@ type Reserved struct {
 	Memory int64
 	// EvictionMemory is the hard memory.available eviction threshold in bytes.
 	EvictionMemory int64
+	// EphemeralStorage is kube-reserved ephemeral-storage in bytes.
+	EphemeralStorage int64
+	// EvictionNodeFSPercent is the hard nodefs.available eviction threshold, as
+	// a percentage of whatever capacity kubelet computes for the root filesystem.
+	EvictionNodeFSPercent int64
 }
 
 // ReservedFor returns the reservations for a shape.
 func ReservedFor(specs Specs) Reserved {
 	return Reserved{
-		CPU:            cpuReserved(int64(specs.Ncpus) * 1000),
-		Memory:         memReserved(int64(specs.MemInGiB) * GiB),
-		EvictionMemory: evictionMemBytes,
+		CPU:                   cpuReserved(int64(specs.Ncpus) * 1000),
+		Memory:                memReserved(int64(specs.MemInGiB) * GiB),
+		EvictionMemory:        evictionMemBytes,
+		EphemeralStorage:      ephemeralReservedBytes,
+		EvictionNodeFSPercent: evictionNodeFSPercent,
 	}
 }
 
@@ -517,13 +616,15 @@ func ReservedFor(specs Specs) Reserved {
 func (r Reserved) KubeletArgs() []string {
 	return []string{
 		fmt.Sprintf(
-			"kube-reserved=cpu=%s,memory=%s",
+			"kube-reserved=cpu=%s,memory=%s,ephemeral-storage=%s",
 			resource.NewMilliQuantity(r.CPU, resource.DecimalSI),
 			resource.NewQuantity(r.Memory, resource.BinarySI),
+			resource.NewQuantity(r.EphemeralStorage, resource.BinarySI),
 		),
 		fmt.Sprintf(
-			"eviction-hard=memory.available<%s",
+			"eviction-hard=memory.available<%s,nodefs.available<%d%%",
 			resource.NewQuantity(r.EvictionMemory, resource.BinarySI),
+			r.EvictionNodeFSPercent,
 		),
 	}
 }

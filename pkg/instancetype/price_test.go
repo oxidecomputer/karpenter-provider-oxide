@@ -9,7 +9,7 @@ import (
 func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	p := NewProvider(nil, availability.New(nil))
 	prices := map[Specs]float64{}
-	for _, it := range p.InstanceTypes() {
+	for _, it := range p.InstanceTypes(0) {
 		specs, err := InstanceTypeToSpecs(it.Name)
 		if err != nil {
 			t.Fatalf("instance type %s: %v", it.Name, err)
@@ -73,11 +73,11 @@ func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 		{"1-4", "254-757"},
 		{"16-30", "16-64"},
 	} {
-		a, ok := p.Get(tc.cheaper)
+		a, ok := p.Get(tc.cheaper, 0)
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.cheaper)
 		}
-		b, ok := p.Get(tc.dearer)
+		b, ok := p.Get(tc.dearer, 0)
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.dearer)
 		}

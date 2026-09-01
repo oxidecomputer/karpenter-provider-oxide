@@ -29,6 +29,7 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -218,6 +219,7 @@ func (c *OxideCloudProvider) Create(
 		ctx,
 		nodeClaim,
 		instancetype.SpecsToInstanceTypeName(instanceType.Ncpus, instanceType.MemInGiB),
+		nodeClass.BootSizeBytes(),
 	)
 	if err != nil {
 		return nil, err
@@ -619,8 +621,9 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 	ctx context.Context,
 	nodeClaim *karpcorev1.NodeClaim,
 	instanceTypeName string,
+	bootSizeBytes int64,
 ) (*cloudprovider.InstanceType, error) {
-	instanceType, ok := c.instanceTypeProvider.Get(instanceTypeName)
+	instanceType, ok := c.instanceTypeProvider.Get(instanceTypeName, bootSizeBytes)
 	if !ok {
 		return nil, fmt.Errorf("selected instance type %q is no longer available", instanceTypeName)
 	}
@@ -762,6 +765,7 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 			int(oxideInstance.Ncpus),
 			int(oxideInstance.Memory)/GiB,
 		),
+		nodeClass.BootSizeBytes(),
 	); ok {
 		for key, req := range it.Requirements {
 			if req.Operator() != corev1.NodeSelectorOpIn {
@@ -872,12 +876,39 @@ func (c *OxideCloudProvider) rejectOwnership(
 	)
 }
 
-// GetInstanceTypes returns instance types supported by the cloudprovider.
+// GetInstanceTypes returns instance types supported by the cloudprovider. The
+// nodepool's nodeclass fixes the boot disk, and with it the ephemeral storage
+// the shapes advertise.
 func (c *OxideCloudProvider) GetInstanceTypes(
-	context.Context,
-	*karpcorev1.NodePool,
+	ctx context.Context,
+	nodePool *karpcorev1.NodePool,
 ) ([]*cloudprovider.InstanceType, error) {
-	return c.instanceTypeProvider.InstanceTypes(), nil
+	nodeClass, err := c.nodeClassFor(ctx, nodePool)
+	if err != nil {
+		return nil, err
+	}
+	return c.instanceTypeProvider.InstanceTypes(nodeClass.BootSizeBytes()), nil
+}
+
+func (c *OxideCloudProvider) nodeClassFor(
+	ctx context.Context,
+	nodePool *karpcorev1.NodePool,
+) (*v1alpha1.OxideNodeClass, error) {
+	if nodePool == nil || nodePool.Spec.Template.Spec.NodeClassRef == nil {
+		return nil, nil
+	}
+	nodeClass := &v1alpha1.OxideNodeClass{}
+	if err := c.kubeClient.Get(
+		ctx,
+		client.ObjectKey{Name: nodePool.Spec.Template.Spec.NodeClassRef.Name},
+		nodeClass,
+	); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, cloudprovider.NewNodeClassNotReadyError(err)
+		}
+		return nil, fmt.Errorf("unable to retrieve the OxideNodeClass, %w", err)
+	}
+	return nodeClass, nil
 }
 
 func (c *OxideCloudProvider) noCandidatesError(

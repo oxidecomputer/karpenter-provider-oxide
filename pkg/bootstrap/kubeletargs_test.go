@@ -15,8 +15,8 @@ func TestKubeletArgsCarriesShapeReservations(t *testing.T) {
 		[]string{"cloud-provider=external"},
 	)
 	want := []string{
-		"kube-reserved=cpu=92m,memory=1288490188",
-		"eviction-hard=memory.available<100Mi",
+		"kube-reserved=cpu=92m,memory=1288490188,ephemeral-storage=1Gi",
+		"eviction-hard=memory.available<100Mi,nodefs.available<10%",
 		"cloud-provider=external",
 	}
 	if strings.Join(args, "|") != strings.Join(want, "|") {
@@ -50,8 +50,14 @@ func TestReservationsMatchInstanceTypeOverhead(t *testing.T) {
 	specs := instancetype.Specs{Ncpus: 9, MemInGiB: 5}
 	reserved := instancetype.ReservedFor(specs)
 
+	const bootSizeBytes = 100 << 30
+	ephemeral, hasEphemeral := instancetype.EphemeralStorageFor(bootSizeBytes)
+	if !hasEphemeral {
+		t.Fatal("a 100GiB boot disk should carry ephemeral storage")
+	}
+
 	provider := instancetype.NewProvider(nil, availability.New(nil))
-	it, ok := provider.Get("9-5")
+	it, ok := provider.Get("9-5", bootSizeBytes)
 	if !ok {
 		t.Fatal("9-5 not offered")
 	}
@@ -63,5 +69,18 @@ func TestReservationsMatchInstanceTypeOverhead(t *testing.T) {
 	}
 	if got := it.Overhead.EvictionThreshold.Memory().Value(); got != reserved.EvictionMemory {
 		t.Fatalf("eviction %d != reserved %d", got, reserved.EvictionMemory)
+	}
+	got := it.Overhead.KubeReserved.StorageEphemeral().Value()
+	if got != reserved.EphemeralStorage {
+		t.Fatalf("overhead ephemeral %d != reserved %d", got, reserved.EphemeralStorage)
+	}
+	if got := ephemeral.Capacity * reserved.EvictionNodeFSPercent / 100; got !=
+		it.Overhead.EvictionThreshold.StorageEphemeral().Value() {
+		t.Fatalf(
+			"eviction nodefs %d != %d%% of capacity %d",
+			it.Overhead.EvictionThreshold.StorageEphemeral().Value(),
+			reserved.EvictionNodeFSPercent,
+			ephemeral.Capacity,
+		)
 	}
 }
