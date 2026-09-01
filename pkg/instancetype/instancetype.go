@@ -46,6 +46,10 @@ const (
 
 	cpuCostWeight = 1.0
 	memCostWeight = 0.125
+
+	// Oxide has no zones; the rack is the whole failure domain. Advertised anyway so
+	// that topology spreads on topology.kubernetes.io/zone see a domain to spread over.
+	ZoneName = "rack"
 )
 
 type Provider struct {
@@ -458,6 +462,18 @@ func (i *Provider) InstanceTypes(bootSizeBytes int64) []*cloudprovider.InstanceT
 					corev1.NodeSelectorOpIn,
 					cpuMemoryRatio,
 				),
+				// Mirrors the sole offering. Upstream builds the topology-spread domain
+				// universe from instance type requirements, never from offerings.
+				corev1.LabelTopologyZone: scheduling.NewRequirement(
+					corev1.LabelTopologyZone,
+					corev1.NodeSelectorOpIn,
+					ZoneName,
+				),
+				karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
+					karpv1.CapacityTypeLabelKey,
+					corev1.NodeSelectorOpIn,
+					karpv1.CapacityTypeOnDemand,
+				),
 			},
 			Overhead: &cloudprovider.InstanceTypeOverhead{
 				KubeReserved: kubeReserved(reserved, ephemeral, hasEphemeral),
@@ -476,12 +492,12 @@ func (i *Provider) InstanceTypes(bootSizeBytes int64) []*cloudprovider.InstanceT
 						corev1.LabelTopologyZone: scheduling.NewRequirement(
 							corev1.LabelTopologyZone,
 							corev1.NodeSelectorOpIn,
-							"rack",
+							ZoneName,
 						),
 						karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
 							karpv1.CapacityTypeLabelKey,
 							corev1.NodeSelectorOpIn,
-							"on-demand",
+							karpv1.CapacityTypeOnDemand,
 						),
 					},
 				},
