@@ -10,9 +10,11 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
@@ -206,5 +208,38 @@ func TestJoinConfigurationWithoutInstanceTypeOmitsReservations(t *testing.T) {
 	out := userDataFor(t)
 	if strings.Contains(out, "kube-reserved") {
 		t.Fatalf("unexpected reservations without a shape:\n%s", out)
+	}
+}
+
+func TestDetect(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		objects []client.Object
+		want    bool
+	}{
+		{
+			name: "a kubeadm cluster keeps its cluster configuration in kube-system",
+			objects: []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Namespace: clusterConfigNamespace,
+				Name:      clusterConfigName,
+			}}},
+			want: true,
+		},
+		{name: "and nothing else does"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
+				WithObjects(test.objects...).
+				Build()
+
+			got, err := NewBootstrapper(kubeClient, kubeClient).Detect(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("got %t, want %t", got, test.want)
+			}
+		})
 	}
 }

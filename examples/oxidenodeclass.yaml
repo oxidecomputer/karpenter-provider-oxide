@@ -6,8 +6,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-  kubeletArgs:
-    - cloud-provider=external
   bootstrap:
     rke2:
       tokenRef:

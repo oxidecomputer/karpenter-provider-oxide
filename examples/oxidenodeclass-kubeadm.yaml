@@ -6,8 +6,7 @@ spec:
   storage:
     boot:
       size: 20Gi
-  kubeletArgs:
-    - cloud-provider=external
+  # Optional: the provider is detected from the cluster when this is left out.
   bootstrap:
     kubeadm:
       tokenTTL: 15m

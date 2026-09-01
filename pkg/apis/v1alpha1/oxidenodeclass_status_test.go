@@ -62,3 +62,34 @@ func TestReadyIsFalseWhenABootstrapConditionIsFalse(t *testing.T) {
 		t.Errorf("Ready = %s with ClusterInfoAvailable false, want False", cond.Status)
 	}
 }
+
+func TestBootstrapKindFallsBackToTheDetectedProvider(t *testing.T) {
+	nodeClass := &OxideNodeClass{
+		Status: OxideNodeClassStatus{Bootstrap: &BootstrapStatus{Kind: BootstrapKindKubeadm}},
+	}
+	if got := nodeClass.BootstrapKind(); got != BootstrapKindKubeadm {
+		t.Fatalf("got %q", got)
+	}
+
+	// A nodeclass that names a provider owns the answer even if detection said otherwise.
+	nodeClass.Spec.Bootstrap = &Bootstrap{RKE2: &RKE2Bootstrap{}}
+	if got := nodeClass.BootstrapKind(); got != BootstrapKindRKE2 {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBootstrapConfigAccessorsTolerateAnUnsetSpec(t *testing.T) {
+	nodeClass := &OxideNodeClass{
+		Status: OxideNodeClassStatus{Bootstrap: &BootstrapStatus{Kind: BootstrapKindRKE2}},
+	}
+	// The detected path leaves spec.bootstrap nil, and the conditions still resolve.
+	if nodeClass.Spec.Bootstrap.RKE2Config().TokenRefSecret.Name != "" {
+		t.Fatal("expected a zero-valued RKE2 configuration")
+	}
+	if nodeClass.Spec.Bootstrap.KubeadmConfig().TokenTTL != nil {
+		t.Fatal("expected a zero-valued kubeadm configuration")
+	}
+	if nodeClass.StatusConditions().Root() == nil {
+		t.Fatal("expected a condition set")
+	}
+}

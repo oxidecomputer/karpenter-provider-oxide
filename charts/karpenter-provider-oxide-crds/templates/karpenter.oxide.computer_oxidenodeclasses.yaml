@@ -117,8 +117,9 @@ spec:
                     type: object
                 type: object
               bootstrap:
-                description: Bootstrap selects and configures the mechanism nodes
-                  use to join the cluster.
+                description: |-
+                  Bootstrap selects and configures the mechanism nodes use to join the cluster.
+                  Leave it unset to have the provider detected from the cluster it runs in.
                 properties:
                   kubeadm:
                     description: KubeadmBootstrap configures joining nodes with kubeadm.
@@ -545,6 +546,10 @@ spec:
                 description: Bootstrap contains resolved state that only applies to
                   a single bootstrap provider.
                 properties:
+                  kind:
+                    description: Kind is the bootstrap provider in effect, whether
+                      the spec named it or it was detected.
+                    type: string
                   kubeadm:
                     description: KubeadmStatus is the kubeadm discovery information
                       resolved from kube-public/cluster-info.

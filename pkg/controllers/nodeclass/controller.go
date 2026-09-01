@@ -38,7 +38,10 @@ import (
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
 )
 
-var kubeletArgsAlways = []string{"cloud-provider=external"}
+// kubeletArgsDefault is what a node needs to be managed by an out-of-tree cloud provider,
+// which is the only way Oxide nodes are managed. It comes first so spec.kubeletArgs can
+// override it.
+var kubeletArgsDefault = []string{"cloud-provider=external"}
 
 const maxStatusImages = 3
 
@@ -65,7 +68,7 @@ type Controller struct {
 
 	snapshots *snapshot.Provider
 
-	bootstrappers bootstrap.Bootstrappers
+	bootstrappers *bootstrap.Bootstrappers
 }
 
 func NewController(
@@ -78,7 +81,7 @@ func NewController(
 	ipPools *ippool.Provider,
 	affinityGroups *affinitygroup.Provider,
 	snapshots *snapshot.Provider,
-	bootstrappers bootstrap.Bootstrappers,
+	bootstrappers *bootstrap.Bootstrappers,
 ) *Controller {
 	return &Controller{
 		kubeClient:     kubeClient,
@@ -118,12 +121,19 @@ func (c *Controller) Reconcile(
 
 	stored := nodeClass.DeepCopy()
 
-	bootstrapper, err := c.bootstrappers.For(nodeClass)
+	bootstrapper, err := c.bootstrappers.For(ctx, nodeClass)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	if nodeClass.Status.Bootstrap == nil {
+		nodeClass.Status.Bootstrap = &v1alpha1.BootstrapStatus{}
+	}
+	nodeClass.Status.Bootstrap.Kind = bootstrapper.Name()
 
-	nodeClass.Status.KubeletArgs = lo.Uniq(append(nodeClass.Spec.KubeletArgs, kubeletArgsAlways...))
+	nodeClass.Status.KubeletArgs = bootstrap.MergeKubeletArgs(
+		kubeletArgsDefault,
+		nodeClass.Spec.KubeletArgs,
+	)
 
 	cluster, err := c.resolveCluster(ctx, nodeClass)
 	if err != nil {

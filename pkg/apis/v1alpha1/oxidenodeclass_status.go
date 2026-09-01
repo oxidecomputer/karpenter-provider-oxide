@@ -115,6 +115,9 @@ type OxideNodeClassStatus struct {
 
 // BootstrapStatus holds resolved state that is meaningful to exactly one bootstrap provider.
 type BootstrapStatus struct {
+	// Kind is the bootstrap provider in effect, whether the spec named it or it was detected.
+	// +optional
+	Kind string `json:"kind,omitempty"`
 	// +optional
 	Kubeadm *KubeadmStatus `json:"kubeadm,omitempty"`
 }
@@ -242,6 +245,18 @@ type OxideEphemeralIP struct {
 	PoolName string `json:"poolName,omitempty"`
 }
 
+// BootstrapKind is the provider in effect: the one the spec names, or the one detection
+// resolved and recorded in status.
+func (in *OxideNodeClass) BootstrapKind() string {
+	if kind := in.Spec.Bootstrap.Kind(); kind != "" {
+		return kind
+	}
+	if in.Status.Bootstrap != nil {
+		return in.Status.Bootstrap.Kind
+	}
+	return ""
+}
+
 // StatusConditions returns the node class condition set.
 func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.ConditionSet {
 
@@ -250,9 +265,9 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		ConditionTypeSubnetsResolved,
 		ConditionTypeStorageResolved,
 	}
-	switch in.Spec.Bootstrap.Kind() {
+	switch in.BootstrapKind() {
 	case BootstrapKindRKE2:
-		if in.Spec.Bootstrap.RKE2.TokenRefSecret.Name != "" {
+		if in.Spec.Bootstrap.RKE2Config().TokenRefSecret.Name != "" {
 			conds = append(conds, ConditionTypeTokenRefSecretAccessible)
 		}
 	case BootstrapKindKubeadm:

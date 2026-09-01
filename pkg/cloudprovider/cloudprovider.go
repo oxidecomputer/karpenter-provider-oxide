@@ -61,7 +61,7 @@ type OxideCloudProvider struct {
 	availability         *availability.Manager
 	storageRefusals      *storagerefusal.Tracker
 
-	bootstrappers  bootstrap.Bootstrappers
+	bootstrappers  *bootstrap.Bootstrappers
 	repairPolicies []cloudprovider.RepairPolicy
 
 	drifters []providers.Drifter
@@ -89,7 +89,7 @@ func NewOxideCloudProvider(
 	instanceTypeStore *nodeoverlay.InstanceTypeStore,
 	availabilityManager *availability.Manager,
 	storageRefusals *storagerefusal.Tracker,
-	bootstrappers bootstrap.Bootstrappers,
+	bootstrappers *bootstrap.Bootstrappers,
 	repairPolicies []cloudprovider.RepairPolicy,
 	drifters []providers.Drifter,
 ) *OxideCloudProvider {
@@ -149,7 +149,7 @@ func (c *OxideCloudProvider) Create(
 	)
 	nodeTaints = lo.UniqBy(nodeTaints, func(t corev1.Taint) string { return t.Key })
 
-	bootstrapper, err := c.bootstrappers.For(nodeClass)
+	bootstrapper, err := c.bootstrappers.For(ctx, nodeClass)
 	if err != nil {
 		return nil, err
 	}

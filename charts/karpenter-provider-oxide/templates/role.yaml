@@ -74,6 +74,24 @@ rules:
     resources: ["endpointslices"]
     resourceNames: ["kubernetes"]
     verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "karpenter.fullname" . }}-bootstrap-detection
+  namespace: kube-system
+  labels:
+    {{- include "karpenter.labels" . | nindent 4 }}
+  {{- with .Values.additionalAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+rules:
+  # Reading kubeadm-config is how a nodeclass that names no bootstrap provider gets one.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kubeadm-config"]
+    verbs: ["get"]
 {{- if .Values.bootstrap.kubeadm.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

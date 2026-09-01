@@ -181,3 +181,42 @@ func TestUserDataWritesTheConfigThroughTheGuardedHeredoc(t *testing.T) {
 		t.Error("the join token is missing from the rendered user-data")
 	}
 }
+
+func TestDetect(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		objects []client.Object
+		want    bool
+	}{
+		{
+			name: "every node RKE2 manages carries its node-args annotation",
+			objects: []client.Object{
+				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "plain"}},
+				&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:        "agent",
+					Annotations: map[string]string{nodeArgsAnnotation: "agent"},
+				}},
+			},
+			want: true,
+		},
+		{
+			name:    "and a cluster of nodes without it is not RKE2",
+			objects: []client.Object{&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
+				WithObjects(test.objects...).
+				Build()
+
+			got, err := NewBootstrapper(kubeClient).Detect(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("got %t, want %t", got, test.want)
+			}
+		})
+	}
+}

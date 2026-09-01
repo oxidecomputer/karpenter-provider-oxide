@@ -1,5 +1,7 @@
 # karpenter-provider-oxide
 
+This project is currently in public preview.
+
 The Karpenter provider for Oxide enables you to manage Kubernetes nodes on Oxide. 
 Karpenter scales up your nodes when needed and then back down when they're not.
 
@@ -20,7 +22,7 @@ helm upgrade --install karpenter \
   oci://ghcr.io/oxidecomputer/helm-charts/karpenter-provider-oxide
 ```
 
-Karpenter uses an Oxide token secret to managed instances via the Oxide API:
+Karpenter uses an Oxide token secret to manage instances via the Oxide API:
 
 ```console
 kubectl create secret generic oxide-api-token \
@@ -65,10 +67,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-  kubeletArgs:
-    - cloud-provider=external
-  bootstrap:
-    kubeadm: {}
   imageSelector:
     - id: ${OXIDE_IMAGE_ID}
   subnetSelector:

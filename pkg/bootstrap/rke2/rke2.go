@@ -20,6 +20,8 @@ const (
 	configPath = "/etc/rancher/rke2/config.yaml"
 
 	consumerUnit = "rke2-agent.service"
+
+	nodeArgsAnnotation = "rke2.io/node-args"
 )
 
 // Config is the subset of /etc/rancher/rke2/config.yaml that Karpenter manages.
@@ -69,7 +71,7 @@ func (b *Bootstrapper) Resolve(
 		)
 	}
 
-	tokenRef := nodeClass.Spec.Bootstrap.RKE2.TokenRefSecret
+	tokenRef := nodeClass.Spec.Bootstrap.RKE2Config().TokenRefSecret
 	if tokenRef.Name == "" {
 		return nil
 	}
@@ -86,6 +88,20 @@ func (b *Bootstrapper) Resolve(
 		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeTokenRefSecretAccessible)
 	}
 	return nil
+}
+
+// Detect reports an RKE2 cluster: every node RKE2 manages carries its node-args annotation.
+func (b *Bootstrapper) Detect(ctx context.Context) (bool, error) {
+	nodes := &corev1.NodeList{}
+	if err := b.reader.List(ctx, nodes); err != nil {
+		return false, fmt.Errorf("unable to list nodes: %w", err)
+	}
+	for _, node := range nodes.Items {
+		if _, ok := node.Annotations[nodeArgsAnnotation]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // UserData writes the agent config.yaml and starts rke2-agent.
@@ -122,7 +138,7 @@ func (b *Bootstrapper) token(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
 ) (string, error) {
-	tokenRef := nodeClass.Spec.Bootstrap.RKE2.TokenRefSecret
+	tokenRef := nodeClass.Spec.Bootstrap.RKE2Config().TokenRefSecret
 	if tokenRef.Name == "" {
 		return "", nil
 	}

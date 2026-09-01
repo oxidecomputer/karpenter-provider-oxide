@@ -20,6 +20,8 @@ serviceAccount:
 # -- Specifies additional rules for the core ClusterRole.
 additionalClusterRoleRules: []
 # -- Bootstrap provider configuration.
+# Which bootstrap providers this install may operate. The provider itself is detected from
+# the cluster unless an OxideNodeClass names one; these only gate its RBAC.
 bootstrap:
   rke2:
     # -- Enable RBAC for the RKE2 bootstrap provider.

@@ -27,6 +27,7 @@ type OxideNodeClassSpec struct {
 	// +optional
 	KubeletArgs []string `json:"kubeletArgs,omitempty"`
 	// Bootstrap selects and configures the mechanism nodes use to join the cluster.
+	// Leave it unset to have the provider detected from the cluster it runs in.
 	// +optional
 	Bootstrap *Bootstrap `json:"bootstrap,omitempty"`
 	// ImageSelector is used to select an image to launch nodes with.
@@ -402,6 +403,24 @@ type Bootstrap struct {
 	RKE2 *RKE2Bootstrap `json:"rke2,omitempty"`
 	// +optional
 	Kubeadm *KubeadmBootstrap `json:"kubeadm,omitempty"`
+}
+
+// RKE2Config returns the RKE2 configuration, zero-valued when the nodeclass left it out.
+func (in *Bootstrap) RKE2Config() RKE2Bootstrap {
+	if in == nil || in.RKE2 == nil {
+		return RKE2Bootstrap{}
+	}
+	return *in.RKE2
+}
+
+// KubeadmConfig returns the kubeadm configuration, zero-valued when the nodeclass left it out.
+// The provider supplies its own defaults for the zero fields, since CRD defaulting only
+// reaches a kubeadm block that was actually written.
+func (in *Bootstrap) KubeadmConfig() KubeadmBootstrap {
+	if in == nil || in.Kubeadm == nil {
+		return KubeadmBootstrap{}
+	}
+	return *in.Kubeadm
 }
 
 // Kind returns the bootstrap provider configured on the nodeclass, or an empty string if none is.

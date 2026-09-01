@@ -19,6 +19,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,6 +54,9 @@ const (
 	configPath = "/etc/kubernetes/karpenter-join.yaml"
 
 	consumerUnit = "kubelet.service"
+
+	clusterConfigNamespace = "kube-system"
+	clusterConfigName      = "kubeadm-config"
 )
 
 // Bootstrapper implements bootstrap.Bootstrapper for kubeadm.
@@ -106,6 +110,25 @@ func (b *Bootstrapper) Resolve(
 		ClusterName:  clusterInfo.clusterName,
 	}
 	return nil
+}
+
+// Detect reports a kubeadm cluster: kubeadm stores the cluster configuration it was
+// initialized with in kube-system/kubeadm-config.
+func (b *Bootstrapper) Detect(ctx context.Context) (bool, error) {
+	configMap := &corev1.ConfigMap{}
+	objKey := client.ObjectKey{Namespace: clusterConfigNamespace, Name: clusterConfigName}
+	if err := b.reader.Get(ctx, objKey, configMap); err != nil {
+		if kerrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"unable to retrieve the %s/%s ConfigMap: %w",
+			clusterConfigNamespace,
+			clusterConfigName,
+			err,
+		)
+	}
+	return true, nil
 }
 
 // UserData mints a short-lived bootstrap token for this NodeClaim and renders a JoinConfiguration that uses it.
@@ -244,8 +267,8 @@ func (b *Bootstrapper) createToken(
 	}
 
 	ttl := defaultTokenTTL
-	if nodeClass.Spec.Bootstrap.Kubeadm.TokenTTL != nil {
-		ttl = nodeClass.Spec.Bootstrap.Kubeadm.TokenTTL.Duration
+	if tokenTTL := nodeClass.Spec.Bootstrap.KubeadmConfig().TokenTTL; tokenTTL != nil {
+		ttl = tokenTTL.Duration
 	}
 
 	secret := &corev1.Secret{
@@ -293,7 +316,7 @@ func (b *Bootstrapper) joinConfiguration(
 	req bootstrap.Request,
 	token string,
 ) (string, error) {
-	configVersion := nodeClass.Spec.Bootstrap.Kubeadm.ConfigVersion
+	configVersion := nodeClass.Spec.Bootstrap.KubeadmConfig().ConfigVersion
 	if configVersion == "" {
 		configVersion = configVersionV1beta4
 	}
