@@ -154,7 +154,11 @@ func (p *Provider) resolveSelector(
 
 	if nameOrID != "" {
 		subnet, err := p.ox.VpcSubnetView(ctx, oxide.VpcSubnetViewParams{
-			Subnet: oxide.NameOrId(nameOrID), Vpc: oxide.NameOrId(vpcNameOrID), Project: oxide.NameOrId(project),
+			Subnet: oxide.NameOrId(
+				nameOrID,
+			),
+			Vpc:     oxide.NameOrId(vpcNameOrID),
+			Project: oxide.NameOrId(project),
 		})
 		if err != nil {
 			if errors.Is(err, oxide.ErrObjectNotFound) {

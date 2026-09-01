@@ -23,6 +23,9 @@ const (
 	serialLength = 20
 
 	localBlockSize = 4096
+
+	kindImage    = "image"
+	kindSnapshot = "snapshot"
 )
 
 // ErrTooManyDisks is a layout asking for more disks than an instance can attach.
@@ -232,13 +235,13 @@ func source(nodeClass *v1alpha1.OxideNodeClass, set v1alpha1.DiskSet) (string, s
 		if !found {
 			return "", "", fmt.Errorf("diskSet %q: no image matched its selector", set.Name)
 		}
-		id, sourceSize, kind = image.ID, image.SizeBytes, "image"
+		id, sourceSize, kind = image.ID, image.SizeBytes, kindImage
 	default:
 		snapshot, found := lo.First(status.Snapshots)
 		if !found {
 			return "", "", fmt.Errorf("diskSet %q: no snapshot matched its selector", set.Name)
 		}
-		id, sourceSize, kind = snapshot.ID, snapshot.SizeBytes, "snapshot"
+		id, sourceSize, kind = snapshot.ID, snapshot.SizeBytes, kindSnapshot
 	}
 
 	if err := set.ValidateSourceSize(sourceSize); err != nil {

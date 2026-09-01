@@ -256,6 +256,8 @@ func TestAnUnreadEntryIsPruned(t *testing.T) {
 func TestConcurrentGetsCollapse(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 	var calls atomic.Int64
+	// The nil error is Cache.Get's signature, not a choice.
+	//nolint:unparam
 	resolve := func(context.Context) (string, error) {
 		calls.Add(1)
 		return "first", nil
@@ -279,6 +281,8 @@ func TestDifferentKeysResolveConcurrently(t *testing.T) {
 	cache := NewCacheWithClock[string]("test", ttl, newClock().Now)
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
+	// The nil error is Cache.Get's signature, not a choice.
+	//nolint:unparam
 	resolve := func(context.Context) (string, error) {
 		entered <- struct{}{}
 		<-release
@@ -308,7 +312,11 @@ func TestDifferentKeysResolveConcurrently(t *testing.T) {
 func TestEntryBecomingActiveWhileEvictionWaitsIsKept(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", ttl, clk.Now)
-	if _, err := cache.Get(context.Background(), "active", (&counter{value: "value"}).resolve); err != nil {
+	if _, err := cache.Get(
+		context.Background(),
+		"active",
+		(&counter{value: "value"}).resolve,
+	); err != nil {
 		t.Fatal(err)
 	}
 	clk.advance(entryTTLIdle + time.Minute)
@@ -371,6 +379,8 @@ func TestConcurrentResolutionEvictionAndPublication(t *testing.T) {
 	clk := newClock()
 	cache := NewCacheWithClock[string]("test", 0, clk.Now)
 	var calls atomic.Int64
+	// The nil error is Cache.Get's signature, not a choice.
+	//nolint:unparam
 	resolve := func(context.Context) (string, error) {
 		calls.Add(1)
 		return "value", nil

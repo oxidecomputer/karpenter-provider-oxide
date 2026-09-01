@@ -146,9 +146,20 @@ func TestResolveHandlesEmptyVPCsInAnySelectorOrder(t *testing.T) {
 		want      int
 	}{
 		{name: "one empty VPC", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}}},
-		{name: "empty after non-empty", selectors: []v1alpha1.SubnetSelector{{VPCName: "prod"}, {VPCName: "empty"}}, want: 2},
-		{name: "empty before non-empty", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "prod"}}, want: 2},
-		{name: "several empty VPCs", selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "also-empty"}}},
+		{
+			name:      "empty after non-empty",
+			selectors: []v1alpha1.SubnetSelector{{VPCName: "prod"}, {VPCName: "empty"}},
+			want:      2,
+		},
+		{
+			name:      "empty before non-empty",
+			selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "prod"}},
+			want:      2,
+		},
+		{
+			name:      "several empty VPCs",
+			selectors: []v1alpha1.SubnetSelector{{VPCName: "empty"}, {VPCName: "also-empty"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

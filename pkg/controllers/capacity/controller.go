@@ -22,9 +22,11 @@ import (
 	"github.com/awslabs/operatorpkg/reconciler"
 	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -50,6 +52,8 @@ const (
 type Controller struct {
 	kubeClient    client.Client
 	instanceTypes *instancetype.Provider
+	availability  *availability.Manager
+	storage       *storagerefusal.Tracker
 	period        time.Duration
 
 	crdMissingLogged bool
@@ -58,11 +62,15 @@ type Controller struct {
 func NewController(
 	kubeClient client.Client,
 	instanceTypes *instancetype.Provider,
+	availabilityManager *availability.Manager,
+	storageRefusals *storagerefusal.Tracker,
 	period time.Duration,
 ) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		instanceTypes: instanceTypes,
+		availability:  availabilityManager,
+		storage:       storageRefusals,
 		period:        period,
 	}
 }
@@ -77,8 +85,9 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 
 	c.seedLaunchableFloor(ctx)
 
-	rack, inventory := c.instanceTypes.Rack()
-	status := c.render(rack, inventory)
+	reading := c.availability.Snapshot()
+	rack, inventory := reading.Rack()
+	status := c.render(reading)
 	publishMetrics(status, rack, inventory)
 
 	if err := c.publish(ctx, status); err != nil {
@@ -117,7 +126,7 @@ func (c *Controller) seedLaunchableFloor(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		c.instanceTypes.SeedLaunchable(ctx, specs)
+		c.availability.SeedLaunchable(ctx, specs)
 	}
 }
 
@@ -128,10 +137,8 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 		Complete(singleton.AsReconciler(c))
 }
 
-func (c *Controller) render(
-	rack capacity.Snapshot,
-	inventory instancetype.InventoryState,
-) v1alpha1.OxideCapacityStatus {
+func (c *Controller) render(reading availability.Snapshot) v1alpha1.OxideCapacityStatus {
+	rack, inventory := reading.Rack()
 	now := timestamp(time.Now())
 
 	status := v1alpha1.OxideCapacityStatus{
@@ -139,19 +146,19 @@ func (c *Controller) render(
 		Inventory:  v1alpha1.InventoryStatus{State: string(inventory)},
 	}
 
-	for _, entry := range c.instanceTypes.Unavailable() {
+	for _, entry := range reading.Entries() {
 
 		corner := entry.Reach
 		if corner.Ncpus == 0 || corner.MemInGiB == 0 {
-			corner = entry.Specs
+			corner = entry.Shape
 		}
 		unavailable := v1alpha1.UnavailableRange{
 			Range:         rangeDescription(corner),
 			FromNcpus:     corner.Ncpus,
 			FromMemoryGiB: corner.MemInGiB,
 			RefusedInstanceType: instancetype.SpecsToInstanceTypeName(
-				entry.Specs.Ncpus,
-				entry.Specs.MemInGiB,
+				entry.Shape.Ncpus,
+				entry.Shape.MemInGiB,
 			),
 			Reason:              string(entry.Reason),
 			State:               shapeState(entry.State),
@@ -165,7 +172,7 @@ func (c *Controller) render(
 		}
 		unavailable.LastRefusal = timestamp(entry.LastICE)
 
-		if entry.State == instancetype.StateBackoff {
+		if entry.State == availability.StateBackoff {
 			unavailable.RetryAfter = timestamp(entry.RetryAfter)
 		}
 		status.InstanceTypes.UnavailableRanges = append(
@@ -177,7 +184,7 @@ func (c *Controller) render(
 	if rack.Known() {
 		renderRack(c.instanceTypes, rack, &status.Inventory)
 
-		if inventory == instancetype.InventoryFresh {
+		if inventory == availability.InventoryFresh {
 			status.InstanceTypes.UnavailableRanges = append(
 				status.InstanceTypes.UnavailableRanges,
 				rackRanges(rack, status.Inventory.LargestFeasibleInstanceType)...,
@@ -193,7 +200,7 @@ func (c *Controller) render(
 	if quota, err := c.instanceTypes.Quota(); err == nil {
 		status.Quota = renderQuota(quota)
 	}
-	if refusal, ok := c.instanceTypes.StorageRefusal(); ok {
+	if refusal, ok := c.storage.Last(); ok {
 		status.Storage = &v1alpha1.StorageRefusal{
 			Reason:              string(refusal.Reason),
 			Message:             refusal.Message,
@@ -349,7 +356,7 @@ func crdMissing(err error) bool {
 func publishMetrics(
 	status v1alpha1.OxideCapacityStatus,
 	rack capacity.Snapshot,
-	inventory instancetype.InventoryState,
+	inventory availability.InventoryState,
 ) {
 	metrics.ResetShapeGauges()
 	metrics.ResetSledGauges()
@@ -372,7 +379,7 @@ func publishMetrics(
 		}
 		metrics.BackoffSeconds.WithLabelValues(label).Set(metrics.Seconds(remaining))
 
-		if inventory != instancetype.InventoryFresh {
+		if inventory != availability.InventoryFresh {
 			continue
 		}
 		specs, err := instancetype.InstanceTypeToSpecs(label)

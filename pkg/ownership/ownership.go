@@ -56,7 +56,8 @@ type ErrOwnershipConflict struct {
 
 func (e *ErrOwnershipConflict) Error() string {
 	return fmt.Sprintf(
-		"ownership conflict (%s): expected cluster=%q nodeclaim=%q name=%q kind=%q, observed cluster=%q nodeclaim=%q name=%q kind=%q",
+		"ownership conflict (%s): expected cluster=%q nodeclaim=%q name=%q kind=%q, "+
+			"observed cluster=%q nodeclaim=%q name=%q kind=%q",
 		e.Reason,
 		e.Expected.ClusterUID,
 		e.Expected.NodeClaimUID,
@@ -194,14 +195,26 @@ func Verify(description string, expected Marker) error {
 		}
 	}
 	if observed.ClusterUID != expected.ClusterUID {
-		return &ErrOwnershipConflict{Reason: ReasonForeignCluster, Expected: expected, Observed: observed}
+		return &ErrOwnershipConflict{
+			Reason:   ReasonForeignCluster,
+			Expected: expected,
+			Observed: observed,
+		}
 	}
 	if observed.NodeClaimUID != expected.NodeClaimUID ||
 		observed.NodeClaimName != expected.NodeClaimName {
-		return &ErrOwnershipConflict{Reason: ReasonWrongNodeClaim, Expected: expected, Observed: observed}
+		return &ErrOwnershipConflict{
+			Reason:   ReasonWrongNodeClaim,
+			Expected: expected,
+			Observed: observed,
+		}
 	}
 	if observed.Kind != expected.Kind {
-		return &ErrOwnershipConflict{Reason: ReasonWrongKind, Expected: expected, Observed: observed}
+		return &ErrOwnershipConflict{
+			Reason:   ReasonWrongKind,
+			Expected: expected,
+			Observed: observed,
+		}
 	}
 	return nil
 }

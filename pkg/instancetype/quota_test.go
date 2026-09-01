@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 )
 
@@ -25,13 +26,13 @@ func (f *fakeQuotas) Refresh(context.Context, bool) (bool, error) {
 
 func TestRefreshQuota(t *testing.T) {
 	quotas := &fakeQuotas{quota: smallQuota()}
-	NewProvider(quotas, nil).RefreshQuota(context.Background())
+	NewProvider(quotas, availability.New(nil)).RefreshQuota(context.Background())
 
 	if quotas.refreshes != 1 {
 		t.Errorf("refreshes = %d, want 1", quotas.refreshes)
 	}
 
-	NewProvider(nil, nil).RefreshQuota(context.Background())
+	NewProvider(nil, availability.New(nil)).RefreshQuota(context.Background())
 }
 
 func smallQuota() utilization.Quota {
@@ -43,7 +44,7 @@ func smallQuota() utilization.Quota {
 }
 
 func TestQuotaMarksOversizedOfferingsUnavailable(t *testing.T) {
-	p := NewProvider(&fakeQuotas{quota: smallQuota()}, nil)
+	p := NewProvider(&fakeQuotas{quota: smallQuota()}, availability.New(nil))
 
 	for _, tc := range []struct {
 		name string
@@ -75,7 +76,7 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 		{"a provider with no snapshot", &fakeQuotas{err: utilization.ErrNoSnapshot}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewProvider(tc.quotas, nil)
+			p := NewProvider(tc.quotas, availability.New(nil))
 
 			it, ok := p.Get("252-517")
 			if !ok {
@@ -84,8 +85,8 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 			if !it.Offerings[0].Available {
 				t.Error("a shape was ruled out despite the quota being unknown")
 			}
-			if unavailable, _ := p.IsUnavailable(Specs{Ncpus: 252, MemInGiB: 517}); unavailable {
-				t.Error("IsUnavailable ruled out a shape despite the quota being unknown")
+			if p.IsOverQuota(Specs{Ncpus: 252, MemInGiB: 517}) {
+				t.Error("IsOverQuota ruled out a shape despite the quota being unknown")
 			}
 		})
 	}
@@ -93,7 +94,7 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 
 func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 	quotas := &fakeQuotas{quota: smallQuota(), gen: 1}
-	p := NewProvider(quotas, nil)
+	p := NewProvider(quotas, availability.New(nil))
 
 	if it, _ := p.Get("31-64"); it.Offerings[0].Available {
 		t.Fatal("31-64 was available under a 16 vCPU quota")
@@ -112,22 +113,31 @@ func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 }
 
 func TestQuotaAndRefusalsCombine(t *testing.T) {
-	p := NewProvider(&fakeQuotas{quota: smallQuota()}, nil)
+	manager := availability.New(nil)
+	p := providerUsing(t, &fakeQuotas{quota: smallQuota()}, manager)
 
-	p.RecordICE(context.Background(), Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
+	manager.RecordICE(
+		context.Background(),
+		Specs{Ncpus: 4, MemInGiB: 8},
+		availability.ReasonCapacity,
+	)
 
 	for _, tc := range []struct {
 		name   string
 		specs  Specs
-		reason Reason
+		reason availability.Reason
 	}{
-		{"refused shape", Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity},
-		{"larger than the refused shape", Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity},
-		{"over quota only", Specs{Ncpus: 32, MemInGiB: 2}, ReasonQuota},
+		{"refused shape", Specs{Ncpus: 4, MemInGiB: 8}, availability.ReasonCapacity},
+		{"larger than the refused shape", Specs{Ncpus: 8, MemInGiB: 16}, availability.ReasonCapacity},
+		{"over quota only", Specs{Ncpus: 32, MemInGiB: 2}, availability.ReasonQuota},
 		{"under both", Specs{Ncpus: 2, MemInGiB: 4}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			unavailable, reason := p.IsUnavailable(tc.specs)
+			decision := manager.Check(availability.Request{Shape: tc.specs})
+			unavailable, reason := !decision.Available, decision.Reason
+			if p.IsOverQuota(tc.specs) {
+				unavailable, reason = true, availability.ReasonQuota
+			}
 			if unavailable != (tc.reason != "") {
 				t.Errorf("unavailable = %v, want %v", unavailable, tc.reason != "")
 			}
@@ -135,34 +145,6 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 				t.Errorf("reason = %q, want %q", reason, tc.reason)
 			}
 		})
-	}
-}
-
-func TestQuotaReasonWinsOverCapacity(t *testing.T) {
-	c := NewCapacityManager(nil)
-	ctx := context.Background()
-
-	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 4, MemInGiB: 8}, ReasonQuota)
-
-	if _, reason := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); reason != ReasonQuota {
-		t.Errorf("reason = %q, want %q when both cover the shape", reason, ReasonQuota)
-	}
-}
-
-func TestRecordICESubsumesAcrossReasons(t *testing.T) {
-	c := NewCapacityManager(nil)
-	ctx := context.Background()
-
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonQuota)
-
-	if got := len(c.Snapshot()); got != 1 {
-		t.Fatalf("snapshot has %d entries, want the larger capacity entry subsumed", got)
-	}
-	unavailable, reason := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32})
-	if !unavailable || reason != ReasonQuota {
-		t.Errorf("IsUnavailable = (%v, %q), want (true, %q)", unavailable, reason, ReasonQuota)
 	}
 }
 

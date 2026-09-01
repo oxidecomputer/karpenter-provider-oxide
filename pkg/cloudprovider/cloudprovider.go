@@ -14,8 +14,8 @@ import (
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/google/uuid"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
@@ -24,6 +24,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -56,8 +57,9 @@ type OxideCloudProvider struct {
 	bootDiskPool         *bootdisk.Provider
 	instanceTypeProvider *instancetype.Provider
 	instanceTypeStore    instanceTypeOverlayStore
+	availability         *availability.Manager
+	storageRefusals      *storagerefusal.Tracker
 
-	affinityPolicy *affinitypolicy.Tracker
 	bootstrappers  bootstrap.Bootstrappers
 	repairPolicies []cloudprovider.RepairPolicy
 
@@ -84,7 +86,8 @@ func NewOxideCloudProvider(
 	bootDiskPool *bootdisk.Provider,
 	instanceTypeProvider *instancetype.Provider,
 	instanceTypeStore *nodeoverlay.InstanceTypeStore,
-	affinityPolicy *affinitypolicy.Tracker,
+	availabilityManager *availability.Manager,
+	storageRefusals *storagerefusal.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 	repairPolicies []cloudprovider.RepairPolicy,
 	drifters []providers.Drifter,
@@ -99,7 +102,8 @@ func NewOxideCloudProvider(
 		bootDiskPool:         bootDiskPool,
 		instanceTypeProvider: instanceTypeProvider,
 		instanceTypeStore:    instanceTypeStore,
-		affinityPolicy:       affinityPolicy,
+		availability:         availabilityManager,
+		storageRefusals:      storageRefusals,
 		bootstrappers:        bootstrappers,
 		repairPolicies:       repairPolicies,
 		drifters:             drifters,
@@ -148,18 +152,26 @@ func (c *OxideCloudProvider) Create(
 		}
 		candidates = req.Values
 	}
+	placement := placementFor(nodeClass.Status.AffinityGroups)
 
-	blockedBy := instancetype.Reason("")
+	blockedBy := availability.Reason("")
 	available := lo.Filter(candidates, func(candidate string, _ int) bool {
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
 		if err != nil {
 			return false
 		}
-		unavailable, reason := c.instanceTypeProvider.IsUnavailable(specs)
-		if unavailable && (blockedBy == "" || reason == instancetype.ReasonQuota) {
-			blockedBy = reason
+		if c.instanceTypeProvider.IsOverQuota(specs) {
+			blockedBy = availability.ReasonQuota
+			return false
 		}
-		return !unavailable
+		decision := c.availability.Check(availability.Request{Shape: specs, Placement: placement})
+		if !decision.Available {
+			if blockedBy != availability.ReasonQuota {
+				blockedBy = decision.Reason
+			}
+			return false
+		}
+		return true
 	})
 
 	if len(candidates) > 0 && len(available) == 0 {
@@ -184,9 +196,12 @@ func (c *OxideCloudProvider) Create(
 	}
 
 	instanceType, held := instancetype.Specs{}, false
+	var probe *availability.Probe
 	for _, specs := range ordered {
-		if c.instanceTypeProvider.TryAcquire(specs) {
+		request := availability.Request{Shape: specs, Placement: placement}
+		if acquired, ok := c.availability.Acquire(request); ok {
 			instanceType, held = specs, true
+			probe = acquired
 			break
 		}
 	}
@@ -198,7 +213,7 @@ func (c *OxideCloudProvider) Create(
 		)
 	}
 
-	defer c.instanceTypeProvider.ReleaseProbe(instanceType)
+	defer probe.Release()
 	effectiveInstanceType, err := c.effectiveInstanceType(
 		ctx,
 		nodeClaim,
@@ -229,7 +244,10 @@ func (c *OxideCloudProvider) Create(
 		if admits, resource := quota.Admits(request); !admits {
 
 			if resource != utilization.ResourceStorage {
-				c.instanceTypeProvider.RecordICE(ctx, instanceType, instancetype.ReasonQuota)
+				probe.RecordRefusal(ctx, availability.Refusal{
+					Scope:  availability.RefusalScopeGlobal,
+					Reason: availability.ReasonQuota,
+				})
 			}
 			return nil, cloudprovider.NewInsufficientCapacityError(
 				fmt.Errorf("%s", quota.Explain(request, resource)),
@@ -300,13 +318,12 @@ func (c *OxideCloudProvider) Create(
 		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
 	})
 	if err != nil {
-		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, instanceType, request)
+		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, request, probe)
 	}
 	launchStarted = true
 
-	c.instanceTypeProvider.RecordSuccess(ctx, instanceType)
-
-	c.affinityPolicy.RecordSuccess(ctx, nodeClass.Name)
+	probe.RecordSuccess(ctx)
+	c.storageRefusals.Clear(ctx)
 
 	resolvedNodeClaim, err := c.resolveLaunched(
 		ctx,
@@ -399,8 +416,8 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 	ctx context.Context,
 	err error,
 	nodeClass *v1alpha1.OxideNodeClass,
-	instanceType instancetype.Specs,
 	request utilization.Request,
+	probe *availability.Probe,
 ) error {
 
 	var stuck *instance.StuckLaunchResourceError
@@ -425,8 +442,8 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 			err,
 		)
 
-		c.instanceTypeProvider.RecordStorageRefusal(ctx, reason, diagnosis.Error())
-		if reason == instancetype.ReasonQuota {
+		c.storageRefusals.Record(ctx, reason, diagnosis.Error())
+		if reason == availability.ReasonQuota {
 
 			c.instanceTypeProvider.RefreshQuota(ctx)
 		}
@@ -439,14 +456,21 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 			err,
 		)
 
-		if reason == instancetype.ReasonCapacity &&
-			affinitypolicy.Attributable(nodeClass.Status.AffinityGroups) {
-			c.affinityPolicy.RecordRefusal(ctx, nodeClass.Name, diagnosis.Error())
+		placement := placementFor(nodeClass.Status.AffinityGroups)
+		if reason == availability.ReasonCapacity && placement != "" {
+			probe.RecordRefusal(ctx, availability.Refusal{
+				Scope:   availability.RefusalScopePlacement,
+				Reason:  reason,
+				Message: diagnosis.Error(),
+			})
 			return cloudprovider.NewInsufficientCapacityError(diagnosis)
 		}
 
-		c.instanceTypeProvider.RecordICE(ctx, instanceType, reason)
-		if reason == instancetype.ReasonQuota {
+		probe.RecordRefusal(ctx, availability.Refusal{
+			Scope:  availability.RefusalScopeGlobal,
+			Reason: reason,
+		})
+		if reason == availability.ReasonQuota {
 
 			c.instanceTypeProvider.RefreshQuota(ctx)
 		}
@@ -700,7 +724,14 @@ func (c *OxideCloudProvider) Get(
 		oxideInstance.Description, c.clusterUID, ownership.KindInstance,
 	)
 	if verifyErr != nil {
-		c.rejectOwnership(ctx, "get", "instance", oxideInstance.Id, string(oxideInstance.Name), verifyErr)
+		c.rejectOwnership(
+			ctx,
+			"get",
+			"instance",
+			oxideInstance.Id,
+			string(oxideInstance.Name),
+			verifyErr,
+		)
 		return nil, cloudprovider.NewNodeClaimNotFoundError(verifyErr)
 	}
 	nodeClaim, err := c.InstanceToNodeClaim(oxideInstance, nil, &karpcorev1.NodeClaim{
@@ -851,9 +882,15 @@ func (c *OxideCloudProvider) GetInstanceTypes(
 
 func (c *OxideCloudProvider) noCandidatesError(
 	candidates []string,
-	reason instancetype.Reason,
+	reason availability.Reason,
 ) error {
-	if reason != instancetype.ReasonQuota {
+	if reason == availability.ReasonAffinityPolicy {
+		return fmt.Errorf(
+			"all %d instance types the NodeClaim can use are temporarily unavailable for its affinity placement",
+			len(candidates),
+		)
+	}
+	if reason != availability.ReasonQuota {
 		return fmt.Errorf(
 			"all %d instance types the NodeClaim can use were recently refused for insufficient capacity",
 			len(candidates),
@@ -890,16 +927,16 @@ func (c *OxideCloudProvider) noCandidatesError(
 func (c *OxideCloudProvider) diagnoseRefusal(
 	request utilization.Request,
 	cause error,
-) (instancetype.Reason, error) {
+) (availability.Reason, error) {
 	quota, err := c.instanceTypeProvider.Quota()
 	if err != nil {
-		return instancetype.ReasonCapacity, cause
+		return availability.ReasonCapacity, cause
 	}
 	admits, resource := quota.Admits(request)
 	if admits {
-		return instancetype.ReasonCapacity, cause
+		return availability.ReasonCapacity, cause
 	}
-	return instancetype.ReasonQuota, fmt.Errorf(
+	return availability.ReasonQuota, fmt.Errorf(
 		"%s, so the launch was refused: %w",
 		quota.Explain(request, resource),
 		cause,
@@ -922,6 +959,16 @@ func affinityGroups(groups []v1alpha1.OxideAffinityGroup) []string {
 			return group.ID, group.Type == v1alpha1.AffinityGroupTypeAffinity
 		},
 	)
+}
+
+func placementFor(groups []v1alpha1.OxideAffinityGroup) availability.Placement {
+	constraints := lo.FilterMap(
+		groups,
+		func(group v1alpha1.OxideAffinityGroup, _ int) (availability.Constraint, bool) {
+			return availability.Constraint{Kind: group.Type, ID: group.ID}, group.Policy == "fail"
+		},
+	)
+	return availability.NewPlacement(constraints...)
 }
 
 func smallestSpecs(candidates []string) instancetype.Specs {

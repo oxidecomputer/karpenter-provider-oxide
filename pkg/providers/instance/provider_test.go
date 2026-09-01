@@ -247,95 +247,10 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
-		if f.serveDisks(t, w, r, path) {
-			return
-		}
-
-		switch {
-		case r.Method == http.MethodPost && path == "instances":
-			f.instanceCreates++
-			var body oxide.InstanceCreate
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("unable to decode the instance create: %v", err)
-			}
-			if attach, ok := body.BootDisk.Value.(*oxide.InstanceDiskAttachmentAttach); ok {
-				f.attachedBootDisk = string(attach.Name)
-			}
-			f.startRequested = body.Start
-			f.antiAffinityRequested = body.AntiAffinityGroups
-			if f.instanceCreateError != "" {
-				if f.cancelOnInstanceCreate != nil {
-					f.cancelOnInstanceCreate()
-				}
-				apiError(t, w, http.StatusInsufficientStorage, f.instanceCreateError)
-				return
-			}
-			if f.instanceCreateTimeout {
-
-				hangUp(t, w)
-				return
-			}
-
-			f.instance = runningInstance()
-			f.instance.Description = body.Description
-			f.instance.RunState = oxide.InstanceStateStopped
-			if f.createdRunState != "" {
-				f.instance.RunState = f.createdRunState
-			}
-			writeJSON(t, w, http.StatusCreated, f.instance)
-
-		case r.Method == http.MethodPost && strings.HasPrefix(path, "affinity-groups/"):
-			group := strings.TrimPrefix(path, "affinity-groups/")
-			group = group[:strings.Index(group, "/")]
-			f.affinityJoins = append(f.affinityJoins, group)
-			if f.starts > 0 {
-				f.joinsAfterStart++
-			}
-			if f.affinityJoinError != "" {
-				apiError(t, w, http.StatusBadRequest, f.affinityJoinError)
-				return
-			}
-			writeJSON(t, w, http.StatusCreated, map[string]any{
-				"type":  "instance",
-				"value": map[string]string{"id": "instance", "name": "karpenter-node"},
-			})
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
-			f.starts++
-			if f.startError != "" {
-				if f.cancelOnStart != nil {
-					f.instance.RunState = oxide.InstanceStateRunning
-					f.cancelOnStart()
-				}
-				apiError(t, w, http.StatusInsufficientStorage, f.startError)
-				return
-			}
-			f.instance.RunState = oxide.InstanceStateStarting
-			writeJSON(t, w, http.StatusAccepted, f.instance)
-
-		case r.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
-			f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
-			f.stops++
-			f.instance.RunState = oxide.InstanceStateStopped
-			writeJSON(t, w, http.StatusAccepted, f.instance)
-
-		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
-			writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
-
-		case r.Method == http.MethodDelete && strings.HasPrefix(path, "instances/"):
-			f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
-			f.instanceDeletes++
-			f.instance = nil
-			w.WriteHeader(http.StatusNoContent)
-
-		case r.Method == http.MethodGet && strings.HasPrefix(path, "instances/"):
-			if f.instance == nil {
-				notFound(t, w)
-				return
-			}
-			writeJSON(t, w, http.StatusOK, f.instance)
-
-		default:
+		served := f.serveDisks(t, w, r, path) ||
+			f.serveCreates(t, w, r, path) ||
+			f.serveLifecycle(t, w, r, path)
+		if !served {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			notFound(t, w)
 		}
@@ -347,6 +262,110 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
 	return client
+}
+
+func (f *launchAPI) serveCreates(
+	t *testing.T, w http.ResponseWriter, r *http.Request, path string,
+) bool {
+	t.Helper()
+	switch {
+	case r.Method == http.MethodPost && path == "instances":
+		f.instanceCreates++
+		var body oxide.InstanceCreate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("unable to decode the instance create: %v", err)
+		}
+		if attach, ok := body.BootDisk.Value.(*oxide.InstanceDiskAttachmentAttach); ok {
+			f.attachedBootDisk = string(attach.Name)
+		}
+		f.startRequested = body.Start
+		f.antiAffinityRequested = body.AntiAffinityGroups
+		if f.instanceCreateError != "" {
+			if f.cancelOnInstanceCreate != nil {
+				f.cancelOnInstanceCreate()
+			}
+			apiError(t, w, http.StatusInsufficientStorage, f.instanceCreateError)
+			return true
+		}
+		if f.instanceCreateTimeout {
+			hangUp(t, w)
+			return true
+		}
+
+		f.instance = runningInstance()
+		f.instance.Description = body.Description
+		f.instance.RunState = oxide.InstanceStateStopped
+		if f.createdRunState != "" {
+			f.instance.RunState = f.createdRunState
+		}
+		writeJSON(t, w, http.StatusCreated, f.instance)
+
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "affinity-groups/"):
+		group := strings.TrimPrefix(path, "affinity-groups/")
+		group = group[:strings.Index(group, "/")]
+		f.affinityJoins = append(f.affinityJoins, group)
+		if f.starts > 0 {
+			f.joinsAfterStart++
+		}
+		if f.affinityJoinError != "" {
+			apiError(t, w, http.StatusBadRequest, f.affinityJoinError)
+			return true
+		}
+		writeJSON(t, w, http.StatusCreated, map[string]any{
+			"type":  "instance",
+			"value": map[string]string{"id": "instance", "name": "karpenter-node"},
+		})
+
+	default:
+		return false
+	}
+	return true
+}
+
+func (f *launchAPI) serveLifecycle(
+	t *testing.T, w http.ResponseWriter, r *http.Request, path string,
+) bool {
+	t.Helper()
+	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+		f.starts++
+		if f.startError != "" {
+			if f.cancelOnStart != nil {
+				f.instance.RunState = oxide.InstanceStateRunning
+				f.cancelOnStart()
+			}
+			apiError(t, w, http.StatusInsufficientStorage, f.startError)
+			return true
+		}
+		f.instance.RunState = oxide.InstanceStateStarting
+		writeJSON(t, w, http.StatusAccepted, f.instance)
+
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+		f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
+		f.stops++
+		f.instance.RunState = oxide.InstanceStateStopped
+		writeJSON(t, w, http.StatusAccepted, f.instance)
+
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
+		writeJSON(t, w, http.StatusOK, map[string]any{"items": []any{}})
+
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "instances/"):
+		f.cleanupContextCanceled = f.cleanupContextCanceled || r.Context().Err() != nil
+		f.instanceDeletes++
+		f.instance = nil
+		w.WriteHeader(http.StatusNoContent)
+
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "instances/"):
+		if f.instance == nil {
+			notFound(t, w)
+			return true
+		}
+		writeJSON(t, w, http.StatusOK, f.instance)
+
+	default:
+		return false
+	}
+	return true
 }
 
 func hangUp(t *testing.T, w http.ResponseWriter) {
@@ -523,10 +542,15 @@ func TestCreateLeavesAPoolOwnedBootDiskForItsControllerOnFailure(t *testing.T) {
 	api := &launchAPI{
 		instanceCreateError: "InsufficientCapacity",
 		existing: &oxide.Disk{
-			Id:          "d15c0000-0000-4000-8000-0000000000aa",
-			Name:        name,
-			Description: ownership.PoolMarker{ClusterUID: "cluster-uid", BootDiskUID: "pool-record", NodeClassUID: "nodeclass", ConfigHash: "hash"}.Description(),
-			State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+			Id:   "d15c0000-0000-4000-8000-0000000000aa",
+			Name: name,
+			Description: ownership.PoolMarker{
+				ClusterUID:   "cluster-uid",
+				BootDiskUID:  "pool-record",
+				NodeClassUID: "nodeclass",
+				ConfigHash:   "hash",
+			}.Description(),
+			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
 		},
 	}
 	p := NewProvider(api.server(t), "project", nil)
@@ -550,10 +574,15 @@ func TestCreateLeavesAPoolOwnedBootDiskForItsControllerOnFailure(t *testing.T) {
 func TestCreateKeepsAClaimedBootDiskOnSuccess(t *testing.T) {
 	const name = "pooled-boot"
 	api := &launchAPI{existing: &oxide.Disk{
-		Id:          "d15c0000-0000-4000-8000-0000000000aa",
-		Name:        name,
-		Description: ownership.PoolMarker{ClusterUID: "cluster-uid", BootDiskUID: "pool-record", NodeClassUID: "nodeclass", ConfigHash: "hash"}.Description(),
-		State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		Id:   "d15c0000-0000-4000-8000-0000000000aa",
+		Name: name,
+		Description: ownership.PoolMarker{
+			ClusterUID:   "cluster-uid",
+			BootDiskUID:  "pool-record",
+			NodeClassUID: "nodeclass",
+			ConfigHash:   "hash",
+		}.Description(),
+		State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
 	}}
 	p := NewProvider(api.server(t), "project", nil)
 	params := launchParams()
@@ -813,7 +842,11 @@ func TestCreateRefusesForeignInstancesWithoutMutatingThem(t *testing.T) {
 				t.Fatal("the foreign instance was deleted")
 			}
 			if api.starts != 0 || len(api.affinityJoins) != 0 {
-				t.Errorf("foreign instance was mutated: starts=%d affinity joins=%v", api.starts, api.affinityJoins)
+				t.Errorf(
+					"foreign instance was mutated: starts=%d affinity joins=%v",
+					api.starts,
+					api.affinityJoins,
+				)
 			}
 		})
 	}
@@ -839,7 +872,10 @@ func TestCreateRefusesAForeignDiskNameCollision(t *testing.T) {
 		t.Errorf("foreign disk was deleted: %v", api.diskDeletes)
 	}
 	if api.instanceCreates != 0 {
-		t.Errorf("instance creates = %d, want launch stopped at the disk collision", api.instanceCreates)
+		t.Errorf(
+			"instance creates = %d, want launch stopped at the disk collision",
+			api.instanceCreates,
+		)
 	}
 }
 
@@ -848,13 +884,17 @@ func TestDeleteLeavesOperatorAttachedDisksIntact(t *testing.T) {
 		Id:          "d15c0000-0000-4000-8000-000000000001",
 		Name:        "owned",
 		Description: testDiskMarker(ownership.KindBootDisk).Description("owned"),
-		State:       oxide.DiskState{Value: &oxide.DiskStateAttached{Instance: runningInstance().Id}},
+		State: oxide.DiskState{
+			Value: &oxide.DiskStateAttached{Instance: runningInstance().Id},
+		},
 	}
 	operator := &oxide.Disk{
 		Id:          "d15c0000-0000-4000-8000-000000000002",
 		Name:        "operator",
 		Description: "operator attached",
-		State:       oxide.DiskState{Value: &oxide.DiskStateAttached{Instance: runningInstance().Id}},
+		State: oxide.DiskState{
+			Value: &oxide.DiskStateAttached{Instance: runningInstance().Id},
+		},
 	}
 	stopped := runningInstance()
 	stopped.RunState = oxide.InstanceStateStopped
@@ -875,20 +915,31 @@ func TestDeleteLeavesOperatorAttachedDisksIntact(t *testing.T) {
 
 func TestGenericCleanupQuietlySkipsPoolDisks(t *testing.T) {
 	pool := ownership.PoolMarker{
-		ClusterUID: "cluster-uid", BootDiskUID: "record-uid", NodeClassUID: "class-uid", ConfigHash: "hash",
+		ClusterUID:   "cluster-uid",
+		BootDiskUID:  "record-uid",
+		NodeClassUID: "class-uid",
+		ConfigHash:   "hash",
 	}
 	counter := metrics.OwnershipRejections.WithLabelValues("cleanup", "disk", "unmarked")
 	before := testutil.ToFloat64(counter)
 
-	got := (&Provider{}).verifyDiskCandidates(context.Background(), []oxide.Disk{{
-		Id: "d15c0000-0000-4000-8000-000000000004", Name: "kbd-pool", Description: pool.Description(),
-	}}, testOwner)
+	got := (&Provider{}).verifyDiskCandidates(context.Background(), []oxide.Disk{
+		{
+			Id:          "d15c0000-0000-4000-8000-000000000004",
+			Name:        "kbd-pool",
+			Description: pool.Description(),
+		},
+	}, testOwner)
 
 	if len(got) != 0 {
 		t.Errorf("verified disks = %#v, want a pool disk excluded from generic cleanup", got)
 	}
 	if after := testutil.ToFloat64(counter); after != before {
-		t.Errorf("ownership rejection counter changed from %v to %v for a valid pool disk", before, after)
+		t.Errorf(
+			"ownership rejection counter changed from %v to %v for a valid pool disk",
+			before,
+			after,
+		)
 	}
 }
 

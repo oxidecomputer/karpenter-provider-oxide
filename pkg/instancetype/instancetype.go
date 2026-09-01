@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
@@ -49,7 +50,7 @@ type Provider struct {
 	generation generation
 	built      bool
 
-	capacity *CapacityManager
+	availability *availability.Manager
 
 	quotas QuotaProvider
 
@@ -89,18 +90,16 @@ type QuotaProvider interface {
 }
 
 type generation struct {
-	capacity uint64
-	quota    uint64
+	availability uint64
+	quota        uint64
 }
 
-type Specs struct {
-	Ncpus    int
-	MemInGiB int
-}
+// Specs is retained as the catalog-facing name for an availability shape.
+type Specs = availability.Shape
 
-// NewProvider builds an instance type provider.
-func NewProvider(quotas QuotaProvider, inventory InventoryProvider) *Provider {
-	provider, err := NewProviderWithShapeConfig(quotas, inventory, DefaultShapeConfig())
+// NewProvider builds a catalog over the default instance types.
+func NewProvider(quotas QuotaProvider, manager *availability.Manager) *Provider {
+	provider, err := NewProviderWithShapeConfig(quotas, manager, DefaultShapeConfig())
 	if err != nil {
 		panic(err)
 	}
@@ -110,7 +109,7 @@ func NewProvider(quotas QuotaProvider, inventory InventoryProvider) *Provider {
 // NewProviderWithShapeConfig builds a provider with a configurable instance type catalog.
 func NewProviderWithShapeConfig(
 	quotas QuotaProvider,
-	inventory InventoryProvider,
+	manager *availability.Manager,
 	config ShapeConfig,
 ) (*Provider, error) {
 	shapes, err := generateShapes(config.IncrementPercent)
@@ -118,9 +117,9 @@ func NewProviderWithShapeConfig(
 		return nil, err
 	}
 	return &Provider{
-		capacity: NewCapacityManager(inventory),
-		quotas:   quotas,
-		shapes:   shapes,
+		availability: manager,
+		quotas:       quotas,
+		shapes:       shapes,
 	}, nil
 }
 
@@ -156,37 +155,6 @@ func (i *Provider) Get(instanceType string) (*cloudprovider.InstanceType, bool) 
 	return nil, false
 }
 
-// RecordICE takes a shape, and every shape at least as large, out of consideration until its backoff elapses.
-func (i *Provider) RecordICE(ctx context.Context, specs Specs, reason Reason) {
-	i.capacity.RecordICE(ctx, specs, reason)
-}
-
-// RecordSuccess reports that a launch of this shape succeeded.
-func (i *Provider) RecordSuccess(ctx context.Context, specs Specs) {
-	i.capacity.RecordSuccess(ctx, specs)
-	i.capacity.ClearStorageRefusal(ctx)
-}
-
-// SeedLaunchable reports that the cluster is running a node of this shape.
-func (i *Provider) SeedLaunchable(ctx context.Context, specs Specs) {
-	i.capacity.SeedLaunchable(ctx, specs)
-}
-
-// RecordStorageRefusal reports that a launch was refused because its boot disk could not be provisioned.
-func (i *Provider) RecordStorageRefusal(ctx context.Context, reason Reason, message string) {
-	i.capacity.RecordStorageRefusal(ctx, reason, message)
-}
-
-// StorageRefusal returns the last launch refused for want of boot disk storage.
-func (i *Provider) StorageRefusal() (StorageRefusal, bool) {
-	return i.capacity.StorageRefusal()
-}
-
-// Unavailable returns every shape currently out of consideration.
-func (i *Provider) Unavailable() []Entry {
-	return i.capacity.Snapshot()
-}
-
 // UnavailableInstanceTypeCount is how many instance types the scheduler is currently not being offered.
 func (i *Provider) UnavailableInstanceTypeCount() (unavailable, total int) {
 	instanceTypes := i.InstanceTypes()
@@ -196,11 +164,6 @@ func (i *Provider) UnavailableInstanceTypeCount() (unavailable, total int) {
 		}
 	}
 	return unavailable, len(instanceTypes)
-}
-
-// Rack returns the rack reading the provider is deciding against, and what that reading is worth.
-func (i *Provider) Rack() (capacity.Snapshot, InventoryState) {
-	return i.capacity.Rack()
 }
 
 // LargestShapeThatFits returns the largest shape the provider offers that fits in this much free space.
@@ -360,34 +323,14 @@ func geometricValues(min, max int, incrementPercent float64) []int {
 	return values
 }
 
-// RecordCapacityReleased reports that the rack has taken back the resources of an instance of this shape.
-func (i *Provider) RecordCapacityReleased(ctx context.Context, specs Specs) {
-	i.capacity.RecordCapacityReleased(ctx, specs)
-}
-
-// TryAcquire reserves the right to launch this shape, and reports whether the caller got it.
-func (i *Provider) TryAcquire(specs Specs) bool {
-	return i.capacity.TryAcquire(specs)
-}
-
-// ReleaseProbe hands back a reservation taken by TryAcquire for a launch that never reached the rack.
-func (i *Provider) ReleaseProbe(specs Specs) {
-	i.capacity.ReleaseProbe(specs)
-}
-
-// IsUnavailable reports whether a shape is currently ruled out, and why.
-func (i *Provider) IsUnavailable(specs Specs) (bool, Reason) {
-	if unavailable, reason := i.capacity.IsUnavailable(specs); unavailable {
-		return true, reason
-	}
+// IsOverQuota reports whether the current silo quota rules out this shape.
+func (i *Provider) IsOverQuota(specs Specs) bool {
 	quota, err := i.quota()
 	if err != nil {
-		return false, ""
+		return false
 	}
-	if admits, _ := quota.Admits(requestFor(specs)); !admits {
-		return true, ReasonQuota
-	}
-	return false, ""
+	admits, _ := quota.Admits(requestFor(specs))
+	return !admits
 }
 
 // Quota returns the silo quota.
@@ -427,7 +370,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	current := generation{capacity: i.capacity.Generation()}
+	current := generation{availability: i.availability.Generation()}
 	if i.quotas != nil {
 		current.quota = i.quotas.Generation()
 	}
@@ -435,7 +378,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		return i.instanceTypes
 	}
 
-	availability := i.capacity.Availability()
+	reading := i.availability.Snapshot()
 
 	quota, quotaErr := i.quota()
 	var instanceTypes []*cloudprovider.InstanceType
@@ -449,7 +392,7 @@ func (i *Provider) InstanceTypes() []*cloudprovider.InstanceType {
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 		reserved := ReservedFor(specs)
 		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
-		refused, _ := availability.Unavailable(specs)
+		refused, _ := reading.Unavailable(specs)
 
 		overQuota := false
 		if quotaErr == nil {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +30,7 @@ func (f *fakeInstanceTypeOverlayStore) Apply(
 }
 
 func TestEffectiveInstanceTypeUsesNodeOverlayStore(t *testing.T) {
-	instanceTypes := instancetype.NewProvider(nil, nil)
+	instanceTypes := instancetype.NewProvider(nil, availability.New(nil))
 	base := instanceTypes.InstanceTypes()[0]
 	effective := base.DeepCopy()
 	effective.Offerings[0].ApplyPriceOverlay("0.42")
@@ -63,7 +64,7 @@ func TestEffectiveInstanceTypeUsesNodeOverlayStore(t *testing.T) {
 }
 
 func TestAnnotateHourlyPriceUsesResolvedOffering(t *testing.T) {
-	base := instancetype.NewProvider(nil, nil).InstanceTypes()[0]
+	base := instancetype.NewProvider(nil, availability.New(nil)).InstanceTypes()[0]
 	instanceType := base.DeepCopy()
 	instanceType.Offerings[0].Price = 0.42
 	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
@@ -79,7 +80,7 @@ func TestAnnotateHourlyPriceUsesResolvedOffering(t *testing.T) {
 }
 
 func TestAnnotateHourlyPriceOmitsUnknownOffering(t *testing.T) {
-	base := instancetype.NewProvider(nil, nil).InstanceTypes()[0]
+	base := instancetype.NewProvider(nil, availability.New(nil)).InstanceTypes()[0]
 	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 		corev1.LabelTopologyZone:    "another-rack",
 		karpv1.CapacityTypeLabelKey: base.Offerings[0].CapacityType(),

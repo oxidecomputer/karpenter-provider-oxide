@@ -1,12 +1,13 @@
 package instancetype
 
 import (
-	"context"
 	"testing"
+
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 )
 
 func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
-	p := NewProvider(nil, nil)
+	p := NewProvider(nil, availability.New(nil))
 	prices := map[Specs]float64{}
 	for _, it := range p.InstanceTypes() {
 		specs, err := InstanceTypeToSpecs(it.Name)
@@ -64,31 +65,8 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	}
 }
 
-func TestPriceIsIndependentOfAvailability(t *testing.T) {
-	p := NewProvider(nil, nil)
-
-	before, ok := p.Get("8-16")
-	if !ok {
-		t.Fatal("instance type 8-16 does not exist")
-	}
-	want := before.Offerings[0].Price
-
-	p.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
-
-	after, ok := p.Get("8-16")
-	if !ok {
-		t.Fatal("instance type 8-16 does not exist")
-	}
-	if after.Offerings[0].Available {
-		t.Fatal("instance type 8-16 is still available after being marked")
-	}
-	if got := after.Offerings[0].Price; got != want {
-		t.Errorf("price changed with availability: got %v, want %v", got, want)
-	}
-}
-
 func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
-	p := NewProvider(nil, nil)
+	p := NewProvider(nil, availability.New(nil))
 	for _, tc := range []struct{ cheaper, dearer string }{
 		{"2-4", "4-8"},
 		{"4-8", "4-16"},

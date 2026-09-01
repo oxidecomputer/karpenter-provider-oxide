@@ -56,7 +56,6 @@ func (c *Controller) Reconcile(
 		nodeClaim.Annotations[v1alpha1.AnnotationAffinityGroups],
 	)
 	if len(recorded) == 0 {
-
 		return reconcile.Result{}, c.recordOnNode(ctx, nodeClaim, "")
 	}
 
@@ -71,7 +70,6 @@ func (c *Controller) Reconcile(
 		client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name},
 		nodeClass,
 	); err != nil {
-
 		if kerrors.IsNotFound(err) {
 			return reconcile.Result{RequeueAfter: resyncPeriod}, nil
 		}
@@ -87,7 +85,6 @@ func (c *Controller) Reconcile(
 			continue
 		}
 		if err := c.leave(ctx, ref, instanceID); err != nil {
-
 			remaining = append(remaining, ref)
 			errs = append(errs, err)
 			continue
@@ -130,7 +127,6 @@ func (c *Controller) recordOnNode(
 	}
 	if err := c.record(ctx, node, value); err != nil {
 		if kerrors.IsConflict(err) {
-
 			return err
 		}
 		return client.IgnoreNotFound(
@@ -204,7 +200,6 @@ func (c *Controller) leave(
 		}
 		return nil
 	default:
-
 		log.FromContext(ctx).V(1).Info(
 			"leaving a recorded group membership of an unrecognized kind alone",
 			"group-id", ref.ID,

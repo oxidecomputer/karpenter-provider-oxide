@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 )
@@ -49,7 +50,7 @@ func TestReservationsMatchInstanceTypeOverhead(t *testing.T) {
 	specs := instancetype.Specs{Ncpus: 9, MemInGiB: 5}
 	reserved := instancetype.ReservedFor(specs)
 
-	provider := instancetype.NewProvider(nil, nil)
+	provider := instancetype.NewProvider(nil, availability.New(nil))
 	it, ok := provider.Get("9-5")
 	if !ok {
 		t.Fatal("9-5 not offered")

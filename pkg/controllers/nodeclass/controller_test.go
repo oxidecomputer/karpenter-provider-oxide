@@ -23,12 +23,14 @@ func TestSetSubnetCondition(t *testing.T) {
 	}
 
 	setSubnetCondition(nodeClass, subnet.Result{Resolved: []v1alpha1.OxideSubnet{{ID: "subnet"}}})
-	if condition := nodeClass.StatusConditions().Get(v1alpha1.ConditionTypeSubnetsResolved); !condition.IsTrue() {
+	if condition := nodeClass.StatusConditions().
+		Get(v1alpha1.ConditionTypeSubnetsResolved); !condition.IsTrue() {
 		t.Errorf("resolved result condition = %#v, want True", condition)
 	}
 
 	setSubnetCondition(nodeClass, subnet.Result{})
-	if condition := nodeClass.StatusConditions().Get(v1alpha1.ConditionTypeSubnetsResolved); !condition.IsFalse() {
+	if condition := nodeClass.StatusConditions().
+		Get(v1alpha1.ConditionTypeSubnetsResolved); !condition.IsFalse() {
 		t.Errorf("disappeared subnet condition = %#v, want False", condition)
 	}
 }

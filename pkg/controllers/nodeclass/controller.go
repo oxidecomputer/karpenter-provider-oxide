@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/reasonable"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
@@ -54,8 +53,7 @@ type Controller struct {
 
 	snapshots *snapshot.Provider
 
-	affinityPolicy *affinitypolicy.Tracker
-	bootstrappers  bootstrap.Bootstrappers
+	bootstrappers bootstrap.Bootstrappers
 }
 
 func NewController(
@@ -67,7 +65,6 @@ func NewController(
 	ipPools *ippool.Provider,
 	affinityGroups *affinitygroup.Provider,
 	snapshots *snapshot.Provider,
-	affinityPolicy *affinitypolicy.Tracker,
 	bootstrappers bootstrap.Bootstrappers,
 ) *Controller {
 	return &Controller{
@@ -79,7 +76,6 @@ func NewController(
 		ipPools:        ipPools,
 		affinityGroups: affinityGroups,
 		snapshots:      snapshots,
-		affinityPolicy: affinityPolicy,
 		bootstrappers:  bootstrappers,
 	}
 }
@@ -206,21 +202,6 @@ func (c *Controller) Reconcile(
 		)
 	}
 
-	policyRequeue := time.Duration(0)
-	if nodeClass.Spec.Affinity != nil {
-		if state, backingOff := c.affinityPolicy.State(nodeClass.Name); backingOff {
-			nodeClass.StatusConditions().SetFalse(
-				v1alpha1.ConditionTypeAffinityPolicySatisfiable,
-				v1alpha1.ConditionReasonAffinityPolicyUnsatisfiable,
-				state.Message,
-			)
-
-			policyRequeue = state.Remaining(time.Now())
-		} else {
-			nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeAffinityPolicySatisfiable)
-		}
-	}
-
 	if !equality.Semantic.DeepEqual(stored, nodeClass) {
 		if err := c.kubeClient.Status().
 			Patch(ctx, nodeClass, client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -245,9 +226,6 @@ func (c *Controller) Reconcile(
 		requeue = groupCollectionRequeue
 	}
 
-	if policyRequeue > 0 && policyRequeue < requeue {
-		requeue = policyRequeue
-	}
 	return reconcile.Result{RequeueAfter: requeue}, nil
 }
 
@@ -281,8 +259,6 @@ func (c *Controller) finalize(
 		)
 		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
 	}
-
-	c.affinityPolicy.Forget(nodeClass.Name)
 
 	stored := nodeClass.DeepCopy()
 	controllerutil.RemoveFinalizer(nodeClass, v1alpha1.TerminationFinalizer)

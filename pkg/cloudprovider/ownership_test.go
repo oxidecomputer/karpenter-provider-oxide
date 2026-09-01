@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -47,7 +48,7 @@ func ownershipProvider(t *testing.T, instances []oxide.Instance) *OxideCloudProv
 	}
 	return &OxideCloudProvider{
 		ox: client, project: "project", clusterUID: "cluster-a",
-		instanceTypeProvider: instancetype.NewProvider(nil, nil),
+		instanceTypeProvider: instancetype.NewProvider(nil, availability.New(nil)),
 	}
 }
 
@@ -60,7 +61,10 @@ func markedInstance(id string, marker ownership.Marker) oxide.Instance {
 
 func TestListUsesOnlyVerifiedInstanceMarkers(t *testing.T) {
 	owned := ownership.Marker{
-		ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "marker-name", Kind: ownership.KindInstance,
+		ClusterUID:    "cluster-a",
+		NodeClaimUID:  "claim-a",
+		NodeClaimName: "marker-name",
+		Kind:          ownership.KindInstance,
 	}
 	foreign := owned
 	foreign.ClusterUID = "cluster-b"
@@ -68,8 +72,16 @@ func TestListUsesOnlyVerifiedInstanceMarkers(t *testing.T) {
 	wrongKind.Kind = ownership.KindBootDisk
 	provider := ownershipProvider(t, []oxide.Instance{
 		markedInstance("11111111-0000-4000-8000-000000000001", owned),
-		{Id: "11111111-0000-4000-8000-000000000002", Name: "karpenter-unmarked", Description: "unmarked"},
-		{Id: "11111111-0000-4000-8000-000000000003", Name: "karpenter-malformed", Description: "karpenter.oxide.computer/owner/v1 cluster=cluster-a"},
+		{
+			Id:          "11111111-0000-4000-8000-000000000002",
+			Name:        "karpenter-unmarked",
+			Description: "unmarked",
+		},
+		{
+			Id:          "11111111-0000-4000-8000-000000000003",
+			Name:        "karpenter-malformed",
+			Description: "karpenter.oxide.computer/owner/v1 cluster=cluster-a",
+		},
 		markedInstance("11111111-0000-4000-8000-000000000004", foreign),
 		markedInstance("11111111-0000-4000-8000-000000000005", wrongKind),
 	})
@@ -85,7 +97,10 @@ func TestListUsesOnlyVerifiedInstanceMarkers(t *testing.T) {
 
 func TestGetRejectsUnmarkedAndForeignInstances(t *testing.T) {
 	base := ownership.Marker{
-		ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "claim-a", Kind: ownership.KindInstance,
+		ClusterUID:    "cluster-a",
+		NodeClaimUID:  "claim-a",
+		NodeClaimName: "claim-a",
+		Kind:          ownership.KindInstance,
 	}
 	foreign := base
 	foreign.ClusterUID = "cluster-b"
@@ -105,7 +120,12 @@ func TestGetRejectsUnmarkedAndForeignInstances(t *testing.T) {
 
 func TestGetUsesTheMarkerNodeClaimName(t *testing.T) {
 	marker := ownership.Marker{
-		ClusterUID: types.UID("cluster-a"), NodeClaimUID: "claim-a", NodeClaimName: "marker-name", Kind: ownership.KindInstance,
+		ClusterUID: types.UID(
+			"cluster-a",
+		),
+		NodeClaimUID:  "claim-a",
+		NodeClaimName: "marker-name",
+		Kind:          ownership.KindInstance,
 	}
 	instance := markedInstance("11111111-0000-4000-8000-000000000001", marker)
 	claim, err := ownershipProvider(t, []oxide.Instance{instance}).Get(

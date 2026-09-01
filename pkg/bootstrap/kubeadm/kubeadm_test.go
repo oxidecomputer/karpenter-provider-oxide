@@ -180,7 +180,10 @@ func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
 	nc.Status.KubeletArgs = []string{"cloud-provider=external"}
 
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
-	out, err := NewBootstrapper(kubeClient, kubeClient).UserData(context.Background(), nc, bootstrap.Request{
+	out, err := NewBootstrapper(
+		kubeClient,
+		kubeClient,
+	).UserData(context.Background(), nc, bootstrap.Request{
 		NodeClaim:    &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
 		Hostname:     "karpenter-default-x7k2p",
 		InstanceType: instancetype.Specs{Ncpus: 9, MemInGiB: 5},

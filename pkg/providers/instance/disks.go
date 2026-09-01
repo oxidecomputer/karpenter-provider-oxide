@@ -305,7 +305,11 @@ func (p *Provider) ownedTeardownDisks(
 	if teardown.BootDiskName != "" {
 		disk, err := p.disks.View(ctx, teardown.BootDiskName)
 		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
-			return nil, fmt.Errorf("unable to view boot disk candidate %s, %w", teardown.BootDiskName, err)
+			return nil, fmt.Errorf(
+				"unable to view boot disk candidate %s, %w",
+				teardown.BootDiskName,
+				err,
+			)
 		}
 		if err == nil {
 			candidates = append(candidates, *disk)
@@ -316,7 +320,11 @@ func (p *Provider) ownedTeardownDisks(
 	}
 	disks, err := p.disks.List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("unable to list disk candidates with prefix %s, %w", teardown.DiskPrefix, err)
+		return nil, fmt.Errorf(
+			"unable to list disk candidates with prefix %s, %w",
+			teardown.DiskPrefix,
+			err,
+		)
 	}
 	for _, disk := range disks {
 		if !strings.HasPrefix(string(disk.Name), teardown.DiskPrefix) {

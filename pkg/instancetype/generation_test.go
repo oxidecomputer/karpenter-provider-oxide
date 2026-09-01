@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
+
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 )
@@ -56,7 +58,7 @@ func TestCatalogUsesNexusInstanceLimits(t *testing.T) {
 		t.Errorf("CatalogLimits() = %v, want the Nexus instance limits", got)
 	}
 
-	provider := NewProvider(nil, nil)
+	provider := NewProvider(nil, availability.New(nil))
 	for _, name := range []string{"255-757", "384-757", "384-1536"} {
 		if _, ok := provider.Get(name); ok {
 			t.Errorf("Get(%q) found an instance type above the Nexus vCPU limit", name)
@@ -70,7 +72,11 @@ func TestCatalogUsesNexusInstanceLimits(t *testing.T) {
 }
 
 func TestShapeIncrementIsConfigurable(t *testing.T) {
-	provider, err := NewProviderWithShapeConfig(nil, nil, ShapeConfig{IncrementPercent: 100})
+	provider, err := NewProviderWithShapeConfig(
+		nil,
+		availability.New(nil),
+		ShapeConfig{IncrementPercent: 100},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,11 @@ func TestShapeIncrementValidation(t *testing.T) {
 }
 
 func TestInstanceTypesHaveSchedulingLabels(t *testing.T) {
-	provider, err := NewProviderWithShapeConfig(nil, nil, ShapeConfig{IncrementPercent: 100})
+	provider, err := NewProviderWithShapeConfig(
+		nil,
+		availability.New(nil),
+		ShapeConfig{IncrementPercent: 100},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-package instancetype
+package availability
 
 import (
 	"context"
@@ -7,56 +7,56 @@ import (
 	"time"
 )
 
-func newTestCapacityManager(now *time.Time) *CapacityManager {
-	c := NewCapacityManager(nil)
+func newTestManager(now *time.Time) *Manager {
+	c := New(nil)
 	c.now = func() time.Time { return *now }
 	c.jitter = func(time.Duration) time.Duration { return 0 }
 	return c
 }
 
-func TestCapacityManagerCoversLargerShapes(t *testing.T) {
+func TestManagerCoversLargerShapes(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	c.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+	c := newTestManager(&now)
+	c.RecordICE(context.Background(), Shape{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	for _, tc := range []struct {
-		specs Specs
+		specs Shape
 		want  bool
 	}{
-		{Specs{Ncpus: 8, MemInGiB: 16}, true},
-		{Specs{Ncpus: 16, MemInGiB: 32}, true},
-		{Specs{Ncpus: 8, MemInGiB: 64}, true},
-		{Specs{Ncpus: 4, MemInGiB: 16}, false},
-		{Specs{Ncpus: 16, MemInGiB: 8}, false},
-		{Specs{Ncpus: 1, MemInGiB: 2}, false},
+		{Shape{Ncpus: 8, MemInGiB: 16}, true},
+		{Shape{Ncpus: 16, MemInGiB: 32}, true},
+		{Shape{Ncpus: 8, MemInGiB: 64}, true},
+		{Shape{Ncpus: 4, MemInGiB: 16}, false},
+		{Shape{Ncpus: 16, MemInGiB: 8}, false},
+		{Shape{Ncpus: 1, MemInGiB: 2}, false},
 	} {
-		if got, _ := c.IsUnavailable(tc.specs); got != tc.want {
-			t.Errorf("IsUnavailable(%d cpus, %d GiB) = %v, want %v",
+		if got, _ := unavailableFor(c, tc.specs); got != tc.want {
+			t.Errorf("Check(%d cpus, %d GiB) unavailable = %v, want %v",
 				tc.specs.Ncpus, tc.specs.MemInGiB, got, tc.want)
 		}
 	}
 }
 
-func TestCapacityManagerDropsSubsumedEntries(t *testing.T) {
+func TestManagerDropsSubsumedEntries(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	c.RecordICE(context.Background(), Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+	c := newTestManager(&now)
+	c.RecordICE(context.Background(), Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(context.Background(), Shape{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
-	if got := len(c.Snapshot()); got != 1 {
+	if got := len(c.Snapshot().Entries()); got != 1 {
 		t.Fatalf("snapshot has %d entries, want 1", got)
 	}
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 16, MemInGiB: 32}); !unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 16, MemInGiB: 32}); !unavailable {
 		t.Error("the subsumed shape is no longer covered")
 	}
 }
 
 func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
-	large := Specs{Ncpus: 16, MemInGiB: 32}
-	small := Specs{Ncpus: 8, MemInGiB: 16}
+	large := Shape{Ncpus: 16, MemInGiB: 32}
+	small := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(ctx, large, ReasonCapacity)
 	c.RecordICE(ctx, large, ReasonCapacity)
@@ -72,38 +72,38 @@ func TestSubsumingAShapeInheritsItsHistory(t *testing.T) {
 
 func TestWalkingDownShapesStillBacksOff(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
 	for cpus := 21; cpus >= 17; cpus-- {
-		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+		c.RecordICE(ctx, Shape{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
 	}
 
-	last := Specs{Ncpus: 17, MemInGiB: 34}
+	last := Shape{Ncpus: 17, MemInGiB: 34}
 	if got := ices(t, c, last); got != 5 {
 		t.Errorf("consecutive ICEs = %d, want one run of 5 rather than 5 runs of 1", got)
 	}
 	if got := retryAfterOf(t, c, last).Sub(now); got != 30*time.Minute {
 		t.Errorf("backoff = %v, want the run to have reached the cap", got)
 	}
-	if got := len(c.Snapshot()); got != 1 {
+	if got := len(c.Snapshot().Entries()); got != 1 {
 		t.Errorf("snapshot has %d entries, want the boundary alone", got)
 	}
 }
 
 func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 64}, ReasonCapacity)
-	if got := len(c.Snapshot()); got != 2 {
+	c.RecordICE(ctx, Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 8, MemInGiB: 64}, ReasonCapacity)
+	if got := len(c.Snapshot().Entries()); got != 2 {
 		t.Fatalf("snapshot has %d entries, want two independent boundaries", got)
 	}
 
-	small := Specs{Ncpus: 8, MemInGiB: 32}
+	small := Shape{Ncpus: 8, MemInGiB: 32}
 	c.RecordICE(ctx, small, ReasonCapacity)
 
 	if got := ices(t, c, small); got != 3 {
@@ -113,16 +113,16 @@ func TestSubsumptionTakesTheLongestRunNotTheSum(t *testing.T) {
 
 func TestSuccessClearsInheritedHistory(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	small := Specs{Ncpus: 8, MemInGiB: 16}
+	c.RecordICE(ctx, Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	small := Shape{Ncpus: 8, MemInGiB: 16}
 	c.RecordICE(ctx, small, ReasonCapacity)
 
 	c.RecordSuccess(ctx, small)
-	if got := len(c.Snapshot()); got != 0 {
+	if got := len(c.Snapshot().Entries()); got != 0 {
 		t.Fatalf("snapshot has %d entries, want the launch to have cleared the boundary", got)
 	}
 
@@ -134,17 +134,17 @@ func TestSuccessClearsInheritedHistory(t *testing.T) {
 
 func TestFirstICEBacksOffThreeMinutes(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 
 	now = now.Add(3*time.Minute - time.Second)
-	if unavailable, _ := c.IsUnavailable(specs); !unavailable {
+	if unavailable, _ := unavailableFor(c, specs); !unavailable {
 		t.Fatal("the shape reopened before its backoff elapsed")
 	}
 	now = now.Add(2 * time.Second)
-	if unavailable, _ := c.IsUnavailable(specs); unavailable {
+	if unavailable, _ := unavailableFor(c, specs); unavailable {
 		t.Fatal("the shape is still unavailable after its backoff elapsed")
 	}
 	if state := stateOf(t, c, specs); state != StateHalfOpen {
@@ -154,8 +154,8 @@ func TestFirstICEBacksOffThreeMinutes(t *testing.T) {
 
 func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	for _, want := range []time.Duration{
 		3 * time.Minute,
@@ -171,7 +171,7 @@ func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 		}
 
 		now = now.Add(want)
-		if unavailable, _ := c.IsUnavailable(specs); unavailable {
+		if unavailable, _ := unavailableFor(c, specs); unavailable {
 			t.Fatalf("the shape did not reopen after %v", want)
 		}
 	}
@@ -179,15 +179,15 @@ func TestRepeatedICEsLengthenTheBackoff(t *testing.T) {
 
 func TestLookupsDoNotExtendTheBackoff(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 	retryAfter := retryAfterOf(t, c, specs)
 
 	for range 10 {
 		now = now.Add(15 * time.Second)
-		c.IsUnavailable(specs)
+		unavailableFor(c, specs)
 		c.Snapshot()
 		c.Generation()
 	}
@@ -202,8 +202,8 @@ func TestLookupsDoNotExtendTheBackoff(t *testing.T) {
 
 func TestSuccessResetsHistory(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	for range 3 {
@@ -212,7 +212,7 @@ func TestSuccessResetsHistory(t *testing.T) {
 	}
 
 	c.RecordSuccess(ctx, specs)
-	if got := len(c.Snapshot()); got != 0 {
+	if got := len(c.Snapshot().Entries()); got != 0 {
 		t.Fatalf("snapshot has %d entries after a successful launch, want 0", got)
 	}
 
@@ -224,66 +224,66 @@ func TestSuccessResetsHistory(t *testing.T) {
 
 func TestSuccessOnlyClearsEntriesItDisproves(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
-	c.RecordICE(ctx, Specs{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
-	c.RecordICE(ctx, Specs{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 4, MemInGiB: 8}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
 
-	c.RecordSuccess(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+	c.RecordSuccess(ctx, Shape{Ncpus: 8, MemInGiB: 16})
 
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 8, MemInGiB: 16}); unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 8, MemInGiB: 16}); unavailable {
 		t.Error("the launched shape is still ruled out by the smaller entry it disproved")
 	}
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 32, MemInGiB: 64}); !unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 32, MemInGiB: 64}); !unavailable {
 		t.Error("placing 8 cpus wrongly cleared the entry for a much larger shape")
 	}
 }
 
 func TestOnlyOneProbeRunsAtATime(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 	now = now.Add(3 * time.Minute)
 
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Fatal("the first launch could not acquire the probe")
 	}
-	if c.TryAcquire(specs) {
+	if acquireShape(c, specs) {
 		t.Error("a second launch acquired a probe that was already in flight")
 	}
 
-	if c.TryAcquire(Specs{Ncpus: 16, MemInGiB: 32}) {
+	if acquireShape(c, Shape{Ncpus: 16, MemInGiB: 32}) {
 		t.Error("a launch of a covered shape acquired the in-flight probe")
 	}
 
-	if !c.TryAcquire(Specs{Ncpus: 2, MemInGiB: 4}) {
+	if !acquireShape(c, Shape{Ncpus: 2, MemInGiB: 4}) {
 		t.Error("an uncovered shape was blocked by an unrelated probe")
 	}
 
-	c.ReleaseProbe(specs)
-	if !c.TryAcquire(specs) {
+	releaseShape(specs)
+	if !acquireShape(c, specs) {
 		t.Error("the probe was not handed back on release")
 	}
 }
 
 func TestProbeRefusalReclosesTheBreaker(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
 	now = now.Add(3 * time.Minute)
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Fatal("the probe could not be acquired once the backoff elapsed")
 	}
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
 
-	if unavailable, _ := c.IsUnavailable(specs); !unavailable {
+	if unavailable, _ := unavailableFor(c, specs); !unavailable {
 		t.Error("the shape stayed available after its probe was refused")
 	}
 	if got := retryAfterOf(t, c, specs).Sub(now); got != 6*time.Minute {
@@ -291,37 +291,37 @@ func TestProbeRefusalReclosesTheBreaker(t *testing.T) {
 	}
 
 	now = now.Add(6 * time.Minute)
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Error("the next probe could not be acquired, so the refused one leaked its reservation")
 	}
 }
 
 func TestProbeSuccessOpensTheShapeToEveryone(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
 	now = now.Add(3 * time.Minute)
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Fatal("the probe could not be acquired once the backoff elapsed")
 	}
 
 	c.RecordSuccess(ctx, specs)
 
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Error("a second launch was still held off after the probe succeeded")
 	}
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Error("launches are still being serialized after the breaker closed")
 	}
 }
 
 func TestConcurrentProbesDoNotStampede(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 	now = now.Add(3 * time.Minute)
@@ -333,7 +333,7 @@ func TestConcurrentProbesDoNotStampede(t *testing.T) {
 	)
 	for range 32 {
 		wg.Go(func() {
-			if c.TryAcquire(specs) {
+			if acquireShape(c, specs) {
 				mu.Lock()
 				acquired++
 				mu.Unlock()
@@ -349,20 +349,20 @@ func TestConcurrentProbesDoNotStampede(t *testing.T) {
 
 func TestBackedOffShapesCannotBeAcquired(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 
-	if c.TryAcquire(specs) {
+	if acquireShape(c, specs) {
 		t.Error("a backed off shape was acquired for launch")
 	}
 }
 
 func TestReopeningChangesTheGeneration(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	c.RecordICE(context.Background(), specs, ReasonCapacity)
 	backedOff := c.Generation()
@@ -381,8 +381,8 @@ func TestReopeningChangesTheGeneration(t *testing.T) {
 
 func TestHistoryIsForgottenEventually(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
@@ -394,7 +394,7 @@ func TestHistoryIsForgottenEventually(t *testing.T) {
 	}
 
 	now = now.Add(historyTTL)
-	if got := len(c.Snapshot()); got != 0 {
+	if got := len(c.Snapshot().Entries()); got != 0 {
 		t.Fatalf("snapshot has %d entries, want the history forgotten", got)
 	}
 	c.RecordICE(ctx, specs, ReasonCapacity)
@@ -405,8 +405,8 @@ func TestHistoryIsForgottenEventually(t *testing.T) {
 
 func TestARefusalMovesTheRetryTimeBackOut(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
@@ -427,9 +427,9 @@ func TestARefusalMovesTheRetryTimeBackOut(t *testing.T) {
 
 func TestJitterStaysWithinItsFraction(t *testing.T) {
 	now := time.Now()
-	c := NewCapacityManager(nil)
+	c := New(nil)
 	c.now = func() time.Time { return now }
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 
 	minBackoff := 3 * time.Minute
 	maxJittered := minBackoff + time.Duration(jitterFraction*float64(minBackoff))
@@ -445,8 +445,8 @@ func TestJitterStaysWithinItsFraction(t *testing.T) {
 
 func TestCapacityReleaseShortensALongBackoff(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	for range 5 {
@@ -461,24 +461,24 @@ func TestCapacityReleaseShortensALongBackoff(t *testing.T) {
 	now = now.Add(time.Minute)
 	c.RecordCapacityReleased(ctx, specs)
 
-	if unavailable, _ := c.IsUnavailable(specs); unavailable {
+	if unavailable, _ := unavailableFor(c, specs); unavailable {
 		t.Error("the shape is still ruled out after the rack gave back room for it")
 	}
 	if state := stateOf(t, c, specs); state != StateHalfOpen {
 		t.Errorf("state = %q, want %q", state, StateHalfOpen)
 	}
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Error("the reopened shape could not be probed")
 	}
-	if c.TryAcquire(specs) {
+	if acquireShape(c, specs) {
 		t.Error("a release opened the shape to the whole burst instead of to one probe")
 	}
 }
 
 func TestCapacityReleaseKeepsTheRefusalHistory(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
@@ -495,10 +495,10 @@ func TestCapacityReleaseKeepsTheRefusalHistory(t *testing.T) {
 
 func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
-	for _, specs := range []Specs{
+	for _, specs := range []Shape{
 		{Ncpus: 2, MemInGiB: 4},
 		{Ncpus: 8, MemInGiB: 16},
 		{Ncpus: 16, MemInGiB: 16},
@@ -507,16 +507,16 @@ func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
 		c.RecordICE(ctx, specs, ReasonCapacity)
 	}
 
-	c.RecordCapacityReleased(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+	c.RecordCapacityReleased(ctx, Shape{Ncpus: 8, MemInGiB: 16})
 
 	for _, tc := range []struct {
-		specs Specs
+		specs Shape
 		want  State
 	}{
-		{Specs{Ncpus: 2, MemInGiB: 4}, StateHalfOpen},
-		{Specs{Ncpus: 8, MemInGiB: 16}, StateHalfOpen},
-		{Specs{Ncpus: 16, MemInGiB: 16}, StateBackoff},
-		{Specs{Ncpus: 8, MemInGiB: 64}, StateBackoff},
+		{Shape{Ncpus: 2, MemInGiB: 4}, StateHalfOpen},
+		{Shape{Ncpus: 8, MemInGiB: 16}, StateHalfOpen},
+		{Shape{Ncpus: 16, MemInGiB: 16}, StateBackoff},
+		{Shape{Ncpus: 8, MemInGiB: 64}, StateBackoff},
 	} {
 		if got := stateOf(t, c, tc.specs); got != tc.want {
 			t.Errorf("%d-%d state = %q, want %q",
@@ -527,17 +527,17 @@ func TestCapacityReleaseOnlyReopensWhatItCouldFit(t *testing.T) {
 
 func TestCapacityReleaseMovesTheGenerationOnlyWhenItReopens(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
-	c.RecordICE(ctx, Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
 
 	before := c.Generation()
-	c.RecordCapacityReleased(ctx, Specs{Ncpus: 1, MemInGiB: 2})
+	c.RecordCapacityReleased(ctx, Shape{Ncpus: 1, MemInGiB: 2})
 	if got := c.Generation(); got != before {
 		t.Error("a release that reopened nothing rebuilt the offerings anyway")
 	}
 
-	c.RecordCapacityReleased(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+	c.RecordCapacityReleased(ctx, Shape{Ncpus: 8, MemInGiB: 16})
 	if got := c.Generation(); got == before {
 		t.Error("a release that reopened a shape did not move the generation")
 	}
@@ -545,27 +545,27 @@ func TestCapacityReleaseMovesTheGenerationOnlyWhenItReopens(t *testing.T) {
 
 func TestCapacityReleaseDoesNotDisturbAnInFlightProbe(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
-	specs := Specs{Ncpus: 8, MemInGiB: 16}
+	c := newTestManager(&now)
+	specs := Shape{Ncpus: 8, MemInGiB: 16}
 	ctx := context.Background()
 
 	c.RecordICE(ctx, specs, ReasonCapacity)
 	now = now.Add(3 * time.Minute)
-	if !c.TryAcquire(specs) {
+	if !acquireShape(c, specs) {
 		t.Fatal("the probe could not be acquired once the backoff elapsed")
 	}
 
 	c.RecordCapacityReleased(ctx, specs)
 
-	if c.TryAcquire(specs) {
+	if acquireShape(c, specs) {
 		t.Error("the release released a probe that was still in flight")
 	}
 }
 
-func entryOf(t *testing.T, c *CapacityManager, specs Specs) Entry {
+func entryOf(t *testing.T, c *Manager, specs Shape) Entry {
 	t.Helper()
-	for _, e := range c.Snapshot() {
-		if e.Specs == specs {
+	for _, e := range c.Snapshot().Entries() {
+		if e.Shape == specs {
 			return e
 		}
 	}
@@ -573,71 +573,23 @@ func entryOf(t *testing.T, c *CapacityManager, specs Specs) Entry {
 	return Entry{}
 }
 
-func stateOf(t *testing.T, c *CapacityManager, specs Specs) State {
+func stateOf(t *testing.T, c *Manager, specs Shape) State {
 	t.Helper()
 	return entryOf(t, c, specs).State
 }
 
-func retryAfterOf(t *testing.T, c *CapacityManager, specs Specs) time.Time {
+func retryAfterOf(t *testing.T, c *Manager, specs Shape) time.Time {
 	t.Helper()
 	return entryOf(t, c, specs).RetryAfter
 }
 
-func ices(t *testing.T, c *CapacityManager, specs Specs) int {
+func ices(t *testing.T, c *Manager, specs Shape) int {
 	t.Helper()
 	return entryOf(t, c, specs).ConsecutiveICEs
 }
 
-func TestInstanceTypesMarkOfferingsUnavailable(t *testing.T) {
-	p := NewProvider(nil, nil)
-
-	before, ok := p.Get("8-16")
-	if !ok {
-		t.Fatal("instance type 8-16 does not exist")
-	}
-	if !before.Offerings[0].Available {
-		t.Fatal("instance type 8-16 is unavailable before anything is refused")
-	}
-
-	p.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
-
-	for _, tc := range []struct {
-		name string
-		want bool
-	}{
-		{"8-16", false},
-		{"16-30", false},
-		{"4-8", true},
-	} {
-		it, ok := p.Get(tc.name)
-		if !ok {
-			t.Fatalf("instance type %s does not exist", tc.name)
-		}
-		if got := it.Offerings[0].Available; got != tc.want {
-			t.Errorf("instance type %s available = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-func TestReopenedShapesAreOfferedAgain(t *testing.T) {
-	now := time.Now()
-	p := NewProvider(nil, nil)
-	p.capacity = newTestCapacityManager(&now)
-
-	p.RecordICE(context.Background(), Specs{Ncpus: 8, MemInGiB: 16}, ReasonCapacity)
-	if it, _ := p.Get("8-16"); it.Offerings[0].Available {
-		t.Fatal("8-16 is still offered while it is backed off")
-	}
-
-	now = now.Add(3 * time.Minute)
-
-	if it, _ := p.Get("8-16"); !it.Offerings[0].Available {
-		t.Error("8-16 is not offered again once its backoff elapsed")
-	}
-}
-
 type searchSim struct {
-	c                 *CapacityManager
+	c                 *Manager
 	maxLaunchableCPUs int
 	maxCPUs           int
 
@@ -645,17 +597,17 @@ type searchSim struct {
 	launched []int
 }
 
-func (s *searchSim) largestAvailable() (Specs, bool) {
+func (s *searchSim) largestAvailable() (Shape, bool) {
 	for cpus := s.maxCPUs; cpus >= 1; cpus-- {
-		specs := Specs{Ncpus: cpus, MemInGiB: cpus * 2}
-		if unavailable, _ := s.c.IsUnavailable(specs); !unavailable {
+		specs := Shape{Ncpus: cpus, MemInGiB: cpus * 2}
+		if unavailable, _ := unavailableFor(s.c, specs); !unavailable {
 			return specs, true
 		}
 	}
-	return Specs{}, false
+	return Shape{}, false
 }
 
-func (s *searchSim) run(t *testing.T, budget int) Specs {
+func (s *searchSim) run(t *testing.T, budget int) Shape {
 	t.Helper()
 	for range budget {
 		specs, ok := s.largestAvailable()
@@ -671,13 +623,13 @@ func (s *searchSim) run(t *testing.T, budget int) Specs {
 		s.c.RecordICE(context.Background(), specs, ReasonCapacity)
 	}
 	t.Fatalf("no shape launched within %d attempts: %v", budget, s.attempts)
-	return Specs{}
+	return Shape{}
 }
 
 func TestCapacitySearchDescendsGeometrically(t *testing.T) {
 	now := time.Now()
 	sim := &searchSim{
-		c:                 newTestCapacityManager(&now),
+		c:                 newTestManager(&now),
 		maxLaunchableCPUs: 9,
 		maxCPUs:           38,
 	}
@@ -704,7 +656,7 @@ func TestCapacitySearchDescendsGeometrically(t *testing.T) {
 func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
 	now := time.Now()
 	sim := &searchSim{
-		c:                 newTestCapacityManager(&now),
+		c:                 newTestManager(&now),
 		maxLaunchableCPUs: 9,
 		maxCPUs:           38,
 	}
@@ -739,12 +691,12 @@ func TestCapacitySearchClimbsBackToTheBoundary(t *testing.T) {
 
 func TestCapacitySearchNeverRulesOutEveryShape(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 
 	for _, cpus := range []int{38, 19, 9, 4, 2, 1} {
-		c.RecordICE(context.Background(), Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
-		smallest := Specs{Ncpus: 1, MemInGiB: 2}
-		if unavailable, _ := c.IsUnavailable(smallest); unavailable {
+		c.RecordICE(context.Background(), Shape{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+		smallest := Shape{Ncpus: 1, MemInGiB: 2}
+		if unavailable, _ := unavailableFor(c, smallest); unavailable {
 
 			if cpus > 1 {
 				t.Fatalf(
@@ -758,45 +710,45 @@ func TestCapacitySearchNeverRulesOutEveryShape(t *testing.T) {
 
 func TestCapacitySuccessBelowTheReachDoesNotClearTheRefusal(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 
-	c.RecordICE(context.Background(), Specs{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
-	c.RecordICE(context.Background(), Specs{Ncpus: 31, MemInGiB: 62}, ReasonCapacity)
+	c.RecordICE(context.Background(), Shape{Ncpus: 32, MemInGiB: 64}, ReasonCapacity)
+	c.RecordICE(context.Background(), Shape{Ncpus: 31, MemInGiB: 62}, ReasonCapacity)
 
-	c.RecordSuccess(context.Background(), Specs{Ncpus: 4, MemInGiB: 8})
+	c.RecordSuccess(context.Background(), Shape{Ncpus: 4, MemInGiB: 8})
 
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 31, MemInGiB: 62}); !unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 31, MemInGiB: 62}); !unavailable {
 		t.Error("a refused shape became available again because something smaller launched")
 	}
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 4, MemInGiB: 8}); unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 4, MemInGiB: 8}); unavailable {
 		t.Error("the shape that just launched is still ruled out")
 	}
 }
 
 func TestOutOfOrderRefusalDoesNotSmotherTheSmallerEntry(t *testing.T) {
 	now := time.Now()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 	ctx := context.Background()
 
 	for _, cpus := range []int{32, 16, 11} {
-		c.RecordICE(ctx, Specs{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
+		c.RecordICE(ctx, Shape{Ncpus: cpus, MemInGiB: cpus * 2}, ReasonCapacity)
 	}
 
-	c.RecordICE(ctx, Specs{Ncpus: 12, MemInGiB: 24}, ReasonCapacity)
+	c.RecordICE(ctx, Shape{Ncpus: 12, MemInGiB: 24}, ReasonCapacity)
 
-	c.RecordCapacityReleased(ctx, Specs{Ncpus: 11, MemInGiB: 22})
+	c.RecordCapacityReleased(ctx, Shape{Ncpus: 11, MemInGiB: 22})
 
-	if got := stateOf(t, c, Specs{Ncpus: 11, MemInGiB: 22}); got != StateHalfOpen {
+	if got := stateOf(t, c, Shape{Ncpus: 11, MemInGiB: 22}); got != StateHalfOpen {
 		t.Fatalf("11-22 state = %q, want it reopened for a probe", got)
 	}
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 11, MemInGiB: 22}); unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 11, MemInGiB: 22}); unavailable {
 		t.Error("the reopened shape is still ruled out, so its probe can never run")
 	}
-	if !c.TryAcquire(Specs{Ncpus: 11, MemInGiB: 22}) {
+	if !acquireShape(c, Shape{Ncpus: 11, MemInGiB: 22}) {
 		t.Error("the reopened shape could not be acquired for its probe")
 	}
 
-	if unavailable, _ := c.IsUnavailable(Specs{Ncpus: 12, MemInGiB: 24}); !unavailable {
+	if unavailable, _ := unavailableFor(c, Shape{Ncpus: 12, MemInGiB: 24}); !unavailable {
 		t.Error("12-24 was refused and is being offered anyway")
 	}
 }
@@ -805,14 +757,14 @@ func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
 
-	refused := Specs{Ncpus: 10, MemInGiB: 20}
-	running := Specs{Ncpus: 5, MemInGiB: 10}
+	refused := Shape{Ncpus: 10, MemInGiB: 20}
+	running := Shape{Ncpus: 5, MemInGiB: 10}
 
-	unseeded := newTestCapacityManager(&now)
+	unseeded := newTestManager(&now)
 	for range walkThreshold + 1 {
 		unseeded.RecordICE(ctx, refused, ReasonCapacity)
 	}
-	if got, _ := unseeded.IsUnavailable(running); !got {
+	if got, _ := unavailableFor(unseeded, running); !got {
 		t.Fatalf(
 			"without a floor the descent was expected to rule out %d-%d, so this test proves nothing",
 			running.Ncpus,
@@ -820,17 +772,20 @@ func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 		)
 	}
 
-	seeded := newTestCapacityManager(&now)
+	seeded := newTestManager(&now)
 	seeded.SeedLaunchable(ctx, running)
 	for range walkThreshold + 1 {
 		seeded.RecordICE(ctx, refused, ReasonCapacity)
 	}
-	if got, _ := seeded.IsUnavailable(running); got {
-		t.Errorf("IsUnavailable(%d-%d) = true, want a shape the cluster is running to stay offered",
-			running.Ncpus, running.MemInGiB)
+	if got, _ := unavailableFor(seeded, running); got {
+		t.Errorf(
+			"Check(%d-%d) reports unavailable, want a shape the cluster is running to stay offered",
+			running.Ncpus,
+			running.MemInGiB,
+		)
 	}
 
-	if got := entryOf(t, seeded, refused).Reach; got != (Specs{Ncpus: 8, MemInGiB: 16}) {
+	if got := entryOf(t, seeded, refused).Reach; got != (Shape{Ncpus: 8, MemInGiB: 16}) {
 		t.Errorf("reach = %d-%d, want the bracketed midpoint 8-16", got.Ncpus, got.MemInGiB)
 	}
 }
@@ -838,17 +793,17 @@ func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 func TestSeededFloorDoesNotDisplaceALaunchedOne(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 
-	c.SeedLaunchable(ctx, Specs{Ncpus: 2, MemInGiB: 4})
-	c.RecordICE(ctx, Specs{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
-	c.RecordSuccess(ctx, Specs{Ncpus: 8, MemInGiB: 16})
+	c.SeedLaunchable(ctx, Shape{Ncpus: 2, MemInGiB: 4})
+	c.RecordICE(ctx, Shape{Ncpus: 16, MemInGiB: 32}, ReasonCapacity)
+	c.RecordSuccess(ctx, Shape{Ncpus: 8, MemInGiB: 16})
 
 	if got := entryOf(
 		t,
 		c,
-		Specs{Ncpus: 16, MemInGiB: 32},
-	).Floor; got != (Specs{Ncpus: 8, MemInGiB: 16}) {
+		Shape{Ncpus: 16, MemInGiB: 32},
+	).Floor; got != (Shape{Ncpus: 8, MemInGiB: 16}) {
 		t.Errorf(
 			"floor = %d-%d, want the launched shape rather than the seed",
 			got.Ncpus,
@@ -860,16 +815,16 @@ func TestSeededFloorDoesNotDisplaceALaunchedOne(t *testing.T) {
 func TestSeedKeepsTheLargestShape(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 
-	c.SeedLaunchable(ctx, Specs{Ncpus: 12, MemInGiB: 24})
-	c.SeedLaunchable(ctx, Specs{Ncpus: 2, MemInGiB: 4})
+	c.SeedLaunchable(ctx, Shape{Ncpus: 12, MemInGiB: 24})
+	c.SeedLaunchable(ctx, Shape{Ncpus: 2, MemInGiB: 4})
 
-	refused := Specs{Ncpus: 32, MemInGiB: 64}
+	refused := Shape{Ncpus: 32, MemInGiB: 64}
 	for range walkThreshold + 1 {
 		c.RecordICE(ctx, refused, ReasonCapacity)
 	}
-	if got, _ := c.IsUnavailable(Specs{Ncpus: 12, MemInGiB: 24}); got {
+	if got, _ := unavailableFor(c, Shape{Ncpus: 12, MemInGiB: 24}); got {
 		t.Error("the largest seeded shape was ruled out, so a later smaller seed overwrote it")
 	}
 }
@@ -877,10 +832,10 @@ func TestSeedKeepsTheLargestShape(t *testing.T) {
 func TestSeedAtOrAboveTheRefusalIsDropped(t *testing.T) {
 	now := time.Now()
 	ctx := context.Background()
-	c := newTestCapacityManager(&now)
+	c := newTestManager(&now)
 
-	c.SeedLaunchable(ctx, Specs{Ncpus: 16, MemInGiB: 32})
-	refused := Specs{Ncpus: 8, MemInGiB: 16}
+	c.SeedLaunchable(ctx, Shape{Ncpus: 16, MemInGiB: 32})
+	refused := Shape{Ncpus: 8, MemInGiB: 16}
 	for range walkThreshold + 1 {
 		c.RecordICE(ctx, refused, ReasonCapacity)
 	}
@@ -890,7 +845,7 @@ func TestSeedAtOrAboveTheRefusalIsDropped(t *testing.T) {
 		t.Errorf("floor = %d-%d, want a stale seed above the refusal to be dropped",
 			entry.Floor.Ncpus, entry.Floor.MemInGiB)
 	}
-	if got := entry.Reach; got != (Specs{Ncpus: 4, MemInGiB: 8}) {
+	if got := entry.Reach; got != (Shape{Ncpus: 4, MemInGiB: 8}) {
 		t.Errorf("reach = %d-%d, want the halving descent 4-8", got.Ncpus, got.MemInGiB)
 	}
 }

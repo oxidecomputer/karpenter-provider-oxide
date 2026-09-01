@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/affinitypolicy"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/kubeadm"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/rke2"
@@ -35,6 +35,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/sled"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
@@ -149,16 +150,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	availabilityManager := availability.New(inventoryProvider(sledProvider))
+	storageRefusals := storagerefusal.NewTracker()
 	instanceTypes, err := instancetype.NewProviderWithShapeConfig(
 		quotaProvider(quotas),
-		inventoryProvider(sledProvider),
+		availabilityManager,
 		shapeCfg,
 	)
 	if err != nil {
 		return err
 	}
-
-	affinityPolicy := affinitypolicy.NewTracker()
 
 	images := image.NewProvider(ox, providers.CoalesceWindow)
 	subnets := subnet.NewProvider(ox, providers.CoalesceWindow)
@@ -192,7 +193,7 @@ func run() error {
 		ox,
 		project,
 		func(ctx context.Context, released instance.Released) {
-			instanceTypes.RecordCapacityReleased(ctx, instancetype.Specs{
+			availabilityManager.RecordCapacityReleased(ctx, availability.Shape{
 				Ncpus: released.Ncpus,
 
 				MemInGiB: int(released.Memory / cloudprovider.GiB),
@@ -211,7 +212,8 @@ func run() error {
 		bootDisks,
 		instanceTypes,
 		karpcore.InstanceTypeStore,
-		affinityPolicy,
+		availabilityManager,
+		storageRefusals,
 		bootstrappers,
 		inventoryCfg.repairPolicies(),
 
@@ -248,7 +250,6 @@ func run() error {
 			ipPools,
 			affinityGroups,
 			snapshots,
-			affinityPolicy,
 			bootstrappers,
 		),
 
@@ -259,6 +260,8 @@ func run() error {
 		capacitycontroller.NewController(
 			karpcore.GetClient(),
 			instanceTypes,
+			availabilityManager,
+			storageRefusals,
 			capacityPublishPeriod,
 		),
 
@@ -445,7 +448,7 @@ func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
 	return quotas
 }
 
-func inventoryProvider(sledProvider *sled.Provider) instancetype.InventoryProvider {
+func inventoryProvider(sledProvider *sled.Provider) availability.InventoryProvider {
 	if sledProvider == nil {
 		return nil
 	}

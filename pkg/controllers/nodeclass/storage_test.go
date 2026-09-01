@@ -68,7 +68,11 @@ func TestResolveStorageValidatesStaticSizes(t *testing.T) {
 				t.Fatalf("StorageResolved true = %t, want %t: %#v", got, tt.valid, condition)
 			}
 			if !tt.valid && condition.Reason != v1alpha1.ConditionReasonInvalidDiskSize {
-				t.Errorf("reason = %q, want %q", condition.Reason, v1alpha1.ConditionReasonInvalidDiskSize)
+				t.Errorf(
+					"reason = %q, want %q",
+					condition.Reason,
+					v1alpha1.ConditionReasonInvalidDiskSize,
+				)
 			}
 		})
 	}
@@ -144,11 +148,15 @@ func TestResolveStorageValidatesSourcedDiskSizes(t *testing.T) {
 					}
 					nodeClass := storageNodeClass("20Gi", set)
 					controller := sourceStorageController(t, 2<<30, true)
-					if err := controller.resolveStorage(context.Background(), nodeClass); err != nil {
+					if err := controller.resolveStorage(
+						context.Background(),
+						nodeClass,
+					); err != nil {
 						t.Fatal(err)
 					}
 					want := requested == "2Gi" || (!readOnly && requested == "3Gi")
-					condition := nodeClass.StatusConditions().Get(v1alpha1.ConditionTypeStorageResolved)
+					condition := nodeClass.StatusConditions().
+						Get(v1alpha1.ConditionTypeStorageResolved)
 					if got := condition.IsTrue(); got != want {
 						t.Fatalf("StorageResolved true = %t, want %t: %#v", got, want, condition)
 					}

@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -28,7 +30,7 @@ func (f *fakeInventory) Capacity() capacity.Snapshot {
 
 func newController(
 	t *testing.T,
-	inventory instancetype.InventoryProvider,
+	inventory availability.InventoryProvider,
 ) (*Controller, client.WithWatch) {
 	t.Helper()
 
@@ -44,9 +46,20 @@ func newController(
 		WithStatusSubresource(&v1alpha1.OxideCapacity{}).
 		Build()
 
+	manager := availability.New(inventory)
+	instanceTypes, err := instancetype.NewProviderWithShapeConfig(
+		nil,
+		manager,
+		instancetype.DefaultShapeConfig(),
+	)
+	if err != nil {
+		t.Fatalf("unable to build instance types: %v", err)
+	}
 	return NewController(
 		kubeClient,
-		instancetype.NewProvider(nil, inventory),
+		instanceTypes,
+		manager,
+		storagerefusal.NewTracker(),
 		time.Second,
 	), kubeClient
 }
@@ -93,10 +106,10 @@ func TestReconcileCreatesTheViewIfItIsMissing(t *testing.T) {
 
 func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
 	c, kubeClient := newController(t, nil)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 2, MemInGiB: 4},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
@@ -122,15 +135,15 @@ func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
 
 func TestReconcilePublishesRefusedShapes(t *testing.T) {
 	c, kubeClient := newController(t, nil)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 32, MemInGiB: 64},
-		instancetype.ReasonQuota,
+		availability.ReasonQuota,
 	)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
@@ -165,8 +178,8 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 	if smallest.Range != ">=8 vCPUs and >=16 GiB" {
 		t.Errorf("range reads %q, want it to spell out both bounds", smallest.Range)
 	}
-	if smallest.Reason != string(instancetype.ReasonCapacity) {
-		t.Errorf("reason = %q, want %q", smallest.Reason, instancetype.ReasonCapacity)
+	if smallest.Reason != string(availability.ReasonCapacity) {
+		t.Errorf("reason = %q, want %q", smallest.Reason, availability.ReasonCapacity)
 	}
 	if smallest.State != v1alpha1.ShapeStateBackoff {
 		t.Errorf("state = %q, want %q", smallest.State, v1alpha1.ShapeStateBackoff)
@@ -181,18 +194,18 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 		t.Error("no refusal time was published")
 	}
 	if quota := view.Status.InstanceTypes.UnavailableRanges[1]; quota.Reason != string(
-		instancetype.ReasonQuota,
+		availability.ReasonQuota,
 	) {
 		t.Errorf("the quota-refused shape reports reason %q, want %q",
-			quota.Reason, instancetype.ReasonQuota)
+			quota.Reason, availability.ReasonQuota)
 	}
 }
 
 func TestReconcilePublishesAStorageRefusal(t *testing.T) {
 	c, kubeClient := newController(t, nil)
-	c.instanceTypes.RecordStorageRefusal(
+	c.storage.Record(
 		t.Context(),
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 		"the rack has nowhere to put the boot disk",
 	)
 
@@ -204,8 +217,8 @@ func TestReconcilePublishesAStorageRefusal(t *testing.T) {
 	if view.Status.Storage == nil {
 		t.Fatal("no storage refusal was published")
 	}
-	if got := view.Status.Storage.Reason; got != string(instancetype.ReasonCapacity) {
-		t.Errorf("reason = %q, want %q", got, instancetype.ReasonCapacity)
+	if got := view.Status.Storage.Reason; got != string(availability.ReasonCapacity) {
+		t.Errorf("reason = %q, want %q", got, availability.ReasonCapacity)
 	}
 	if got := view.Status.Storage.ConsecutiveRefusals; got != 1 {
 		t.Errorf("consecutive refusals = %d, want 1", got)
@@ -222,9 +235,9 @@ func TestReconcilePublishesAStorageRefusal(t *testing.T) {
 	}
 }
 
-func TestASuccessfulLaunchClearsThePublishedStorageRefusal(t *testing.T) {
+func TestAClearedStorageRefusalIsUnpublished(t *testing.T) {
 	c, kubeClient := newController(t, nil)
-	c.instanceTypes.RecordStorageRefusal(t.Context(), instancetype.ReasonQuota, "no storage quota")
+	c.storage.Record(t.Context(), availability.ReasonQuota, "no storage quota")
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -233,13 +246,13 @@ func TestASuccessfulLaunchClearsThePublishedStorageRefusal(t *testing.T) {
 		t.Fatal("the refusal was never published, so the test proves nothing")
 	}
 
-	c.instanceTypes.RecordSuccess(t.Context(), instancetype.Specs{Ncpus: 8, MemInGiB: 16})
+	c.storage.Clear(t.Context())
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
 	if got := published(t, kubeClient).Status.Storage; got != nil {
 		t.Errorf(
-			"storage refusal %+v is still published after a launch provisioned a boot disk",
+			"storage refusal %+v is still published after it was cleared",
 			got,
 		)
 	}
@@ -415,10 +428,10 @@ func TestUnreadInventoryIsDistinctFromDisabled(t *testing.T) {
 
 func TestUnchangedViewIsNotRewritten(t *testing.T) {
 	c, kubeClient := newController(t, nil)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
@@ -435,10 +448,10 @@ func TestUnchangedViewIsNotRewritten(t *testing.T) {
 		t.Errorf("the view was rewritten (%s to %s) with nothing changed", first, got)
 	}
 
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 4, MemInGiB: 8},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -560,15 +573,15 @@ func TestViewIsAddressableByName(t *testing.T) {
 func TestReconcilePublishesTheSkippedRangeNotJustTheRefusal(t *testing.T) {
 	c, kubeClient := newController(t, nil)
 
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 32, MemInGiB: 64},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 31, MemInGiB: 62},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {

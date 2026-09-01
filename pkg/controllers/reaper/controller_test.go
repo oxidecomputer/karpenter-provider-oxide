@@ -379,6 +379,9 @@ func TestReconcileRevalidatesADiskImmediatelyBeforeDeletion(t *testing.T) {
 	reap(t, c)
 
 	if len(api.deletedDisks) != 0 {
-		t.Errorf("deleted disks = %v, want a disk whose marker changed left intact", api.deletedDisks)
+		t.Errorf(
+			"deleted disks = %v, want a disk whose marker changed left intact",
+			api.deletedDisks,
+		)
 	}
 }

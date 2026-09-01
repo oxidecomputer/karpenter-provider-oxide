@@ -20,14 +20,15 @@ import (
 	"strings"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 )
 
-func shapeState(state instancetype.State) string {
+func shapeState(state availability.State) string {
 	switch state {
-	case instancetype.StateBackoff:
+	case availability.StateBackoff:
 		return v1alpha1.ShapeStateBackoff
-	case instancetype.StateHalfOpen:
+	case availability.StateHalfOpen:
 		return v1alpha1.ShapeStateHalfOpen
 	default:
 		return string(state)

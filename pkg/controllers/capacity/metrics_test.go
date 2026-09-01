@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
@@ -12,14 +13,15 @@ import (
 
 func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 	c, _ := newController(t, nil)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 
-	rack, inventory := c.instanceTypes.Rack()
-	publishMetrics(c.render(rack, inventory), rack, inventory)
+	reading := c.availability.Snapshot()
+	rack, inventory := reading.Rack()
+	publishMetrics(c.render(reading), rack, inventory)
 
 	if got := testutil.CollectAndCount(metrics.BackoffSeconds); got != 1 {
 		t.Fatalf("%d backoff series published, want 1", got)
@@ -28,9 +30,10 @@ func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 		t.Fatalf("unavailable shapes = %v, want 1", got)
 	}
 
-	c.instanceTypes.RecordSuccess(t.Context(), instancetype.Specs{Ncpus: 8, MemInGiB: 16})
-	rack, inventory = c.instanceTypes.Rack()
-	publishMetrics(c.render(rack, inventory), rack, inventory)
+	c.availability.RecordSuccess(t.Context(), instancetype.Specs{Ncpus: 8, MemInGiB: 16})
+	reading = c.availability.Snapshot()
+	rack, inventory = reading.Rack()
+	publishMetrics(c.render(reading), rack, inventory)
 
 	if got := testutil.CollectAndCount(metrics.BackoffSeconds); got != 0 {
 		t.Errorf("%d backoff series still published for a shape that came back", got)
@@ -49,8 +52,9 @@ func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 	)}
 	c, _ := newController(t, fresh)
 
-	rack, inventory := c.instanceTypes.Rack()
-	publishMetrics(c.render(rack, inventory), rack, inventory)
+	reading := c.availability.Snapshot()
+	rack, inventory := reading.Rack()
+	publishMetrics(c.render(reading), rack, inventory)
 
 	if got := testutil.ToFloat64(metrics.SnapshotFresh); got != 1 {
 		t.Errorf("snapshot fresh = %v, want 1", got)
@@ -71,8 +75,9 @@ func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 		time.Hour,
 		2,
 	)
-	rack, inventory = c.instanceTypes.Rack()
-	publishMetrics(c.render(rack, inventory), rack, inventory)
+	reading = c.availability.Snapshot()
+	rack, inventory = reading.Rack()
+	publishMetrics(c.render(reading), rack, inventory)
 
 	if got := testutil.ToFloat64(metrics.SnapshotFresh); got != 0 {
 		t.Errorf("snapshot fresh = %v, want 0 for a reading nobody is believing", got)
@@ -87,17 +92,18 @@ func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 		1,
 	)}
 	c, _ := newController(t, inventory)
-	c.instanceTypes.RecordICE(
+	c.availability.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		instancetype.ReasonCapacity,
+		availability.ReasonCapacity,
 	)
 
-	rack, state := c.instanceTypes.Rack()
-	if state != instancetype.InventoryFresh {
+	reading := c.availability.Snapshot()
+	rack, state := reading.Rack()
+	if state != availability.InventoryFresh {
 		t.Fatalf("inventory state = %q, want the reading to be fresh", state)
 	}
-	publishMetrics(c.render(rack, state), rack, state)
+	publishMetrics(c.render(reading), rack, state)
 
 	series := testutil.ToFloat64(metrics.FeasibleInstances.WithLabelValues("8-16"))
 	if series != 2 {
@@ -111,8 +117,9 @@ func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 func TestPublishMetricsStaysBoundedWithNothingWrong(t *testing.T) {
 	c, _ := newController(t, nil)
 
-	rack, inventory := c.instanceTypes.Rack()
-	publishMetrics(c.render(rack, inventory), rack, inventory)
+	reading := c.availability.Snapshot()
+	rack, inventory := reading.Rack()
+	publishMetrics(c.render(reading), rack, inventory)
 
 	if got := testutil.CollectAndCount(metrics.BackoffSeconds); got != 0 {
 		t.Errorf("%d backoff series with nothing refused", got)

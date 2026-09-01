@@ -22,12 +22,6 @@ const (
 // ConditionTypeAffinityGroupsResolved reports whether every affinity group selector resolved.
 const ConditionTypeAffinityGroupsResolved = "AffinityGroupsResolved"
 
-// ConditionTypeAffinityPolicySatisfiable reports fail-policy placement readiness.
-const ConditionTypeAffinityPolicySatisfiable = "AffinityPolicySatisfiable"
-
-// ConditionReasonAffinityPolicyUnsatisfiable identifies a fail-policy refusal.
-const ConditionReasonAffinityPolicyUnsatisfiable = "AffinityPolicyUnsatisfiable"
-
 // ConditionTypeStorageResolved reports whether the complete storage layout is valid and its sources resolved.
 const ConditionTypeStorageResolved = "StorageResolved"
 
@@ -260,11 +254,7 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		conds = append(conds, ConditionTypeEphemeralIPsResolved)
 	}
 	if in.Spec.Affinity != nil {
-		conds = append(
-			conds,
-			ConditionTypeAffinityGroupsResolved,
-			ConditionTypeAffinityPolicySatisfiable,
-		)
+		conds = append(conds, ConditionTypeAffinityGroupsResolved)
 	}
 	return status.NewReadyConditions(conds...).For(in)
 }

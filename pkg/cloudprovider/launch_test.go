@@ -172,7 +172,12 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 		},
 	}
 
-	owner := ownership.Marker{ClusterUID: "cluster", NodeClaimUID: "claim", NodeClaimName: nodeClaim.Name, Kind: ownership.KindInstance}
+	owner := ownership.Marker{
+		ClusterUID:    "cluster",
+		NodeClaimUID:  "claim",
+		NodeClaimName: nodeClaim.Name,
+		Kind:          ownership.KindInstance,
+	}
 	teardown := teardownFor(nodeClaim, "karpenter-default-abc12", owner)
 	if teardown.DiskPrefix != "kd-abcdefghijkl-" {
 		t.Errorf("disk prefix = %q, want the prefix the launch recorded", teardown.DiskPrefix)
@@ -189,7 +194,12 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
 	nodeClaim := &karpcorev1.NodeClaim{ObjectMeta: v1.ObjectMeta{Name: "default-abc12"}}
 
-	owner := ownership.Marker{ClusterUID: "cluster", NodeClaimUID: "claim", NodeClaimName: nodeClaim.Name, Kind: ownership.KindInstance}
+	owner := ownership.Marker{
+		ClusterUID:    "cluster",
+		NodeClaimUID:  "claim",
+		NodeClaimName: nodeClaim.Name,
+		Kind:          ownership.KindInstance,
+	}
 	teardown := teardownFor(nodeClaim, "karpenter-default-abc12", owner)
 	if teardown.BootDiskName != "karpenter-default-abc12" {
 		t.Errorf("boot disk name = %q, want the legacy name", teardown.BootDiskName)
@@ -223,7 +233,11 @@ func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
 	}, &started)
 
 	got := &v1alpha1.OxideBootDisk{}
-	if err := kubeClient.Get(context.Background(), client.ObjectKey{Name: record.Name}, got); err != nil {
+	if err := kubeClient.Get(
+		context.Background(),
+		client.ObjectKey{Name: record.Name},
+		got,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if !got.Spec.Retire {

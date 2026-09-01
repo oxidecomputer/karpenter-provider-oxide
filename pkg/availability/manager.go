@@ -1,4 +1,5 @@
-package instancetype
+// Package availability decides whether shaped launch requests are worth attempting.
+package availability
 
 import (
 	"context"
@@ -7,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,6 +35,8 @@ const (
 	ReasonCapacity Reason = "InsufficientCapacity"
 	// ReasonQuota is the silo's quota having no room for the shape.
 	ReasonQuota Reason = "QuotaExceeded"
+	// ReasonAffinityPolicy is a shape being unavailable under one placement constraint.
+	ReasonAffinityPolicy Reason = "AffinityPolicyUnsatisfiable"
 )
 
 // State is where a shape sits in the circuit breaker.
@@ -47,29 +49,17 @@ const (
 	StateHalfOpen State = "half-open"
 )
 
-// StorageRefusal is the most recent launch refused because the boot disk could not be provisioned.
-type StorageRefusal struct {
-	// Reason is which limit was diagnosed as binding, on the same terms as a shape's.
-	Reason Reason
-	// Consecutive is how many launches in a row have been refused this way.
-	Consecutive int
-	// LastRefusal is when the most recent one happened, and is what this ages out from.
-	LastRefusal time.Time
-	// Message is the diagnosis as it was reported on the NodeClaim.
-	Message string
-}
-
 // Entry is one refused shape, why it was refused, and what the breaker has learned about it.
 type Entry struct {
-	// Specs is the shape that was actually refused.
-	Specs  Specs
+	// Shape is the shape that was actually refused.
+	Shape  Shape
 	Reason Reason
 	State  State
 
-	// Reach is the smallest shape this entry takes out of consideration, which is at most Specs and may be well below it.
-	Reach Specs
-	// Floor is the largest shape known to have launched while this entry stood, or the zero Specs if none has.
-	Floor Specs
+	// Reach is the smallest shape this entry takes out of consideration, which is at most Shape and may be well below it.
+	Reach Shape
+	// Floor is the largest shape known to have launched while this entry stood, or the zero Shape if none has.
+	Floor Shape
 
 	// ConsecutiveICEs is how long the run of refusals this entry belongs to is.
 	ConsecutiveICEs int
@@ -81,12 +71,12 @@ type Entry struct {
 	probeInFlight bool
 }
 
-// CapacityManager decides which instance shapes are worth launching, keyed by CPU count and memory.
-type CapacityManager struct {
-	mu      sync.Mutex
-	entries map[string]*Entry
-
-	storage *StorageRefusal
+// Manager decides which instance shapes are worth launching globally and
+// under resolved placement constraints.
+type Manager struct {
+	mu         sync.Mutex
+	entries    map[string]*Entry
+	placements map[placementEntryKey]*placementEntry
 
 	generation atomic.Uint64
 
@@ -95,7 +85,7 @@ type CapacityManager struct {
 	rack      capacity.Snapshot
 	rackFresh bool
 
-	launched Specs
+	launched Shape
 
 	now    func() time.Time
 	jitter func(time.Duration) time.Duration
@@ -107,26 +97,27 @@ type InventoryProvider interface {
 	Capacity() capacity.Snapshot
 }
 
-// NewCapacityManager builds a capacity manager.
-func NewCapacityManager(inventory InventoryProvider) *CapacityManager {
-	return &CapacityManager{
-		entries:   map[string]*Entry{},
-		inventory: inventory,
-		now:       time.Now,
-		jitter:    randomJitter,
+// New builds an availability manager.
+func New(inventory InventoryProvider) *Manager {
+	return &Manager{
+		entries:    map[string]*Entry{},
+		placements: map[placementEntryKey]*placementEntry{},
+		inventory:  inventory,
+		now:        time.Now,
+		jitter:     randomJitter,
 	}
 }
 
 // RecordICE takes a shape, and every shape at least as large, out of consideration.
-func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Reason) {
+func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := c.now()
-	key := SpecsToInstanceTypeName(specs.Ncpus, specs.MemInGiB)
+	key := shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB})
 	entry, ok := c.entries[key]
 	if !ok {
-		entry = &Entry{Specs: specs}
+		entry = &Entry{Shape: specs}
 		c.entries[key] = entry
 	}
 	from := entry.State
@@ -139,7 +130,7 @@ func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Rea
 		if existing == key {
 			continue
 		}
-		if !covers(specs, other.Specs) {
+		if !covers(specs, other.Shape) {
 			continue
 		}
 		run = max(run, other.ConsecutiveICEs)
@@ -155,7 +146,7 @@ func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Rea
 	}
 
 	if known(floor) && atLeast(floor, specs) {
-		floor = Specs{}
+		floor = Shape{}
 	}
 
 	entry.Reason = reason
@@ -170,7 +161,7 @@ func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Rea
 	covering, coveredByOther := c.coveredByOther(specs)
 	if coveredByOther {
 		entry.Reach = specs
-		entry.Floor = Specs{}
+		entry.Floor = Shape{}
 	}
 
 	c.generation.Add(1)
@@ -186,7 +177,7 @@ func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Rea
 		"subsumed-shapes", subsumed,
 		"backoff", entry.RetryAfter.Sub(now),
 
-		"ruled-out-from", SpecsToInstanceTypeName(entry.Reach.Ncpus, entry.Reach.MemInGiB),
+		"ruled-out-from", shapeKey(Shape{Ncpus: entry.Reach.Ncpus, MemInGiB: entry.Reach.MemInGiB}),
 		"launchable-floor", floorName(entry.Floor),
 
 		"already-covered-by", floorName(covering),
@@ -194,14 +185,14 @@ func (c *CapacityManager) RecordICE(ctx context.Context, specs Specs, reason Rea
 }
 
 // RecordSuccess reports that a launch of this shape succeeded, which disproves every claim that it could not be placed.
-func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
+func (c *Manager) RecordSuccess(ctx context.Context, specs Shape) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	changed := 0
 	cleared := 0
 	for key, entry := range c.entries {
-		if covers(entry.Specs, specs) {
+		if covers(entry.Shape, specs) {
 			delete(c.entries, key)
 			cleared++
 			changed++
@@ -211,7 +202,7 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 				"from", entry.State,
 				"to", "available",
 				"reason", "launch-succeeded",
-				"launched", SpecsToInstanceTypeName(specs.Ncpus, specs.MemInGiB),
+				"launched", shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB}),
 				"consecutive-ices", entry.ConsecutiveICEs,
 			)
 			continue
@@ -223,7 +214,7 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 		if known(entry.Floor) && !atLeast(specs, entry.Floor) {
 			continue
 		}
-		reach := between(specs, entry.Specs)
+		reach := between(specs, entry.Shape)
 		if reach == entry.Reach {
 
 			entry.Floor = specs
@@ -238,9 +229,9 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 			"narrowing the search for a launchable shape",
 			"instance-type", key,
 			"reason", "launch-succeeded",
-			"launched", SpecsToInstanceTypeName(specs.Ncpus, specs.MemInGiB),
-			"ruled-out-from", SpecsToInstanceTypeName(reach.Ncpus, reach.MemInGiB),
-			"was-ruled-out-from", SpecsToInstanceTypeName(previous.Ncpus, previous.MemInGiB),
+			"launched", shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB}),
+			"ruled-out-from", shapeKey(Shape{Ncpus: reach.Ncpus, MemInGiB: reach.MemInGiB}),
+			"was-ruled-out-from", shapeKey(Shape{Ncpus: previous.Ncpus, MemInGiB: previous.MemInGiB}),
 			"refused-shape", key,
 		)
 	}
@@ -253,7 +244,7 @@ func (c *CapacityManager) RecordSuccess(ctx context.Context, specs Specs) {
 }
 
 // SeedLaunchable reports that the cluster is running a node of this shape, which is proof the rack placed it.
-func (c *CapacityManager) SeedLaunchable(ctx context.Context, specs Specs) {
+func (c *Manager) SeedLaunchable(ctx context.Context, specs Shape) {
 	if !known(specs) {
 		return
 	}
@@ -261,7 +252,7 @@ func (c *CapacityManager) SeedLaunchable(ctx context.Context, specs Specs) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if known(c.launched) && price(c.launched) >= price(specs) {
+	if known(c.launched) && shapeSize(c.launched) >= shapeSize(specs) {
 		return
 	}
 	previous := c.launched
@@ -269,69 +260,19 @@ func (c *CapacityManager) SeedLaunchable(ctx context.Context, specs Specs) {
 
 	log.FromContext(ctx).V(1).Info(
 		"recorded a running shape as the launchable floor",
-		"instance-type", SpecsToInstanceTypeName(specs.Ncpus, specs.MemInGiB),
+		"instance-type", shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB}),
 		"previous", floorName(previous),
 	)
 }
 
-// RecordStorageRefusal reports that a launch was refused because its boot disk could not be provisioned.
-func (c *CapacityManager) RecordStorageRefusal(ctx context.Context, reason Reason, message string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.storage == nil {
-		c.storage = &StorageRefusal{}
-	}
-	c.storage.Reason = reason
-	c.storage.Consecutive++
-	c.storage.LastRefusal = c.now()
-	c.storage.Message = message
-
-	metrics.StorageRefusals.WithLabelValues(string(reason)).Inc()
-
-	log.FromContext(ctx).V(1).Info(
-		"launch refused for want of boot disk storage",
-		"reason", reason,
-		"consecutive-refusals", c.storage.Consecutive,
-		"diagnosis", message,
-	)
-}
-
-// ClearStorageRefusal reports that a launch created its boot disk, which is every launch that succeeds.
-func (c *CapacityManager) ClearStorageRefusal(ctx context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.storage == nil {
-		return
-	}
-	log.FromContext(ctx).V(1).Info(
-		"boot disk storage is available again",
-		"reason", "launch-succeeded",
-		"consecutive-refusals", c.storage.Consecutive,
-	)
-	c.storage = nil
-}
-
-// StorageRefusal returns the last storage refusal, and whether there is one to report.
-func (c *CapacityManager) StorageRefusal() (StorageRefusal, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.storage == nil {
-		return StorageRefusal{}, false
-	}
-	return *c.storage, true
-}
-
 // RecordCapacityReleased reports that the rack has taken back the resources of an instance of this shape.
-func (c *CapacityManager) RecordCapacityReleased(ctx context.Context, released Specs) {
+func (c *Manager) RecordCapacityReleased(ctx context.Context, released Shape) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweep(ctx)
 
 	for key, entry := range c.entries {
-		if entry.State != StateBackoff || !fits(entry.Specs, released) {
+		if entry.State != StateBackoff || !fits(entry.Shape, released) {
 			continue
 		}
 		entry.State = StateHalfOpen
@@ -345,77 +286,40 @@ func (c *CapacityManager) RecordCapacityReleased(ctx context.Context, released S
 			"from", StateBackoff,
 			"to", StateHalfOpen,
 			"reason", metrics.ReopenCapacityReleased,
-			"released", SpecsToInstanceTypeName(released.Ncpus, released.MemInGiB),
+			"released", shapeKey(Shape{Ncpus: released.Ncpus, MemInGiB: released.MemInGiB}),
 			"consecutive-ices", entry.ConsecutiveICEs,
 			"backoff-remaining", entry.RetryAfter.Sub(c.now()),
 		)
 	}
 }
 
-// TryAcquire reserves the right to launch this shape, and reports whether the caller got it.
-func (c *CapacityManager) TryAcquire(specs Specs) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sweep(context.Background())
-
-	probing := false
-	for _, entry := range c.entries {
-		if !covers(entry.Reach, specs) {
-			continue
-		}
-		probing = true
-
-		if entry.State == StateBackoff || entry.probeInFlight {
-			metrics.Probes.WithLabelValues(metrics.ProbeRejected).Inc()
-			return false
-		}
-	}
-	for _, entry := range c.entries {
-		if covers(entry.Reach, specs) {
-			entry.probeInFlight = true
-		}
-	}
-	if probing {
-		metrics.Probes.WithLabelValues(metrics.ProbeAcquired).Inc()
-	}
-	return true
-}
-
-// ReleaseProbe hands back a probe acquired by TryAcquire without reporting an outcome.
-func (c *CapacityManager) ReleaseProbe(specs Specs) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, entry := range c.entries {
-		if covers(entry.Reach, specs) {
-			entry.probeInFlight = false
-		}
-	}
-}
-
-// IsUnavailable reports whether a shape is currently ruled out, and why.
-func (c *CapacityManager) IsUnavailable(specs Specs) (bool, Reason) {
-	return c.Availability().Unavailable(specs)
-}
-
-// Availability is everything needed to judge shapes, taken as one consistent reading.
-type Availability struct {
-	entries []Entry
-
+// Snapshot is everything needed to judge shapes, taken as one consistent reading.
+type Snapshot struct {
+	entries   []Entry
 	rack      capacity.Snapshot
-	rackKnown bool
+	inventory InventoryState
 }
 
-// Unavailable reports whether a shape is currently ruled out, and why.
-func (a Availability) Unavailable(specs Specs) (bool, Reason) {
-	if a.rackKnown && !a.rack.CanFit(resourcesFor(specs)) {
+// Entries returns the refusals the breaker currently holds.
+func (s Snapshot) Entries() []Entry {
+	return s.entries
+}
+
+// Rack returns the rack reading the snapshot judged against, and what that reading is worth.
+func (s Snapshot) Rack() (capacity.Snapshot, InventoryState) {
+	return s.rack, s.inventory
+}
+
+// Unavailable reports whether a shape is ruled out in this reading, and why.
+func (s Snapshot) Unavailable(specs Shape) (bool, Reason) {
+	if s.inventory == InventoryFresh && !s.rack.CanFit(resourcesFor(specs)) {
 		return true, ReasonCapacity
 	}
-	return covered(a.entries, specs)
+	return covered(s.entries, specs)
 }
 
-// Availability takes one reading of the breaker and the rack together.
-func (c *CapacityManager) Availability() Availability {
+// Snapshot takes one reading of the breaker and the rack together.
+func (c *Manager) Snapshot() Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweep(context.Background())
@@ -424,12 +328,20 @@ func (c *CapacityManager) Availability() Availability {
 	for _, entry := range c.entries {
 		entries = append(entries, *entry)
 	}
-	return Availability{entries: entries, rack: c.rack, rackKnown: c.rackFresh}
+	return Snapshot{entries: entries, rack: c.rack, inventory: c.inventoryState()}
 }
 
-// Snapshot returns the entries the breaker currently holds.
-func (c *CapacityManager) Snapshot() []Entry {
-	return c.Availability().entries
+func (c *Manager) inventoryState() InventoryState {
+	switch {
+	case c.inventory == nil:
+		return InventoryDisabled
+	case !c.rack.Known():
+		return InventoryUnknown
+	case !c.rackFresh:
+		return InventoryStale
+	default:
+		return InventoryFresh
+	}
 }
 
 // InventoryState is what the sled inventory is contributing to the manager's decisions.
@@ -437,49 +349,27 @@ type InventoryState string
 
 const (
 	// InventoryDisabled is inventory not being switched on at all.
-	InventoryDisabled InventoryState = v1alpha1.InventoryDisabled
+	InventoryDisabled InventoryState = "Disabled"
 	// InventoryUnknown is enabled inventory without a successful reading.
-	InventoryUnknown InventoryState = v1alpha1.InventoryUnknown
+	InventoryUnknown InventoryState = "Unknown"
 	// InventoryStale is a reading too old to be believed, which is ignored.
-	InventoryStale InventoryState = v1alpha1.InventoryStale
+	InventoryStale InventoryState = "Stale"
 	// InventoryFresh is a current reading.
-	InventoryFresh InventoryState = v1alpha1.InventoryFresh
+	InventoryFresh InventoryState = "Fresh"
 )
 
-// Rack returns the rack reading the manager is deciding against, and what that reading is worth.
-func (c *CapacityManager) Rack() (capacity.Snapshot, InventoryState) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sweep(context.Background())
-
-	switch {
-	case c.inventory == nil:
-		return capacity.Snapshot{}, InventoryDisabled
-	case !c.rack.Known():
-		return c.rack, InventoryUnknown
-	case !c.rackFresh:
-		return c.rack, InventoryStale
-	default:
-		return c.rack, InventoryFresh
-	}
-}
-
 // Generation identifies the current set of unavailable shapes.
-func (c *CapacityManager) Generation() uint64 {
+func (c *Manager) Generation() uint64 {
 	c.mu.Lock()
 	c.sweep(context.Background())
 	c.mu.Unlock()
 	return c.generation.Load()
 }
 
-func (c *CapacityManager) sweep(ctx context.Context) {
+func (c *Manager) sweep(ctx context.Context) {
 	c.reconcileInventory(ctx)
 
 	now := c.now()
-
-	if c.storage != nil && now.Sub(c.storage.LastRefusal) > historyTTL {
-		c.storage = nil
-	}
 
 	for key, entry := range c.entries {
 		if entry.State == StateBackoff && !now.Before(entry.RetryAfter) {
@@ -497,7 +387,7 @@ func (c *CapacityManager) sweep(ctx context.Context) {
 	}
 }
 
-func (c *CapacityManager) reconcileInventory(ctx context.Context) {
+func (c *Manager) reconcileInventory(ctx context.Context) {
 	if c.inventory == nil {
 		return
 	}
@@ -526,7 +416,7 @@ func (c *CapacityManager) reconcileInventory(ctx context.Context) {
 		if entry.State != StateBackoff {
 			continue
 		}
-		request := resourcesFor(entry.Specs)
+		request := resourcesFor(entry.Shape)
 		previousCount := previous.FeasibleCount(request)
 		currentCount := current.FeasibleCount(request)
 
@@ -551,14 +441,14 @@ func (c *CapacityManager) reconcileInventory(ctx context.Context) {
 	}
 }
 
-func resourcesFor(specs Specs) capacity.Resources {
+func resourcesFor(specs Shape) capacity.Resources {
 	return capacity.Resources{
 		CPUs:   specs.Ncpus,
 		Memory: uint64(specs.MemInGiB) * GiB,
 	}
 }
 
-func (c *CapacityManager) backoffFor(consecutiveICEs int) time.Duration {
+func (c *Manager) backoffFor(consecutiveICEs int) time.Duration {
 	backoff := maxBackoff
 
 	if consecutiveICEs >= 1 && consecutiveICEs <= 10 {
@@ -578,7 +468,7 @@ func stateOrAvailable(state State) string {
 	return string(state)
 }
 
-func covered(entries []Entry, specs Specs) (bool, Reason) {
+func covered(entries []Entry, specs Shape) (bool, Reason) {
 	found := false
 	reason := Reason("")
 	for _, e := range entries {
@@ -594,34 +484,34 @@ func covered(entries []Entry, specs Specs) (bool, Reason) {
 	return found, reason
 }
 
-func covers(marked, specs Specs) bool {
+func covers(marked, specs Shape) bool {
 	return specs.Ncpus >= marked.Ncpus && specs.MemInGiB >= marked.MemInGiB
 }
 
-func fits(specs, released Specs) bool {
+func fits(specs, released Shape) bool {
 	return specs.Ncpus <= released.Ncpus && specs.MemInGiB <= released.MemInGiB
 }
 
-func (c *CapacityManager) coveredByOther(specs Specs) (Specs, bool) {
+func (c *Manager) coveredByOther(specs Shape) (Shape, bool) {
 	for _, entry := range c.entries {
-		if entry.Specs == specs {
+		if entry.Shape == specs {
 			continue
 		}
-		if covers(entry.Specs, specs) {
-			return entry.Specs, true
+		if covers(entry.Shape, specs) {
+			return entry.Shape, true
 		}
 	}
-	return Specs{}, false
+	return Shape{}, false
 }
 
-func (e Entry) reachOrSpecs() Specs {
+func (e Entry) reachOrSpecs() Shape {
 	if !known(e.Reach) {
-		return e.Specs
+		return e.Shape
 	}
 	return e.Reach
 }
 
-func reachFor(specs, floor Specs, run int) Specs {
+func reachFor(specs, floor Shape, run int) Shape {
 	if known(floor) {
 		return between(floor, specs)
 	}
@@ -631,39 +521,43 @@ func reachFor(specs, floor Specs, run int) Specs {
 	return halved(specs)
 }
 
-func halved(specs Specs) Specs {
-	next := Specs{
+func halved(specs Shape) Shape {
+	next := Shape{
 		Ncpus:    max(specs.Ncpus/2, minSpeculativeCPUs),
 		MemInGiB: max(specs.MemInGiB/2, minSpeculativeCPUs),
 	}
-	return Specs{
+	return Shape{
 		Ncpus:    min(next.Ncpus, specs.Ncpus),
 		MemInGiB: min(next.MemInGiB, specs.MemInGiB),
 	}
 }
 
-func between(floor, refused Specs) Specs {
-	midpoint := Specs{
+func between(floor, refused Shape) Shape {
+	midpoint := Shape{
 		Ncpus:    (floor.Ncpus + refused.Ncpus) / 2,
 		MemInGiB: (floor.MemInGiB + refused.MemInGiB) / 2,
 	}
-	return Specs{
+	return Shape{
 		Ncpus:    min(max(midpoint.Ncpus+1, floor.Ncpus+1), refused.Ncpus),
 		MemInGiB: min(max(midpoint.MemInGiB+1, floor.MemInGiB+1), refused.MemInGiB),
 	}
 }
 
-func known(specs Specs) bool {
+func known(specs Shape) bool {
 	return specs.Ncpus > 0 && specs.MemInGiB > 0
 }
 
-func atLeast(a, b Specs) bool {
+func shapeSize(shape Shape) float64 {
+	return float64(shape.Ncpus) + 0.125*float64(shape.MemInGiB)
+}
+
+func atLeast(a, b Shape) bool {
 	return covers(b, a)
 }
 
-func floorName(floor Specs) string {
+func floorName(floor Shape) string {
 	if !known(floor) {
 		return "none"
 	}
-	return SpecsToInstanceTypeName(floor.Ncpus, floor.MemInGiB)
+	return shapeKey(Shape{Ncpus: floor.Ncpus, MemInGiB: floor.MemInGiB})
 }

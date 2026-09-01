@@ -24,9 +24,21 @@ func TestMarkerRoundTrip(t *testing.T) {
 	}
 }
 
+func markerDescription(clusterUID, nodeClaimUID types.UID, nodeClaimName string, kind Kind) string {
+	return Marker{
+		ClusterUID:    clusterUID,
+		NodeClaimUID:  nodeClaimUID,
+		NodeClaimName: nodeClaimName,
+		Kind:          kind,
+	}.Description("")
+}
+
 func TestVerify(t *testing.T) {
 	expected := Marker{
-		ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "claim-a", Kind: KindInstance,
+		ClusterUID:    "cluster-a",
+		NodeClaimUID:  "claim-a",
+		NodeClaimName: "claim-a",
+		Kind:          KindInstance,
 	}
 	tests := []struct {
 		name        string
@@ -35,11 +47,31 @@ func TestVerify(t *testing.T) {
 	}{
 		{name: "exact owner", description: expected.Description("node")},
 		{name: "unmarked", description: "node", wantReason: ReasonUnmarked},
-		{name: "malformed", description: prefix + " cluster=cluster-a", wantReason: ReasonMalformed},
-		{name: "foreign cluster", description: (Marker{ClusterUID: "cluster-b", NodeClaimUID: "claim-a", NodeClaimName: "claim-a", Kind: KindInstance}).Description(""), wantReason: ReasonForeignCluster},
-		{name: "different uid", description: (Marker{ClusterUID: "cluster-a", NodeClaimUID: "claim-b", NodeClaimName: "claim-a", Kind: KindInstance}).Description(""), wantReason: ReasonWrongNodeClaim},
-		{name: "different name", description: (Marker{ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "claim-b", Kind: KindInstance}).Description(""), wantReason: ReasonWrongNodeClaim},
-		{name: "wrong kind", description: (Marker{ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "claim-a", Kind: KindBootDisk}).Description(""), wantReason: ReasonWrongKind},
+		{
+			name:        "malformed",
+			description: prefix + " cluster=cluster-a",
+			wantReason:  ReasonMalformed,
+		},
+		{
+			name:        "foreign cluster",
+			description: markerDescription("cluster-b", "claim-a", "claim-a", KindInstance),
+			wantReason:  ReasonForeignCluster,
+		},
+		{
+			name:        "different uid",
+			description: markerDescription("cluster-a", "claim-b", "claim-a", KindInstance),
+			wantReason:  ReasonWrongNodeClaim,
+		},
+		{
+			name:        "different name",
+			description: markerDescription("cluster-a", "claim-a", "claim-b", KindInstance),
+			wantReason:  ReasonWrongNodeClaim,
+		},
+		{
+			name:        "wrong kind",
+			description: markerDescription("cluster-a", "claim-a", "claim-a", KindBootDisk),
+			wantReason:  ReasonWrongKind,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,7 +92,10 @@ func TestVerify(t *testing.T) {
 
 func TestVerifyClusterResource(t *testing.T) {
 	want := Marker{
-		ClusterUID: "cluster-a", NodeClaimUID: "claim-a", NodeClaimName: "claim-a", Kind: KindInstance,
+		ClusterUID:    "cluster-a",
+		NodeClaimUID:  "claim-a",
+		NodeClaimName: "claim-a",
+		Kind:          KindInstance,
 	}
 	got, err := VerifyClusterResource(want.Description("node"), "cluster-a", KindInstance)
 	if err != nil || got != want {

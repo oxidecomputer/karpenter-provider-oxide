@@ -4,13 +4,14 @@ import (
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/oxide.go/oxide"
 )
 
 func TestInstanceToNodeClaimAddsInstanceSchedulingLabels(t *testing.T) {
 	provider := &OxideCloudProvider{
-		instanceTypeProvider: instancetype.NewProvider(nil, nil),
+		instanceTypeProvider: instancetype.NewProvider(nil, availability.New(nil)),
 	}
 	nodeClaim, err := provider.InstanceToNodeClaim(&oxide.Instance{
 		Hostname: "karpenter-node",

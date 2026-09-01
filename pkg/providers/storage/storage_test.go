@@ -540,9 +540,13 @@ func TestBuildValidatesSourcedDiskSizes(t *testing.T) {
 					if kind == "image" {
 						status.Images = []v1alpha1.OxideImage{{ID: "image", SizeBytes: 2 << 30}}
 					} else {
-						status.Snapshots = []v1alpha1.OxideSnapshot{{ID: "snapshot", SizeBytes: 2 << 30}}
+						status.Snapshots = []v1alpha1.OxideSnapshot{
+							{ID: "snapshot", SizeBytes: 2 << 30},
+						}
 					}
-					nc.Status.Storage = &v1alpha1.StorageStatus{DiskSets: []v1alpha1.DiskSetStatus{status}}
+					nc.Status.Storage = &v1alpha1.StorageStatus{
+						DiskSets: []v1alpha1.DiskSetStatus{status},
+					}
 
 					_, err := Build("karpenter-default-x7k2p", testToken, nc)
 					want := requested == "2Gi" || (!readOnly && requested == "3Gi")
