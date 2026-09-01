@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,8 +31,13 @@ import (
 
 const period = 5 * time.Second
 
+// claimGrace covers the gap between claiming a disk and the instance create
+// that attaches it, during which the disk still looks detached and idle.
+const claimGrace = 5 * time.Minute
+
 type Controller struct {
 	kubeClient     client.Client
+	reader         client.Reader
 	pool           *bootdiskprovider.Provider
 	quotas         *utilization.Provider
 	lastOrphanScan time.Time
@@ -50,10 +56,11 @@ type poolState struct {
 
 func NewController(
 	kubeClient client.Client,
+	reader client.Reader,
 	pool *bootdiskprovider.Provider,
 	quotas *utilization.Provider,
 ) *Controller {
-	return &Controller{kubeClient: kubeClient, pool: pool, quotas: quotas}
+	return &Controller{kubeClient: kubeClient, reader: reader, pool: pool, quotas: quotas}
 }
 
 func (c *Controller) Name() string { return "boot-disk-pool" }
@@ -295,8 +302,16 @@ func (c *Controller) reconcileRecord(
 	}
 
 	if record.Spec.ClaimRef != nil {
-		if _, live := liveClaims[record.Spec.ClaimRef.UID]; live &&
-			record.DeletionTimestamp.IsZero() && !record.Spec.Retire {
+		if record.DeletionTimestamp.IsZero() && !record.Spec.Retire {
+			live, err := c.claimLive(ctx, record.Spec.ClaimRef, liveClaims)
+			if err != nil {
+				return err
+			}
+			if live {
+				return nil
+			}
+		}
+		if within(record.Spec.ClaimedAt, claimGrace) {
 			return nil
 		}
 		disk, err := c.pool.View(ctx, record)
@@ -338,6 +353,30 @@ func (c *Controller) reconcileRecord(
 		return c.patchStatus(ctx, record, "", v1alpha1.BootDiskStatePending, err.Error())
 	}
 	return c.patchStatus(ctx, record, disk.Id, v1alpha1.BootDiskStateReady, "")
+}
+
+// claimLive confirms a claim's absence against the API server: the cached
+// NodeClaim list can lag a launch that is already attaching this disk.
+func (c *Controller) claimLive(
+	ctx context.Context,
+	ref *v1alpha1.BootDiskOwnerRef,
+	cached map[types.UID]struct{},
+) (bool, error) {
+	if _, live := cached[ref.UID]; live {
+		return true, nil
+	}
+	claim := &karpv1.NodeClaim{}
+	if err := c.reader.Get(ctx, client.ObjectKey{Name: ref.Name}, claim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return claim.UID == ref.UID && claim.DeletionTimestamp.IsZero(), nil
+}
+
+func within(stamp *metav1.Time, window time.Duration) bool {
+	return stamp != nil && time.Since(stamp.Time) < window
 }
 
 func (c *Controller) patchStatus(

@@ -34,6 +34,7 @@ type Acquired struct {
 	RecordName string
 	DiskName   string
 	DiskID     string
+	ClaimUID   types.UID
 }
 
 type Provider struct {
@@ -144,6 +145,7 @@ func (p *Provider) Acquire(
 		}
 		stored := record.DeepCopy()
 		record.Spec.ClaimRef = &v1alpha1.BootDiskOwnerRef{Name: nodeClaimName, UID: nodeClaimUID}
+		record.Spec.ClaimedAt = &metav1.Time{Time: time.Now()}
 		if err := p.kubeClient.Patch(ctx, record, client.MergeFromWithOptions(
 			stored,
 			client.MergeFromWithOptimisticLock{},
@@ -169,7 +171,47 @@ func acquired(record *v1alpha1.OxideBootDisk) *Acquired {
 		RecordName: record.Name,
 		DiskName:   record.Spec.DiskName,
 		DiskID:     record.Status.ID,
+		ClaimUID:   record.Spec.ClaimRef.UID,
 	}
+}
+
+// Unclaim returns a disk to the pool after a launch aborted without attaching
+// it. A disk that is no longer detached may still be wired to a half-created
+// instance, so it is retired instead of reused.
+func (p *Provider) Unclaim(ctx context.Context, name string, claim types.UID) error {
+	settled := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		record := &v1alpha1.OxideBootDisk{}
+		if err := p.reader.Get(ctx, client.ObjectKey{Name: name}, record); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		// A record that no longer carries our claim has already been handled by
+		// the pool controller or handed to another launch.
+		if record.Spec.ClaimRef == nil || record.Spec.ClaimRef.UID != claim ||
+			record.Spec.Retire || !record.DeletionTimestamp.IsZero() {
+			settled = true
+			return nil
+		}
+		disk, err := p.View(ctx, record)
+		if err != nil || disk.State.State() != oxide.DiskStateStateDetached {
+			return nil
+		}
+		stored := record.DeepCopy()
+		record.Spec.ClaimRef = nil
+		record.Spec.ClaimedAt = nil
+		if err := p.kubeClient.Patch(ctx, record, client.MergeFromWithOptions(
+			stored,
+			client.MergeFromWithOptimisticLock{},
+		)); err != nil {
+			return err
+		}
+		settled = true
+		return nil
+	})
+	if err == nil && settled {
+		return nil
+	}
+	return errors.Join(err, p.Retire(ctx, name))
 }
 
 func (p *Provider) Retire(ctx context.Context, name string) error {

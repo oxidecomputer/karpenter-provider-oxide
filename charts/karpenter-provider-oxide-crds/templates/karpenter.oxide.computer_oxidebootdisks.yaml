@@ -70,6 +70,12 @@ spec:
                 - name
                 - uid
                 type: object
+              claimedAt:
+                description: |-
+                  ClaimedAt gives the pool controller a window in which a claimed disk is
+                  not yet attached but a launch is still in flight.
+                format: date-time
+                type: string
               configHash:
                 type: string
               diskName:
@@ -103,8 +109,9 @@ spec:
             - sizeBytes
             type: object
             x-kubernetes-validations:
-            - message: claimRef cannot change
-              rule: '!has(oldSelf.claimRef) || self.claimRef == oldSelf.claimRef'
+            - message: claimRef can only be set or cleared, never reassigned
+              rule: '!has(oldSelf.claimRef) || !has(self.claimRef) || self.claimRef
+                == oldSelf.claimRef'
             - message: retire cannot be cleared
               rule: '!has(oldSelf.retire) || !oldSelf.retire || (has(self.retire)
                 && self.retire)'

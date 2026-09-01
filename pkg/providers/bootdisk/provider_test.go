@@ -122,3 +122,125 @@ func TestAcquireIsSingleUse(t *testing.T) {
 func clientKey(name string) client.ObjectKey {
 	return client.ObjectKey{Name: name}
 }
+
+func TestUnclaimReturnsADetachedDiskToThePool(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   oxide.DiskState
+		reusing bool
+	}{
+		{"detached", oxide.DiskState{Value: &oxide.DiskStateDetached{}}, true},
+		{"attached", oxide.DiskState{Value: &oxide.DiskStateAttached{}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := &v1alpha1.OxideBootDisk{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "pool-record",
+					UID:             types.UID("record-uid"),
+					ResourceVersion: "1",
+				},
+				Spec: v1alpha1.OxideBootDiskSpec{
+					DiskName: "pool-disk",
+					ClaimRef: &v1alpha1.BootDiskOwnerRef{
+						Name: "claim",
+						UID:  types.UID("claim-uid"),
+					},
+					ClaimedAt: &metav1.Time{Time: time.Now()},
+				},
+				Status: v1alpha1.OxideBootDiskStatus{
+					ID:    "disk-id",
+					State: v1alpha1.BootDiskStateReady,
+				},
+			}
+			scheme := runtime.NewScheme()
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			kubeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&v1alpha1.OxideBootDisk{}).
+				WithObjects(record).
+				Build()
+
+			disk := oxide.Disk{Id: "disk-id", Name: "pool-disk", State: tc.state}
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(disk)
+				},
+			))
+			t.Cleanup(server.Close)
+			ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider := NewProvider(
+				kubeClient,
+				kubeClient,
+				diskprovider.NewProvider(ox, "project"),
+				types.UID("cluster-uid"),
+			)
+
+			err = provider.Unclaim(context.Background(), record.Name, types.UID("claim-uid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := &v1alpha1.OxideBootDisk{}
+			if err := kubeClient.Get(
+				context.Background(),
+				clientKey(record.Name),
+				stored,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if tc.reusing {
+				if stored.Spec.ClaimRef != nil || stored.Spec.ClaimedAt != nil {
+					t.Fatal("a detached disk was not returned to the pool")
+				}
+				if stored.Spec.Retire {
+					t.Fatal("a reusable disk was retired")
+				}
+				return
+			}
+			if !stored.Spec.Retire {
+				t.Fatal("a disk that is no longer detached was not retired")
+			}
+		})
+	}
+}
+
+func TestUnclaimLeavesAForeignClaimAlone(t *testing.T) {
+	record := &v1alpha1.OxideBootDisk{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-record", ResourceVersion: "1"},
+		Spec: v1alpha1.OxideBootDiskSpec{
+			DiskName: "pool-disk",
+			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "other", UID: types.UID("other-uid")},
+		},
+	}
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(record).Build()
+	provider := NewProvider(
+		kubeClient,
+		kubeClient,
+		diskprovider.NewProvider(nil, "project"),
+		types.UID("cluster-uid"),
+	)
+
+	if err := provider.Unclaim(
+		context.Background(),
+		record.Name,
+		types.UID("claim-uid"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored := &v1alpha1.OxideBootDisk{}
+	if err := kubeClient.Get(context.Background(), clientKey(record.Name), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Spec.Retire || stored.Spec.ClaimRef == nil {
+		t.Fatal("unclaim disturbed a record claimed by another launch")
+	}
+}

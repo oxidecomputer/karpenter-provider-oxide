@@ -29,7 +29,7 @@ type OxideBootDisk struct {
 	Status OxideBootDiskStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.claimRef) || self.claimRef == oldSelf.claimRef",message="claimRef cannot change"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.claimRef) || !has(self.claimRef) || self.claimRef == oldSelf.claimRef",message="claimRef can only be set or cleared, never reassigned"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.retire) || !oldSelf.retire || (has(self.retire) && self.retire)",message="retire cannot be cleared"
 type OxideBootDiskSpec struct {
 	NodeClassRef BootDiskOwnerRef `json:"nodeClassRef"`
@@ -39,6 +39,10 @@ type OxideBootDiskSpec struct {
 	ConfigHash   string           `json:"configHash"`
 	// +optional
 	ClaimRef *BootDiskOwnerRef `json:"claimRef,omitempty"`
+	// ClaimedAt gives the pool controller a window in which a claimed disk is
+	// not yet attached but a launch is still in flight.
+	// +optional
+	ClaimedAt *metav1.Time `json:"claimedAt,omitempty"`
 	// +optional
 	Retire bool `json:"retire,omitempty"`
 }

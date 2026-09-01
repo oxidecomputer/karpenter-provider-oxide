@@ -86,7 +86,10 @@ func (d Deadlines) Validate() error {
 	if total := d.Launch + d.Cleanup; total >= lifecycle.LaunchTimeout {
 		return fmt.Errorf(
 			"the launch (%s) and cleanup (%s) deadlines total %s, which must be shorter than upstream's launch timeout (%s)",
-			d.Launch, d.Cleanup, total, lifecycle.LaunchTimeout,
+			d.Launch,
+			d.Cleanup,
+			total,
+			lifecycle.LaunchTimeout,
 		)
 	}
 	return nil

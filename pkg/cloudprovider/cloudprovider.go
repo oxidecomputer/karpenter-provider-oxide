@@ -44,7 +44,7 @@ const (
 	GiB                = 1 << 30
 	InstanceNamePrefix = "karpenter-"
 
-	bootDiskRetirementTimeout = 30 * time.Second
+	bootDiskReleaseTimeout = 30 * time.Second
 )
 
 type OxideCloudProvider struct {
@@ -244,7 +244,7 @@ func (c *OxideCloudProvider) Create(
 
 	boot := c.bootDisk(ctx, nodeClass, nodeClaim, plan)
 	launchStarted := false
-	defer c.retireUnstartedBootDisk(ctx, boot.acquired, &launchStarted)
+	defer c.releaseUnstartedBootDisk(ctx, boot.acquired, &launchStarted)
 
 	request := utilization.Request{
 		CPUs:    int64(instanceType.Ncpus),
@@ -399,7 +399,10 @@ func (c *OxideCloudProvider) bootDisk(
 	return launch
 }
 
-func (c *OxideCloudProvider) retireUnstartedBootDisk(
+// releaseUnstartedBootDisk hands a pooled disk back when the launch it was
+// acquired for never started. Aborting on quota or capacity is routine, so
+// retiring here would burn a warm disk on every refusal.
+func (c *OxideCloudProvider) releaseUnstartedBootDisk(
 	ctx context.Context,
 	acquired *bootdisk.Acquired,
 	started *bool,
@@ -409,12 +412,13 @@ func (c *OxideCloudProvider) retireUnstartedBootDisk(
 	}
 	cleanupCtx, cancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
-		bootDiskRetirementTimeout,
+		bootDiskReleaseTimeout,
 	)
 	defer cancel()
-	if err := c.bootDiskPool.Retire(cleanupCtx, acquired.RecordName); err != nil {
+	err := c.bootDiskPool.Unclaim(cleanupCtx, acquired.RecordName, acquired.ClaimUID)
+	if err != nil {
 		log.FromContext(ctx).V(1).Info(
-			"unable to retire a claimed boot disk",
+			"unable to release a claimed boot disk",
 			"disk", acquired.DiskName,
 			"reason", err.Error(),
 		)

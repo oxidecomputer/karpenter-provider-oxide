@@ -256,8 +256,15 @@ func (c *Controller) finalize(
 	}
 
 	nodeClaims := &karpcorev1.NodeClaimList{}
-	if err := c.kubeClient.List(ctx, nodeClaims, nodeclaimutils.ForNodeClass(nodeClass)); err != nil {
-		return reconcile.Result{}, fmt.Errorf("unable to list NodeClaims for the nodeclass: %w", err)
+	if err := c.kubeClient.List(
+		ctx,
+		nodeClaims,
+		nodeclaimutils.ForNodeClass(nodeClass),
+	); err != nil {
+		return reconcile.Result{}, fmt.Errorf(
+			"unable to list NodeClaims for the nodeclass: %w",
+			err,
+		)
 	}
 	// Dropping the finalizer while NodeClaims still reference the nodeclass strands them: drift
 	// can no longer resolve the nodeclass, so those nodes are never replaced.
@@ -269,10 +276,15 @@ func (c *Controller) finalize(
 			InvolvedObject: nodeClass,
 			Type:           corev1.EventTypeNormal,
 			Reason:         "WaitingOnNodeClaimTermination",
-			Message:        fmt.Sprintf("Waiting on NodeClaim termination for %s", pretty.Slice(names, 5)),
-			DedupeValues:   []string{string(nodeClass.UID)},
+			Message: fmt.Sprintf(
+				"Waiting on NodeClaim termination for %s",
+				pretty.Slice(names, 5),
+			),
+			DedupeValues: []string{string(nodeClass.UID)},
 		})
-		log.FromContext(ctx).V(1).Info("waiting for the nodeclass's NodeClaims to terminate before deleting it")
+		log.FromContext(ctx).
+			V(1).
+			Info("waiting for the nodeclass's NodeClaims to terminate before deleting it")
 		return reconcile.Result{RequeueAfter: groupCollectionRequeue}, nil
 	}
 
@@ -306,7 +318,9 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 				if nodeClaim.Spec.NodeClassRef == nil {
 					return nil
 				}
-				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeClaim.Spec.NodeClassRef.Name}}}
+				return []reconcile.Request{
+					{NamespacedName: types.NamespacedName{Name: nodeClaim.Spec.NodeClassRef.Name}},
+				}
 			}),
 			// Only deletions matter: they're what lets a terminating nodeclass finish finalizing.
 			builder.WithPredicates(predicate.Funcs{

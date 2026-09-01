@@ -2,6 +2,8 @@ package cloudprovider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -12,7 +14,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -205,17 +206,30 @@ func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
 	}
 }
 
-func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
-	record := &v1alpha1.OxideBootDisk{ObjectMeta: v1.ObjectMeta{Name: "pool-record"}}
-	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+func TestReleaseUnstartedBootDiskRetiresWhenTheDiskIsUnreadable(t *testing.T) {
+	record := &v1alpha1.OxideBootDisk{
+		ObjectMeta: v1.ObjectMeta{Name: "pool-record"},
+		Spec: v1alpha1.OxideBootDiskSpec{
+			DiskName: "pool-disk",
+			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "claim", UID: types.UID("claim-uid")},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(record).
+		Build()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {},
+	))
+	server.Close()
+	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(record).Build()
 	pool := bootdisk.NewProvider(
 		kubeClient,
 		kubeClient,
-		diskprovider.NewProvider(nil, "project"),
+		diskprovider.NewProvider(ox, "project"),
 		"cluster",
 	)
 	provider := &OxideCloudProvider{bootDiskPool: pool}
@@ -223,9 +237,10 @@ func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
 	cancel()
 
 	started := false
-	provider.retireUnstartedBootDisk(ctx, &bootdisk.Acquired{
+	provider.releaseUnstartedBootDisk(ctx, &bootdisk.Acquired{
 		RecordName: record.Name,
-		DiskName:   "pool-disk",
+		DiskName:   record.Spec.DiskName,
+		ClaimUID:   record.Spec.ClaimRef.UID,
 	}, &started)
 
 	got := &v1alpha1.OxideBootDisk{}
@@ -237,7 +252,7 @@ func TestRetireUnstartedBootDiskAfterLaunchCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.Spec.Retire {
-		t.Fatal("canceled launch did not retire its acquired boot disk")
+		t.Fatal("a boot disk of unknown state was not retired after an aborted launch")
 	}
 }
 
