@@ -59,6 +59,8 @@ type fakeAPI struct {
 	images []oxide.Image
 	lists  int
 	views  int
+	// listStatus, when set, is the status every list responds with instead of the images.
+	listStatus int
 }
 
 func (f *fakeAPI) server(t *testing.T) *oxide.Client {
@@ -69,6 +71,12 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 		switch {
 		case r.Method == http.MethodGet && path == "images":
 			f.lists++
+			if f.listStatus != 0 {
+				writeJSON(t, w, f.listStatus, map[string]string{
+					"error_code": "InternalError", "message": "the rack is on fire",
+				})
+				return
+			}
 			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.images})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "images/"):
@@ -166,6 +174,74 @@ func TestResolveReportsTheSelectorsWhenNothingMatched(t *testing.T) {
 	}
 	if len(got.Unmatched) != 1 || got.Unmatched[0] != selector {
 		t.Errorf("Resolve() unmatched = %v, want the one selector that missed", got.Unmatched)
+	}
+	if got.Complete() {
+		t.Error("Resolve() completed, want an incomplete resolution")
+	}
+	if got.Reason != v1alpha1.ConditionReasonImagesNotFound {
+		t.Errorf(
+			"Resolve() reason = %q, want %q",
+			got.Reason,
+			v1alpha1.ConditionReasonImagesNotFound,
+		)
+	}
+	if got.Message != DescribeSelectors([]v1alpha1.ImageSelector{selector}) {
+		t.Errorf("Resolve() message = %q, want the selector description", got.Message)
+	}
+}
+
+func TestAnExactSelectorStillFiltersOnItsOtherTerms(t *testing.T) {
+	api := &fakeAPI{images: []oxide.Image{
+		image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0),
+	}}
+	provider := NewProvider(api.server(t), time.Minute)
+
+	got, err := provider.Resolve(
+		context.Background(),
+		nodeClass(v1alpha1.ImageSelector{Name: "rke2-ubuntu-1", OS: "windows"}),
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(got.Resolved) != 0 {
+		t.Errorf("Resolve() matched %d images, want none: os does not match", len(got.Resolved))
+	}
+}
+
+func TestTwoSelectorsNamingOneImageResolveItOnce(t *testing.T) {
+	api := &fakeAPI{images: []oxide.Image{
+		image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0),
+	}}
+	provider := NewProvider(api.server(t), time.Minute)
+
+	got, err := provider.Resolve(context.Background(), nodeClass(
+		v1alpha1.ImageSelector{Name: "rke2-ubuntu-1"},
+		v1alpha1.ImageSelector{ID: "33333333-0000-4000-8000-000000000001"},
+	))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(got.Resolved) != 1 {
+		t.Errorf("Resolve() matched %d images, want 1 after dedupe", len(got.Resolved))
+	}
+}
+
+func TestResolveReportsAFailedList(t *testing.T) {
+	api := &fakeAPI{listStatus: http.StatusInternalServerError}
+	provider := NewProvider(api.server(t), time.Minute)
+
+	_, err := provider.Resolve(
+		context.Background(),
+		nodeClass(v1alpha1.ImageSelector{Name: "rke2-*", Project: "prod"}),
+	)
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want the list failure")
+	}
+	if !strings.Contains(err.Error(), "prod") {
+		t.Errorf("Resolve() error = %v, want the project named", err)
+	}
+	if !strings.Contains(err.Error(), "the rack is on fire") {
+		t.Errorf("Resolve() error = %v, want the cause preserved", err)
 	}
 }
 

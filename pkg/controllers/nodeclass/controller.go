@@ -145,15 +145,7 @@ func (c *Controller) Reconcile(
 	logStale(ctx, "image", images.Stale, images.Age)
 
 	nodeClass.Status.Images = images.Resolved[:min(len(images.Resolved), maxStatusImages)]
-	if len(images.Resolved) == 0 {
-		nodeClass.StatusConditions().SetFalse(
-			v1alpha1.ConditionTypeImagesResolved,
-			"ImagesNotFound",
-			image.DescribeSelectors(images.Unmatched),
-		)
-	} else {
-		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeImagesResolved)
-	}
+	setCondition(nodeClass, v1alpha1.ConditionTypeImagesResolved, images.Reason, images.Message)
 
 	if err := c.resolveStorage(ctx, nodeClass); err != nil {
 		return reconcile.Result{}, err
@@ -165,7 +157,12 @@ func (c *Controller) Reconcile(
 	}
 	logStale(ctx, "subnet", subnets.Stale, subnets.Age)
 	nodeClass.Status.Subnets = subnets.Resolved
-	setSubnetCondition(nodeClass, subnets)
+	setCondition(
+		nodeClass,
+		v1alpha1.ConditionTypeSubnetsResolved,
+		subnets.Reason,
+		subnets.Message,
+	)
 
 	sshKeys, err := c.sshKeys.Resolve(ctx, nodeClass)
 	if err != nil {
@@ -179,16 +176,15 @@ func (c *Controller) Reconcile(
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve IP Pools: %w", err)
 	}
 	logStale(ctx, "ippool", ephemeralIPs.Stale, ephemeralIPs.Age)
-	switch {
-	case len(nodeClass.Spec.EphemeralIPs) == 0:
-
+	if len(nodeClass.Spec.EphemeralIPs) == 0 {
 		nodeClass.Status.EphemeralIPs = nil
-	case ephemeralIPs.Complete():
-		nodeClass.Status.EphemeralIPs = ephemeralIPs.Resolved
-		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeEphemeralIPsResolved)
-	default:
-
-		nodeClass.StatusConditions().SetFalse(
+	} else {
+		// A resolution that fell short leaves the last good addresses in status.
+		if ephemeralIPs.Complete() {
+			nodeClass.Status.EphemeralIPs = ephemeralIPs.Resolved
+		}
+		setCondition(
+			nodeClass,
 			v1alpha1.ConditionTypeEphemeralIPsResolved,
 			ephemeralIPs.Reason,
 			ephemeralIPs.Message,
@@ -200,16 +196,14 @@ func (c *Controller) Reconcile(
 		return reconcile.Result{}, fmt.Errorf("unable to retrieve affinity groups: %w", err)
 	}
 	logStale(ctx, "affinitygroup", affinity.Stale, affinity.Age)
-	switch {
-	case nodeClass.Spec.Affinity == nil:
-
+	if nodeClass.Spec.Affinity == nil {
 		nodeClass.Status.AffinityGroups = nil
-	case affinity.Complete():
-		nodeClass.Status.AffinityGroups = affinity.Resolved
-		nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeAffinityGroupsResolved)
-	default:
-
-		nodeClass.StatusConditions().SetFalse(
+	} else {
+		if affinity.Complete() {
+			nodeClass.Status.AffinityGroups = affinity.Resolved
+		}
+		setCondition(
+			nodeClass,
 			v1alpha1.ConditionTypeAffinityGroupsResolved,
 			affinity.Reason,
 			affinity.Message,
@@ -243,16 +237,14 @@ func (c *Controller) Reconcile(
 	return reconcile.Result{RequeueAfter: requeue}, nil
 }
 
-func setSubnetCondition(nodeClass *v1alpha1.OxideNodeClass, result subnet.Result) {
-	if len(result.Resolved) == 0 {
-		nodeClass.StatusConditions().SetFalse(
-			v1alpha1.ConditionTypeSubnetsResolved,
-			"SubnetsNotFound",
-			"no subnets matched "+subnet.DescribeSelectors(nodeClass.Spec.SubnetSelector),
-		)
+// setCondition records one provider resolution: true when its reason is empty, otherwise that
+// reason and message.
+func setCondition(nodeClass *v1alpha1.OxideNodeClass, conditionType, reason, message string) {
+	if reason != "" {
+		nodeClass.StatusConditions().SetFalse(conditionType, reason, message)
 		return
 	}
-	nodeClass.StatusConditions().SetTrue(v1alpha1.ConditionTypeSubnetsResolved)
+	nodeClass.StatusConditions().SetTrue(conditionType)
 }
 
 func (c *Controller) finalize(

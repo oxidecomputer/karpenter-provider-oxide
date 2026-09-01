@@ -230,12 +230,15 @@ func Fingerprint(v any) string {
 }
 
 // Resolution is the envelope every provider returns, so that all six read the same at the call site.
+//
+// A provider that fell short sets Reason and Message together, and Unmatched when it can name the
+// selectors that missed. Callers ask Complete() and never re-derive the message from the spec.
 type Resolution[T any, S any] struct {
 	// Resolved is what to publish to status.
 	Resolved []T
 	// Unmatched contains unmatched selectors.
 	Unmatched []S
-	// Reason and Message are the condition to record when the resolution did not complete at all.
+	// Reason and Message are the condition to record when the resolution did not complete.
 	Reason  string
 	Message string
 	// Age is how old the reading is, and zero when it was just taken.

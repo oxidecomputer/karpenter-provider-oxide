@@ -112,8 +112,11 @@ func TestResolveReturnsTheSubnetsWithTheirVPCName(t *testing.T) {
 
 func TestDescribeSelectors(t *testing.T) {
 	got := DescribeSelectors([]v1alpha1.SubnetSelector{{Name: "web", VPCName: "prod"}})
-	if got != "{name=web, vpcName=prod}" {
+	if got != "no subnets matched {name=web, vpcName=prod}" {
 		t.Errorf("DescribeSelectors() = %q", got)
+	}
+	if got := DescribeSelectors(nil); got != "no subnet selectors are configured" {
+		t.Errorf("DescribeSelectors(nil) = %q", got)
 	}
 }
 

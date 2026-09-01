@@ -18,8 +18,11 @@ import (
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
 
-// DescribeSelectors renders subnet selectors as a concise condition message.
+// DescribeSelectors renders subnet selectors back as the terms they were written with.
 func DescribeSelectors(selectors []v1alpha1.SubnetSelector) string {
+	if len(selectors) == 0 {
+		return "no subnet selectors are configured"
+	}
 	described := make([]string, 0, len(selectors))
 	for _, selector := range selectors {
 		parts := make([]string, 0, 4)
@@ -37,7 +40,7 @@ func DescribeSelectors(selectors []v1alpha1.SubnetSelector) string {
 		}
 		described = append(described, "{"+strings.Join(parts, ", ")+"}")
 	}
-	return strings.Join(described, ", ")
+	return "no subnets matched " + strings.Join(described, " or ")
 }
 
 // Result is one resolution of a nodeclass's subnet selectors.
@@ -79,12 +82,17 @@ func (p *Provider) Resolve(
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{
-
+	result := Result{
 		Resolved: slices.Clone(entry.Value),
 		Age:      entry.Age(time.Now()),
 		Stale:    entry.Stale,
-	}, nil
+	}
+	if len(result.Resolved) == 0 {
+		result.Unmatched = selectors
+		result.Reason = v1alpha1.ConditionReasonSubnetsNotFound
+		result.Message = DescribeSelectors(selectors)
+	}
+	return result, nil
 }
 
 func (p *Provider) resolve(

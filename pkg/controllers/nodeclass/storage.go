@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 )
 
 func (c *Controller) resolveStorage(
@@ -98,10 +96,11 @@ func (c *Controller) resolveStorage(
 				return fmt.Errorf("unable to retrieve images for diskSet %q: %w", set.Name, err)
 			}
 			logStale(ctx, "diskset-image", images.Stale, images.Age)
-			if len(images.Resolved) == 0 {
-				unresolved = append(unresolved, fmt.Sprintf(
-					"diskSet %q: %s", set.Name, image.DescribeSelectors(images.Unmatched),
-				))
+			if !images.Complete() {
+				unresolved = append(
+					unresolved,
+					fmt.Sprintf("diskSet %q: %s", set.Name, images.Message),
+				)
 				continue
 			}
 			status.Images = images.Resolved[:min(len(images.Resolved), maxStatusImages)]
@@ -116,10 +115,11 @@ func (c *Controller) resolveStorage(
 				return fmt.Errorf("unable to retrieve snapshots for diskSet %q: %w", set.Name, err)
 			}
 			logStale(ctx, "diskset-snapshot", snapshots.Stale, snapshots.Age)
-			if len(snapshots.Resolved) == 0 {
-				unresolved = append(unresolved, fmt.Sprintf(
-					"diskSet %q: %s", set.Name, snapshot.DescribeSelectors(snapshots.Unmatched),
-				))
+			if !snapshots.Complete() {
+				unresolved = append(
+					unresolved,
+					fmt.Sprintf("diskSet %q: %s", set.Name, snapshots.Message),
+				)
 				continue
 			}
 			status.Snapshots = snapshots.Resolved[:min(len(snapshots.Resolved), maxStatusImages)]

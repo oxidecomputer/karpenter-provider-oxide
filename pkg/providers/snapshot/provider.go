@@ -62,6 +62,8 @@ func (p *Provider) Resolve(
 
 	if len(result.Resolved) == 0 {
 		result.Unmatched = selectors
+		result.Reason = v1alpha1.ConditionReasonSnapshotsNotFound
+		result.Message = DescribeSelectors(selectors)
 	}
 	return result, nil
 }

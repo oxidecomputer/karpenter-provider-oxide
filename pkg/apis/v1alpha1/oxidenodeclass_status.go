@@ -8,8 +8,14 @@ import (
 // ConditionTypeImagesResolved reports whether the image selectors matched at least one image.
 const ConditionTypeImagesResolved = "ImagesResolved"
 
+// ConditionReasonImagesNotFound is an image selector, wildcard included, that matched nothing.
+const ConditionReasonImagesNotFound = "ImagesNotFound"
+
 // ConditionTypeSubnetsResolved reports whether at least one launch subnet is available.
 const ConditionTypeSubnetsResolved = "SubnetsResolved"
+
+// ConditionReasonSubnetsNotFound is a subnet selector that matched nothing.
+const ConditionReasonSubnetsNotFound = "SubnetsNotFound"
 
 // Condition types owned by the bootstrap providers.
 const (
@@ -42,6 +48,8 @@ const (
 const (
 	// ConditionReasonDiskSourceNotFound is a diskSet selector, wildcard included, that matched nothing.
 	ConditionReasonDiskSourceNotFound = "DiskSourceNotFound"
+	// ConditionReasonSnapshotsNotFound is a snapshot selector, wildcard included, that matched nothing.
+	ConditionReasonSnapshotsNotFound = "SnapshotsNotFound"
 	// ConditionReasonInvalidDiskSize identifies a disk outside Nexus's static size contract.
 	ConditionReasonInvalidDiskSize = "InvalidDiskSize"
 	// ConditionReasonDiskSourceSizeMismatch identifies a disk incompatible with its source size.

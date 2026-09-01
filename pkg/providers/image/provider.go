@@ -68,6 +68,8 @@ func (p *Provider) ResolveSelectors(
 
 	if len(result.Resolved) == 0 {
 		result.Unmatched = selectors
+		result.Reason = v1alpha1.ConditionReasonImagesNotFound
+		result.Message = DescribeSelectors(selectors)
 	}
 	return result, nil
 }
@@ -108,6 +110,9 @@ func (p *Provider) resolve(
 				err,
 			)
 		}
+		if !matches(imageSelector, *image) {
+			continue
+		}
 		resolvedImages = append(resolvedImages, *image)
 	}
 
@@ -120,25 +125,18 @@ func (p *Provider) resolve(
 			Project: oxide.NameOrId(project),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list error from project %q", project)
+			return nil, fmt.Errorf("unable to list images in project %q: %w", project, err)
 		}
 		for _, selector := range selectors {
 			for _, image := range images {
-				if selector.Name != "" && !resolver.MatchName(selector.Name, string(image.Name)) {
-					continue
-				}
-				if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
-					continue
-				}
-				if selector.Version != "" &&
-					!resolver.MatchVersion(selector.Version, image.Version) {
+				if !matches(selector, image) {
 					continue
 				}
 				resolvedImages = append(resolvedImages, image)
 			}
 		}
 	}
-	resolvedImages = lo.Uniq(resolvedImages)
+	resolvedImages = lo.UniqBy(resolvedImages, func(image oxide.Image) string { return image.Id })
 
 	slices.SortStableFunc(resolvedImages, func(a, b oxide.Image) int {
 		if b.TimeCreated.Compare(*a.TimeCreated) == 0 {
@@ -158,6 +156,20 @@ func (p *Provider) resolve(
 			TimeCreated: metav1.NewTime(*image.TimeCreated),
 		}
 	}), nil
+}
+
+// matches reports whether an image satisfies every term the selector sets other than its identity.
+func matches(selector v1alpha1.ImageSelector, image oxide.Image) bool {
+	if selector.Name != "" && !resolver.MatchName(selector.Name, string(image.Name)) {
+		return false
+	}
+	if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
+		return false
+	}
+	if selector.Version != "" && !resolver.MatchVersion(selector.Version, image.Version) {
+		return false
+	}
+	return true
 }
 
 // DescribeSelectors renders image selectors back as the terms they were written with.
