@@ -4,12 +4,11 @@ package rke2
 import (
 	"context"
 	"fmt"
-	"strings"
-	"text/template"
+	"net"
+	"strconv"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,20 +17,10 @@ import (
 const (
 	supervisorDefaultPort = 9345
 
-	userDataTemplateText = `#!/usr/bin/env bash
-set -euo pipefail
-{{ with .DiskSetup }}{{ . }}
-{{ end }}mkdir -p /etc/rancher/rke2
-cat <<'EOF' > /etc/rancher/rke2/config.yaml
-{{ .Config }}
-EOF
-systemctl start rke2-agent.service
-`
+	configPath = "/etc/rancher/rke2/config.yaml"
 
 	consumerUnit = "rke2-agent.service"
 )
-
-var userDataTemplate = template.Must(template.New("userdata").Parse(userDataTemplateText))
 
 // Config is the subset of /etc/rancher/rke2/config.yaml that Karpenter manages.
 type Config struct {
@@ -74,7 +63,10 @@ func (b *Bootstrapper) Resolve(
 		nodeClass.Status.Server = cluster.ServerOverride
 	} else {
 
-		nodeClass.Status.Server = fmt.Sprintf("https://%s:%d", cluster.Host, supervisorDefaultPort)
+		nodeClass.Status.Server = "https://" + net.JoinHostPort(
+			cluster.Host,
+			strconv.Itoa(supervisorDefaultPort),
+		)
 	}
 
 	tokenRef := nodeClass.Spec.Bootstrap.RKE2.TokenRefSecret
@@ -117,21 +109,13 @@ func (b *Bootstrapper) UserData(
 		return "", fmt.Errorf("unable to marshal RKE2 config to YAML: %w", err)
 	}
 
-	var rendered strings.Builder
-	diskSetup, err := disk.Script(req.Storage, disk.Options{
-		ConsumerUnits: []string{consumerUnit},
+	return bootstrap.Assemble(ctx, b.reader, nodeClass, bootstrap.Spec{
+		Storage:      req.Storage,
+		ConsumerUnit: consumerUnit,
+		ConfigPath:   configPath,
+		Config:       string(configYAML),
+		StartCmd:     "systemctl start " + consumerUnit,
 	})
-	if err != nil {
-		return "", fmt.Errorf("unable to render disk setup: %w", err)
-	}
-
-	if err := userDataTemplate.Execute(&rendered, userData{
-		DiskSetup: diskSetup,
-		Config:    string(configYAML),
-	}); err != nil {
-		return "", fmt.Errorf("unable to execute user-data template: %w", err)
-	}
-	return bootstrap.MergeUserData(ctx, b.reader, nodeClass, rendered.String())
 }
 
 func (b *Bootstrapper) token(
@@ -157,9 +141,4 @@ func (b *Bootstrapper) token(
 		)
 	}
 	return string(token), nil
-}
-
-type userData struct {
-	DiskSetup string
-	Config    string
 }

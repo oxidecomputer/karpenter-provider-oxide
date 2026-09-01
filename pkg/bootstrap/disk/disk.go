@@ -83,7 +83,7 @@ func Script(plan *storage.Plan, opts Options) (string, error) {
 		})
 	}
 	for _, file := range files {
-		if err := writeFile(&out, file.path, file.mode, file.content); err != nil {
+		if err := WriteFile(&out, file.path, file.mode, file.content); err != nil {
 			return "", err
 		}
 	}
@@ -98,7 +98,10 @@ func Script(plan *storage.Plan, opts Options) (string, error) {
 	return out.String(), nil
 }
 
-func writeFile(out *strings.Builder, path, mode, content string) error {
+// WriteFile appends a guarded heredoc that installs content at path with mode. The
+// marker is checked against the content so a document that happens to contain it
+// fails here instead of truncating the script on the node.
+func WriteFile(out *strings.Builder, path, mode, content string) error {
 	for line := range strings.Lines(content) {
 		if strings.TrimRight(line, "\n") == heredocMarker {
 			return fmt.Errorf(

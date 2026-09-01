@@ -93,7 +93,7 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	out := userDataFor(t)
 	if !strings.HasPrefix(
 		out,
-		"#!/usr/bin/env bash\nset -euo pipefail\nmkdir -p /etc/rancher/rke2\n",
+		"#!/usr/bin/env bash\nset -euo pipefail\ninstall -d -m 0755 '/etc/rancher/rke2'\n",
 	) {
 		t.Errorf("user-data does not begin with the original preamble:\n%s", out)
 	}
@@ -171,13 +171,10 @@ func TestUserDataOrdersAgainstTheAgentUnit(t *testing.T) {
 	}
 }
 
-func TestUserDataHeredocsAreNotShadowed(t *testing.T) {
+func TestUserDataWritesTheConfigThroughTheGuardedHeredoc(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
-	if got := strings.Count(out, "\nEOF\n"); got != 1 {
-		t.Errorf(
-			"a bare EOF line appears %d times, want exactly 1, closing the config heredoc",
-			got,
-		)
+	if !strings.Contains(out, "cat <<'KARPENTER_INSTALL_EOF' > '"+configPath+"'") {
+		t.Errorf("the config is not written through the guarded heredoc:\n%s", out)
 	}
 
 	if !strings.Contains(out, "secret-join-token") {

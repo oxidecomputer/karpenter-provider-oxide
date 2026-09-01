@@ -9,14 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,20 +50,10 @@ const (
 	configVersionV1beta3 = "kubeadm.k8s.io/v1beta3"
 	configVersionV1beta4 = "kubeadm.k8s.io/v1beta4"
 
-	userDataTemplateText = `#!/usr/bin/env bash
-set -euo pipefail
-{{ with .DiskSetup }}{{ . }}
-{{ end }}mkdir -p /etc/kubernetes
-cat <<'EOF' > /etc/kubernetes/karpenter-join.yaml
-{{ .Config }}
-EOF
-kubeadm join --config /etc/kubernetes/karpenter-join.yaml
-`
+	configPath = "/etc/kubernetes/karpenter-join.yaml"
 
 	consumerUnit = "kubelet.service"
 )
-
-var userDataTemplate = template.Must(template.New("userdata").Parse(userDataTemplateText))
 
 // Bootstrapper implements bootstrap.Bootstrapper for kubeadm.
 type Bootstrapper struct {
@@ -104,7 +94,7 @@ func (b *Bootstrapper) Resolve(
 		if port == 0 {
 			port = defaultAPIServerPort
 		}
-		server = fmt.Sprintf("%s:%d", cluster.Host, port)
+		server = net.JoinHostPort(cluster.Host, strconv.Itoa(int(port)))
 	}
 	nodeClass.Status.Server = server
 
@@ -147,21 +137,13 @@ func (b *Bootstrapper) UserData(
 		return "", err
 	}
 
-	var rendered strings.Builder
-	diskSetup, err := disk.Script(req.Storage, disk.Options{
-		ConsumerUnits: []string{consumerUnit},
+	return bootstrap.Assemble(ctx, b.reader, nodeClass, bootstrap.Spec{
+		Storage:      req.Storage,
+		ConsumerUnit: consumerUnit,
+		ConfigPath:   configPath,
+		Config:       config,
+		StartCmd:     "kubeadm join --config " + configPath,
 	})
-	if err != nil {
-		return "", fmt.Errorf("unable to render disk setup: %w", err)
-	}
-
-	if err := userDataTemplate.Execute(&rendered, userData{
-		DiskSetup: diskSetup,
-		Config:    config,
-	}); err != nil {
-		return "", fmt.Errorf("unable to execute user-data template: %w", err)
-	}
-	return bootstrap.MergeUserData(ctx, b.reader, nodeClass, rendered.String())
 }
 
 type clusterInfoData struct {
@@ -379,9 +361,4 @@ func kubeletExtraArgs(args []string, configVersion string) any {
 		out = append(out, map[string]string{"name": name, "value": value})
 	}
 	return out
-}
-
-type userData struct {
-	DiskSetup string
-	Config    string
 }
