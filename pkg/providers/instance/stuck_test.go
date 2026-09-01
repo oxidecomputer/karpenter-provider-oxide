@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/lifecycle"
 )
 
 func shortDeadlines() Deadlines {
@@ -265,4 +266,33 @@ func TestAmbiguousRecognizesTheSDKsLostAnswer(t *testing.T) {
 	if ambiguous(done, io.EOF) {
 		t.Error("a lost answer was treated as ambiguous after the launch context ended")
 	}
+}
+
+func TestValidateKeepsALaunchInsideUpstreamsTimeout(t *testing.T) {
+	for name, deadlines := range map[string]Deadlines{
+		"default": DefaultDeadlines(),
+		"short":   shortDeadlines(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := deadlines.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want deadlines that fit upstream's launch timeout", err)
+			}
+		})
+	}
+
+	t.Run("over upstream", func(t *testing.T) {
+		deadlines := DefaultDeadlines()
+		deadlines.Launch = lifecycle.LaunchTimeout
+		if err := deadlines.Validate(); err == nil {
+			t.Error("Validate() accepted a launch past upstream's timeout, want it refused")
+		}
+	})
+
+	t.Run("cleanup counts", func(t *testing.T) {
+		deadlines := DefaultDeadlines()
+		deadlines.Cleanup = lifecycle.LaunchTimeout - deadlines.Launch
+		if err := deadlines.Validate(); err == nil {
+			t.Error("Validate() ignored the cleanup budget, want it counted against upstream")
+		}
+	})
 }

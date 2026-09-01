@@ -39,6 +39,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
@@ -287,6 +288,11 @@ func run() error {
 			reaperCfg.period,
 			reaperCfg.quarantine,
 		))
+	} else {
+		log.FromContext(ctx).Info(
+			"the orphan reaper is disabled; instances left behind by an abandoned launch will not be reclaimed",
+			"env", envReaperEnabled,
+		)
 	}
 
 	if inventoryCfg.enabled {

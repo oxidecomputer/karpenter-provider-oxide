@@ -6,6 +6,7 @@ import (
 	"time"
 
 	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
+	"sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/lifecycle"
 )
 
 // Kinds of resource a launch can be left waiting on.
@@ -35,13 +36,13 @@ type Deadlines struct {
 // DefaultDeadlines are the deadlines a provider uses when none are configured.
 func DefaultDeadlines() Deadlines {
 	return Deadlines{
-		Launch:           10 * time.Minute,
-		Cleanup:          5 * time.Minute,
-		DiskCreating:     2 * time.Minute,
+		Launch:           3 * time.Minute,
+		Cleanup:          90 * time.Second,
+		DiskCreating:     time.Minute,
 		DiskDeleting:     diskprovider.DefaultDeleteTimeout,
-		InstanceCreating: 2 * time.Minute,
+		InstanceCreating: time.Minute,
 		InstanceStarting: 5 * time.Minute,
-		InstanceStopping: 3 * time.Minute,
+		InstanceStopping: time.Minute,
 	}
 }
 
@@ -77,6 +78,16 @@ func (d Deadlines) Validate() error {
 				field.name, field.value, d.Launch,
 			)
 		}
+	}
+
+	// A failing Create runs its cleanup before it returns, so this is the wall time upstream sees.
+	// Overrunning lifecycle.LaunchTimeout gets the NodeClaim deleted without a ProviderID, and its
+	// finalizer then skips the cloud Delete entirely, orphaning whatever the launch created.
+	if total := d.Launch + d.Cleanup; total >= lifecycle.LaunchTimeout {
+		return fmt.Errorf(
+			"the launch (%s) and cleanup (%s) deadlines total %s, which must be shorter than upstream's launch timeout (%s)",
+			d.Launch, d.Cleanup, total, lifecycle.LaunchTimeout,
+		)
 	}
 	return nil
 }

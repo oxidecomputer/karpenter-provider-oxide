@@ -77,6 +77,15 @@ func TestDeadlinesFromEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("past upstream", func(t *testing.T) {
+		t.Setenv(envLaunchDeadline, "10m")
+		if _, err := deadlinesFromEnv(); err == nil {
+			t.Error(
+				"deadlinesFromEnv() accepted a launch deadline past upstream's timeout, want it refused",
+			)
+		}
+	})
+
 	t.Run("unparseable", func(t *testing.T) {
 		t.Setenv(envLaunchDeadline, "ten minutes")
 		if _, err := deadlinesFromEnv(); err == nil {

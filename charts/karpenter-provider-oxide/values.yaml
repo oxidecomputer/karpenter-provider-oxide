@@ -133,22 +133,22 @@ settings:
   # -- Launch deadlines.
   launch:
     # -- Overall bound on a single launch, across every Oxide API call it makes.
-    deadline: 10m
+    deadline: 3m
     # -- Independent post-failure cleanup budget after the launch context ends.
-    cleanupDeadline: 5m
+    cleanupDeadline: 1m30s
     # -- How long a disk may sit in the creating state.
-    diskCreatingDeadline: 2m
+    diskCreatingDeadline: 1m
     # -- How long deleting one disk may be retried.
     diskDeletingDeadline: 1m30s
     # -- How long an instance may sit in the creating state.
-    instanceCreatingDeadline: 2m
+    instanceCreatingDeadline: 1m
     # -- Node registration deadline for a placed instance.
     instanceStartingDeadline: 5m
     # -- How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in.
-    instanceStoppingDeadline: 3m
+    instanceStoppingDeadline: 1m
   # -- Orphan reaper.
   reaper:
-    # -- Enable the orphan reaper.
+    # -- Enable the orphan reaper. Disabling it leaves instances from abandoned launches to be reclaimed by hand.
     enabled: true
     # -- How often the project is rescanned.
     period: 1m
