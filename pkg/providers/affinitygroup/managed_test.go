@@ -6,14 +6,20 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const defaultNodeClass = "default"
+
+const testUID = "444f4178-6bee-45f7-a654-c6ecafd4bb9e"
+
+const testUIDSuffix = "444f4178"
 
 func TestManagedGroupName(t *testing.T) {
 	tests := []struct {
 		name          string
 		nodeClassName string
+		uid           string
 		managed       v1alpha1.ManagedAffinityGroup
 		want          string
 		wantErr       bool
@@ -22,35 +28,55 @@ func TestManagedGroupName(t *testing.T) {
 			name:          "an allow-policy anti-affinity group",
 			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity", Policy: "allow"},
-			want:          "default-aa-a",
+			want:          "default-aa-a-" + testUIDSuffix,
 		},
 		{
 			name:          "the policy is encoded, so a change to it names a different group",
 			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity", Policy: "fail"},
-			want:          "default-aa-f",
+			want:          "default-aa-f-" + testUIDSuffix,
 		},
 		{
 			name:          "the type is encoded for the same reason",
 			nodeClassName: "gpu-nodes",
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "Affinity", Policy: "fail"},
-			want:          "gpu-nodes-af-f",
+			want:          "gpu-nodes-af-f-" + testUIDSuffix,
 		},
 		{
 			name:          "an unset policy names the group the API would have defaulted to",
 			nodeClassName: defaultNodeClass,
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
-			want:          "default-aa-a",
+			want:          "default-aa-a-" + testUIDSuffix,
 		},
 		{
-			name:          "58 characters is the longest nodeclass name the suffix leaves room for",
-			nodeClassName: "a" + strings.Repeat("b", 57),
+			name:          "the UID distinguishes two nodeclasses sharing a name and a project",
+			nodeClassName: defaultNodeClass,
+			uid:           "9a1b2c3d-0000-0000-0000-000000000000",
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
-			want:          "a" + strings.Repeat("b", 57) + "-aa-a",
+			want:          "default-aa-a-9a1b2c3d",
 		},
 		{
-			name:          "59 characters is reported rather than truncated",
-			nodeClassName: "a" + strings.Repeat("b", 58),
+			name:          "49 characters is the longest nodeclass name the suffix leaves room for",
+			nodeClassName: "a" + strings.Repeat("b", 48),
+			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
+			want:          "a" + strings.Repeat("b", 48) + "-aa-a-" + testUIDSuffix,
+		},
+		{
+			name:          "a longer nodeclass name is truncated, since the UID still separates it",
+			nodeClassName: "a" + strings.Repeat("b", 60),
+			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
+			want:          "a" + strings.Repeat("b", 48) + "-aa-a-" + testUIDSuffix,
+		},
+		{
+			name:          "truncation does not leave a trailing hyphen before the suffix",
+			nodeClassName: "a" + strings.Repeat("b", 47) + "--nodes",
+			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
+			want:          "a" + strings.Repeat("b", 47) + "-aa-a-" + testUIDSuffix,
+		},
+		{
+			name:          "a nodeclass without a UID cannot name a group",
+			nodeClassName: defaultNodeClass,
+			uid:           "-",
 			managed:       v1alpha1.ManagedAffinityGroup{Type: "AntiAffinity"},
 			wantErr:       true,
 		},
@@ -70,8 +96,15 @@ func TestManagedGroupName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			uid := tt.uid
+			if uid == "" {
+				uid = testUID
+			}
 			nodeClass := &v1alpha1.OxideNodeClass{
-				ObjectMeta: metav1.ObjectMeta{Name: tt.nodeClassName},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: tt.nodeClassName,
+					UID:  types.UID(uid),
+				},
 				Spec: v1alpha1.OxideNodeClassSpec{
 					Affinity: &v1alpha1.Affinity{Managed: &tt.managed},
 				},
@@ -80,8 +113,14 @@ func TestManagedGroupName(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("managedGroupName() error = %v, wantErr %v", err, tt.wantErr)
 			}
+			if tt.wantErr {
+				return
+			}
 			if got != tt.want {
 				t.Errorf("managedGroupName() = %q, want %q", got, tt.want)
+			}
+			if len(got) > maxOxideNameLength {
+				t.Errorf("managedGroupName() is %d characters, over the limit", len(got))
 			}
 		})
 	}
@@ -91,7 +130,7 @@ func TestManagedGroupDescription(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: defaultNodeClass,
-			UID:  "444f4178-6bee-45f7-a654-c6ecafd4bb9e",
+			UID:  testUID,
 		},
 	}
 	want := "karpenter.oxide.computer managed group for oxidenodeclass/default (444f4178-6bee-45f7-a654-c6ecafd4bb9e)"

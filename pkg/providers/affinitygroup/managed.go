@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
@@ -122,12 +123,25 @@ func ManagedIDs(groups []v1alpha1.OxideAffinityGroup) sets.Set[string] {
 
 func managedGroupName(nodeClass *v1alpha1.OxideNodeClass) (string, error) {
 	managed := nodeClass.Spec.Affinity.Managed
-	name := fmt.Sprintf(
-		"%s-%s-%s",
-		nodeClass.Name,
+	// The UID keeps nodeclasses in different clusters, or whose names truncate alike, from
+	// contending for one group in a shared project.
+	uid := strings.ReplaceAll(string(nodeClass.UID), "-", "")
+	if len(uid) < managedGroupUIDLength {
+		return "", fmt.Errorf(
+			"the nodeclass UID %q is too short to name a managed group with", nodeClass.UID,
+		)
+	}
+	suffix := fmt.Sprintf(
+		"-%s-%s-%s",
 		v1alpha1.AffinityGroupTypeCode(managed.Type),
 		managedGroupPolicyCode(managed.Policy),
+		uid[:managedGroupUIDLength],
 	)
+	stem := nodeClass.Name
+	if room := maxOxideNameLength - len(suffix); len(stem) > room {
+		stem = strings.TrimRight(stem[:room], "-")
+	}
+	name := stem + suffix
 	if err := validOxideName(name); err != nil {
 		return "", fmt.Errorf(
 			"the managed group name %q derived from the nodeclass name is not a legal Oxide name: %w",
@@ -154,7 +168,12 @@ func managedGroupPolicyCode(policy string) string {
 	return "a"
 }
 
-const maxOxideNameLength = 63
+const (
+	maxOxideNameLength = 63
+
+	// managedGroupUIDLength is how much of the nodeclass UID a managed group name carries.
+	managedGroupUIDLength = 8
+)
 
 func validOxideName(name string) error {
 	if len(name) > maxOxideNameLength {
