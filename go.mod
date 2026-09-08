@@ -10,17 +10,17 @@ require (
 	github.com/awslabs/operatorpkg v0.0.0-20260812232916-6d329cee9a40
 	github.com/google/uuid v1.6.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
-	github.com/oxidecomputer/oxide.go v0.10.0
+	github.com/oxidecomputer/oxide.go v0.11.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/samber/lo v1.53.0
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/sync v0.22.0
-	k8s.io/api v0.36.4
-	k8s.io/apiextensions-apiserver v0.36.4
-	k8s.io/apimachinery v0.36.4
-	k8s.io/apiserver v0.36.4
-	k8s.io/client-go v0.36.4
-	sigs.k8s.io/controller-runtime v0.24.1
+	golang.org/x/sync v0.23.0
+	k8s.io/api v0.37.0
+	k8s.io/apiextensions-apiserver v0.37.0
+	k8s.io/apimachinery v0.37.0
+	k8s.io/apiserver v0.37.0
+	k8s.io/client-go v0.37.0
+	sigs.k8s.io/controller-runtime v0.25.0
 	sigs.k8s.io/karpenter v1.14.1
 )
 
@@ -69,7 +69,6 @@ require (
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
@@ -90,7 +89,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/cloud-provider v0.35.8 // indirect
-	k8s.io/component-base v0.36.4 // indirect
+	k8s.io/component-base v0.37.0 // indirect
 	k8s.io/component-helpers v0.35.8 // indirect
 	k8s.io/csi-translation-lib v0.35.8 // indirect
 	k8s.io/dynamic-resource-allocation v0.35.8 // indirect
