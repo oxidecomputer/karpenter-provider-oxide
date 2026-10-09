@@ -77,7 +77,7 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"launch":{"cleanupDeadline":"1m30s","deadline":"3m","diskCreatingDeadline":"1m","diskDeletingDeadline":"1m30s","instanceCreatingDeadline":"1m","instanceStartingDeadline":"5m","instanceStoppingDeadline":"1m"},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
 | settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false}` | Feature gate configuration values. |
@@ -89,14 +89,6 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | settings.instanceTypes.incrementPercent | int | `10` | Percentage increase between successive CPU and memory values in the generated catalog. |
 | settings.inventory | object | `{"enabled":false}` | Sled inventory configuration. |
 | settings.inventory.enabled | bool | `false` | Enable the sled inventory controllers. |
-| settings.launch | object | `{"cleanupDeadline":"1m30s","deadline":"3m","diskCreatingDeadline":"1m","diskDeletingDeadline":"1m30s","instanceCreatingDeadline":"1m","instanceStartingDeadline":"5m","instanceStoppingDeadline":"1m"}` | Launch deadlines. |
-| settings.launch.cleanupDeadline | string | `"1m30s"` | Independent post-failure cleanup budget after the launch context ends. |
-| settings.launch.deadline | string | `"3m"` | Overall bound on a single launch, across every Oxide API call it makes. |
-| settings.launch.diskCreatingDeadline | string | `"1m"` | How long a disk may sit in the creating state. |
-| settings.launch.diskDeletingDeadline | string | `"1m30s"` | How long deleting one disk may be retried. |
-| settings.launch.instanceCreatingDeadline | string | `"1m"` | How long an instance may sit in the creating state. |
-| settings.launch.instanceStartingDeadline | string | `"5m"` | Node registration deadline for a placed instance. |
-| settings.launch.instanceStoppingDeadline | string | `"1m"` | How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in. |
 | settings.minValuesPolicy | string | `"Strict"` | How the Karpenter scheduler treats min values. |
 | settings.oxide | object | `{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |
 | settings.oxide.clusterID | string | `""` | Identity this cluster records on every Oxide resource it creates. |

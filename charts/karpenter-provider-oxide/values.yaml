@@ -132,22 +132,6 @@ settings:
       key: token
     # -- Identity this cluster records on every Oxide resource it creates.
     clusterID: ""
-  # -- Launch deadlines.
-  launch:
-    # -- Overall bound on a single launch, across every Oxide API call it makes.
-    deadline: 3m
-    # -- Independent post-failure cleanup budget after the launch context ends.
-    cleanupDeadline: 1m30s
-    # -- How long a disk may sit in the creating state.
-    diskCreatingDeadline: 1m
-    # -- How long deleting one disk may be retried.
-    diskDeletingDeadline: 1m30s
-    # -- How long an instance may sit in the creating state.
-    instanceCreatingDeadline: 1m
-    # -- Node registration deadline for a placed instance.
-    instanceStartingDeadline: 5m
-    # -- How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in.
-    instanceStoppingDeadline: 1m
   # -- Instance type catalog generation.
   instanceTypes:
     # -- Percentage increase between successive CPU and memory values in the generated catalog.

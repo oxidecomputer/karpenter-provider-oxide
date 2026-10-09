@@ -14,13 +14,9 @@ import (
 
 func shortDeadlines() Deadlines {
 	return Deadlines{
-		Launch:           5 * time.Second,
-		Cleanup:          time.Second,
-		DiskCreating:     10 * time.Millisecond,
-		DiskDeleting:     10 * time.Millisecond,
-		InstanceCreating: 10 * time.Millisecond,
-		InstanceStarting: time.Minute,
-		InstanceStopping: 10 * time.Millisecond,
+		Launch:   time.Second,
+		Teardown: time.Second,
+		Cleanup:  time.Second,
 	}
 }
 
@@ -185,15 +181,9 @@ func TestDeadlinesValidate(t *testing.T) {
 	}
 
 	zero := DefaultDeadlines()
-	zero.DiskDeleting = 0
+	zero.Teardown = 0
 	if err := zero.Validate(); err == nil {
 		t.Error("Validate() accepted a zero deadline, want it refused")
-	}
-
-	inverted := DefaultDeadlines()
-	inverted.InstanceCreating = inverted.Launch + time.Minute
-	if err := inverted.Validate(); err == nil {
-		t.Error("Validate() accepted a per-state deadline longer than the launch, want it refused")
 	}
 }
 

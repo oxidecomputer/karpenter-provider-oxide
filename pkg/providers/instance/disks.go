@@ -169,10 +169,7 @@ func (p *Provider) adoptDisk(
 
 func (p *Provider) waitForDiskReady(ctx context.Context, disk *oxide.Disk) error {
 	started := time.Now()
-	pollCtx, cancel := context.WithTimeout(ctx, p.deadlines.DiskCreating)
-	defer cancel()
-
-	current, err := p.disks.WaitAttachable(pollCtx, disk)
+	current, err := p.disks.WaitAttachable(ctx, disk)
 	if err == nil {
 		return nil
 	}

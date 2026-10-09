@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,7 +75,7 @@ func runReconcile(
 		WithScheme(scheme.Scheme).
 		WithObjects(claim).
 		Build()
-	c := NewController(kubeClient, api.client(t), instance.DefaultDeadlines())
+	c := NewController(kubeClient, api.client(t))
 	result, err := c.Reconcile(context.Background(), claim)
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
@@ -145,29 +144,17 @@ func TestReconcileWaitsOutAnInstanceTheAPIWillNotDelete(t *testing.T) {
 	}
 }
 
-func TestReconcileWaitsOutTheDeadlineForAStartingInstance(t *testing.T) {
-	deadline := instance.DefaultDeadlines().InstanceStarting
-
+func TestReconcileLeavesAStartingInstanceToCore(t *testing.T) {
 	kubeClient, requeue := runReconcile(
 		t,
 		&instanceAPI{runState: oxide.InstanceStateStarting},
-		launchedClaim(deadline/2),
+		launchedClaim(time.Hour),
 	)
 	if deleted(t, kubeClient) {
-		t.Error("the NodeClaim was deleted inside the deadline, want it left alone")
+		t.Error("the NodeClaim was deleted for a starting instance, want it left to core")
 	}
-
-	if requeue <= 0 || requeue > deadline/2 {
-		t.Errorf("requeue = %s, want the remainder of the deadline", requeue)
-	}
-
-	kubeClient, _ = runReconcile(
-		t,
-		&instanceAPI{runState: oxide.InstanceStateStarting},
-		launchedClaim(deadline+time.Minute),
-	)
-	if !deleted(t, kubeClient) {
-		t.Error("the NodeClaim survived past the deadline, want it deleted")
+	if requeue != resyncPeriod {
+		t.Errorf("requeue = %s, want %s", requeue, resyncPeriod)
 	}
 }
 

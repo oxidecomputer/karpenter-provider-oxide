@@ -3,10 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 )
 
 func TestShapeConfigFromEnv(t *testing.T) {
@@ -45,61 +43,4 @@ func TestShapeConfigFromEnv(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestDeadlinesFromEnv(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		deadlines, err := deadlinesFromEnv()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if deadlines != instance.DefaultDeadlines() {
-			t.Errorf("deadlines = %+v, want the defaults", deadlines)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		t.Setenv(envLaunchDiskCreatingDeadline, "45s")
-		t.Setenv(envLaunchDiskDeletingDeadline, "30s")
-		t.Setenv(envLaunchCleanupDeadline, "90s")
-		deadlines, err := deadlinesFromEnv()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if deadlines.DiskCreating != 45*time.Second {
-			t.Errorf("disk creating deadline = %s, want 45s", deadlines.DiskCreating)
-		}
-		if deadlines.DiskDeleting != 30*time.Second {
-			t.Errorf("disk deleting deadline = %s, want 30s", deadlines.DiskDeleting)
-		}
-		if deadlines.Cleanup != 90*time.Second {
-			t.Errorf("cleanup deadline = %s, want 90s", deadlines.Cleanup)
-		}
-	})
-
-	t.Run("past upstream", func(t *testing.T) {
-		t.Setenv(envLaunchDeadline, "10m")
-		if _, err := deadlinesFromEnv(); err == nil {
-			t.Error(
-				"deadlinesFromEnv() accepted a launch deadline past upstream's timeout, want it refused",
-			)
-		}
-	})
-
-	t.Run("unparseable", func(t *testing.T) {
-		t.Setenv(envLaunchDeadline, "ten minutes")
-		if _, err := deadlinesFromEnv(); err == nil {
-			t.Error("deadlinesFromEnv() accepted an unparseable duration, want it refused")
-		}
-	})
-
-	t.Run("inconsistent", func(t *testing.T) {
-		t.Setenv(envLaunchDeadline, "1m")
-		t.Setenv(envLaunchInstanceCreatingDeadline, "5m")
-		if _, err := deadlinesFromEnv(); err == nil {
-			t.Error(
-				"deadlinesFromEnv() accepted a deadline longer than the launch, want it refused",
-			)
-		}
-	})
 }

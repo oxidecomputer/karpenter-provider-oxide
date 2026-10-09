@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
 	"sigs.k8s.io/karpenter/pkg/controllers/nodeclaim/lifecycle"
 )
 
@@ -15,34 +14,26 @@ const (
 	KindInstance = "instance"
 )
 
-// Deadlines bound long-running provider operations and transitional states.
+// cleanupMargin is the slack left between Launch+Cleanup and lifecycle.LaunchTimeout.
+const cleanupMargin = 30 * time.Second
+
+// Deadlines bound long-running provider operations.
 type Deadlines struct {
 	// Launch bounds the whole of one Create, across every call it makes.
 	Launch time.Duration
+	// Teardown bounds the whole of one Delete, across every call it makes.
+	Teardown time.Duration
 	// Cleanup independently bounds post-failure cleanup after a launch context ends.
 	Cleanup time.Duration
-	// DiskCreating is how long a disk may sit in creating.
-	DiskCreating time.Duration
-	// DiskDeleting is how long deleting one disk may be retried.
-	DiskDeleting time.Duration
-	// InstanceCreating is how long an instance may sit in creating.
-	InstanceCreating time.Duration
-	// InstanceStarting is how long an instance may sit in starting after it has been placed.
-	InstanceStarting time.Duration
-	// InstanceStopping is how long a teardown waits for an instance to reach a state the API accepts a delete in.
-	InstanceStopping time.Duration
 }
 
 // DefaultDeadlines are the deadlines a provider uses when none are configured.
 func DefaultDeadlines() Deadlines {
+	launch := 3 * time.Minute
 	return Deadlines{
-		Launch:           3 * time.Minute,
-		Cleanup:          90 * time.Second,
-		DiskCreating:     time.Minute,
-		DiskDeleting:     diskprovider.DefaultDeleteTimeout,
-		InstanceCreating: time.Minute,
-		InstanceStarting: 5 * time.Minute,
-		InstanceStopping: time.Minute,
+		Launch:   launch,
+		Teardown: 90 * time.Second,
+		Cleanup:  lifecycle.LaunchTimeout - launch - cleanupMargin,
 	}
 }
 
@@ -53,30 +44,11 @@ func (d Deadlines) Validate() error {
 		value time.Duration
 	}{
 		{"launch deadline", d.Launch},
+		{"teardown deadline", d.Teardown},
 		{"cleanup deadline", d.Cleanup},
-		{"disk creating deadline", d.DiskCreating},
-		{"disk deleting deadline", d.DiskDeleting},
-		{"instance creating deadline", d.InstanceCreating},
-		{"instance starting deadline", d.InstanceStarting},
-		{"instance stopping deadline", d.InstanceStopping},
 	} {
 		if field.value <= 0 {
 			return fmt.Errorf("the %s must be positive, got %s", field.name, field.value)
-		}
-	}
-
-	for _, field := range []struct {
-		name  string
-		value time.Duration
-	}{
-		{"disk creating deadline", d.DiskCreating},
-		{"instance creating deadline", d.InstanceCreating},
-	} {
-		if field.value >= d.Launch {
-			return fmt.Errorf(
-				"the %s (%s) must be shorter than the launch deadline (%s)",
-				field.name, field.value, d.Launch,
-			)
 		}
 	}
 

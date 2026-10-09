@@ -92,11 +92,7 @@ func NewProvider(
 		opt(p)
 	}
 	if p.disks == nil {
-		p.disks = diskprovider.NewProvider(
-			ox,
-			project,
-			diskprovider.WithDeleteTimeout(p.deadlines.DiskDeleting),
-		)
+		p.disks = diskprovider.NewProvider(ox, project)
 	}
 	return p
 }
@@ -195,6 +191,9 @@ func (p *Provider) Create(
 
 // Delete tears down an instance and every resource it owns that outlives it.
 func (p *Provider) Delete(ctx context.Context, ref string, teardown Teardown) error {
+	ctx, cancel := context.WithTimeout(ctx, p.deadlines.Teardown)
+	defer cancel()
+
 	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
 		Instance: oxide.NameOrId(ref),
 		Project:  p.projectFor(ref),
@@ -296,12 +295,9 @@ func (p *Provider) awaitSettled(
 	}
 
 	started := time.Now()
-	pollCtx, cancel := context.WithTimeout(ctx, p.deadlines.InstanceCreating)
-	defer cancel()
-
 	settled := instance
 	err := wait.PollUntilContextCancel(
-		pollCtx,
+		ctx,
 		pollInterval,
 		false,
 		func(ctx context.Context) (bool, error) {
@@ -494,9 +490,6 @@ func (p *Provider) stop(ctx context.Context, instance *oxide.Instance) error {
 	}
 
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, p.deadlines.InstanceStopping)
-	defer cancel()
-
 	var lastState oxide.InstanceState
 	err := wait.PollUntilContextCancel(
 		ctx,

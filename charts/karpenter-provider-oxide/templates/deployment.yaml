@@ -129,20 +129,6 @@ spec:
             - name: OXIDE_CLUSTER_ID
               value: {{ . | quote }}
           {{- end }}
-            - name: OXIDE_LAUNCH_DEADLINE
-              value: {{ .Values.settings.launch.deadline | quote }}
-            - name: OXIDE_LAUNCH_CLEANUP_DEADLINE
-              value: {{ .Values.settings.launch.cleanupDeadline | quote }}
-            - name: OXIDE_LAUNCH_DISK_CREATING_DEADLINE
-              value: {{ .Values.settings.launch.diskCreatingDeadline | quote }}
-            - name: OXIDE_LAUNCH_DISK_DELETING_DEADLINE
-              value: {{ .Values.settings.launch.diskDeletingDeadline | quote }}
-            - name: OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE
-              value: {{ .Values.settings.launch.instanceCreatingDeadline | quote }}
-            - name: OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE
-              value: {{ .Values.settings.launch.instanceStartingDeadline | quote }}
-            - name: OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE
-              value: {{ .Values.settings.launch.instanceStoppingDeadline | quote }}
           {{- if .Values.settings.inventory.enabled }}
             - name: OXIDE_INVENTORY_ENABLED
               value: "true"

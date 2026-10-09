@@ -24,9 +24,7 @@ import (
 	"github.com/awslabs/operatorpkg/reasonable"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/oxide.go/oxide"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -42,21 +40,10 @@ const resyncPeriod = time.Minute
 type Controller struct {
 	kubeClient client.Client
 	ox         *oxide.Client
-	deadlines  instance.Deadlines
-	now        func() time.Time
 }
 
-func NewController(
-	kubeClient client.Client,
-	ox *oxide.Client,
-	deadlines instance.Deadlines,
-) *Controller {
-	return &Controller{
-		kubeClient: kubeClient,
-		ox:         ox,
-		deadlines:  deadlines,
-		now:        time.Now,
-	}
+func NewController(kubeClient client.Client, ox *oxide.Client) *Controller {
+	return &Controller{kubeClient: kubeClient, ox: ox}
 }
 
 func (c *Controller) Name() string {
@@ -95,21 +82,15 @@ func (c *Controller) Reconcile(
 		return reconcile.Result{}, fmt.Errorf("unable to view instance %s, %w", instanceID, err)
 	}
 
-	elapsed := c.now().Sub(launchedAt(nodeClaim).Time)
-	verdict, reason := c.judge(view.RunState, elapsed)
+	verdict, reason := judge(view.RunState)
 	switch verdict {
 	case wait:
 		return reconcile.Result{RequeueAfter: resyncPeriod}, nil
-	case waitUntilDeadline:
-
-		return reconcile.Result{RequeueAfter: c.deadlines.InstanceStarting - elapsed}, nil
 	case undeletable:
-
 		log.FromContext(ctx).V(1).Info(
 			"leaving a NodeClaim whose instance is in a state the Oxide API will not delete",
 			"instance-id", instanceID,
 			"run-state", view.RunState,
-			"launched-for", elapsed.Round(time.Second).String(),
 			"reason", reason,
 		)
 		return reconcile.Result{RequeueAfter: resyncPeriod}, nil
@@ -119,7 +100,6 @@ func (c *Controller) Reconcile(
 		"deleting a NodeClaim whose instance is not going to register",
 		"instance-id", instanceID,
 		"run-state", view.RunState,
-		"launched-for", elapsed.Round(time.Second).String(),
 		"reason", reason,
 	)
 	metrics.WatchdogDeletions.WithLabelValues(string(view.RunState)).Inc()
@@ -135,42 +115,20 @@ type verdict int
 
 const (
 	wait verdict = iota
-
-	waitUntilDeadline
-
 	undeletable
-
 	remove
 )
 
-func (c *Controller) judge(state oxide.InstanceState, elapsed time.Duration) (verdict, string) {
+// Anything still in flight is left to upstream's registration timeout.
+func judge(state oxide.InstanceState) (verdict, string) {
 	switch state {
-	case oxide.InstanceStateRunning:
-		return wait, ""
-
 	case oxide.InstanceStateFailed, oxide.InstanceStateDestroyed:
 		return remove, "the instance reached a terminal state without registering"
-
 	case oxide.InstanceStateCreating:
 		return undeletable, "the instance is still creating although the launch reported it as placed"
-
 	default:
-		if elapsed >= c.deadlines.InstanceStarting {
-			return remove, fmt.Sprintf(
-				"the instance has been in state %q for longer than the launch deadline", state,
-			)
-		}
-		return waitUntilDeadline, ""
+		return wait, ""
 	}
-}
-
-func launchedAt(nodeClaim *karpv1.NodeClaim) metav1.Time {
-	if launched := nodeClaim.StatusConditions().
-		Get(karpv1.ConditionTypeLaunched); launched != nil &&
-		!launched.LastTransitionTime.IsZero() {
-		return launched.LastTransitionTime
-	}
-	return nodeClaim.CreationTimestamp
 }
 
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {

@@ -63,14 +63,6 @@ const (
 
 	envClusterID = "OXIDE_CLUSTER_ID"
 
-	envLaunchDeadline                 = "OXIDE_LAUNCH_DEADLINE"
-	envLaunchCleanupDeadline          = "OXIDE_LAUNCH_CLEANUP_DEADLINE"
-	envLaunchDiskCreatingDeadline     = "OXIDE_LAUNCH_DISK_CREATING_DEADLINE"
-	envLaunchDiskDeletingDeadline     = "OXIDE_LAUNCH_DISK_DELETING_DEADLINE"
-	envLaunchInstanceCreatingDeadline = "OXIDE_LAUNCH_INSTANCE_CREATING_DEADLINE"
-	envLaunchInstanceStartingDeadline = "OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE"
-	envLaunchInstanceStoppingDeadline = "OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE"
-
 	envInventoryEnabled = "OXIDE_INVENTORY_ENABLED"
 )
 
@@ -149,15 +141,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	deadlines, err := deadlinesFromEnv()
-	if err != nil {
-		return err
-	}
-	disks := diskprovider.NewProvider(
-		ox,
-		project,
-		diskprovider.WithDeleteTimeout(deadlines.DiskDeleting),
-	)
+	disks := diskprovider.NewProvider(ox, project)
 	bootDisks := bootdisk.NewProvider(
 		karpcore.GetClient(),
 		karpcore.GetAPIReader(),
@@ -175,7 +159,7 @@ func run() error {
 				MemInGiB: int(released.Memory / cloudprovider.GiB),
 			})
 		},
-		instance.WithDeadlines(deadlines),
+		instance.WithDeadlines(instance.DefaultDeadlines()),
 		instance.WithDiskProvider(disks),
 	)
 
@@ -249,7 +233,7 @@ func run() error {
 
 		affinitycontroller.NewController(karpcore.GetClient(), ox),
 
-		launchcontroller.NewController(karpcore.GetClient(), ox, deadlines),
+		launchcontroller.NewController(karpcore.GetClient(), ox),
 
 		reapercontroller.NewController(
 			karpcore.GetClient(),
@@ -296,40 +280,6 @@ func shapeConfigFromEnv() (instancetype.ShapeConfig, error) {
 		)
 	}
 	return cfg, nil
-}
-
-func deadlinesFromEnv() (instance.Deadlines, error) {
-	deadlines := instance.DefaultDeadlines()
-
-	for _, field := range []struct {
-		name   string
-		target *time.Duration
-	}{
-		{envLaunchDeadline, &deadlines.Launch},
-		{envLaunchCleanupDeadline, &deadlines.Cleanup},
-		{envLaunchDiskCreatingDeadline, &deadlines.DiskCreating},
-		{envLaunchDiskDeletingDeadline, &deadlines.DiskDeleting},
-		{envLaunchInstanceCreatingDeadline, &deadlines.InstanceCreating},
-		{envLaunchInstanceStartingDeadline, &deadlines.InstanceStarting},
-		{envLaunchInstanceStoppingDeadline, &deadlines.InstanceStopping},
-	} {
-		raw := os.Getenv(field.name)
-		if raw == "" {
-			continue
-		}
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return instance.Deadlines{}, fmt.Errorf(
-				"%s is not a valid duration: %w", field.name, err,
-			)
-		}
-		*field.target = parsed
-	}
-
-	if err := deadlines.Validate(); err != nil {
-		return instance.Deadlines{}, fmt.Errorf("invalid launch deadlines: %w", err)
-	}
-	return deadlines, nil
 }
 
 func inventoryProvider(sledProvider *sled.Provider) availability.InventoryProvider {
