@@ -103,36 +103,3 @@ func TestDeadlinesFromEnv(t *testing.T) {
 		}
 	})
 }
-
-func TestReaperConfigFromEnv(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		cfg, err := reaperConfigFromEnv()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !cfg.enabled {
-			t.Error("enabled = false, want the reaper on unless it is switched off")
-		}
-		if cfg.period != defaultReaperPeriod || cfg.quarantine != defaultReaperQuarantine {
-			t.Errorf("period = %s, quarantine = %s, want the defaults", cfg.period, cfg.quarantine)
-		}
-	})
-
-	t.Run("disabled", func(t *testing.T) {
-		t.Setenv(envReaperEnabled, "false")
-		cfg, err := reaperConfigFromEnv()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.enabled {
-			t.Error("enabled = true, want the reaper switched off")
-		}
-	})
-
-	t.Run("invalid", func(t *testing.T) {
-		t.Setenv(envReaperQuarantine, "0s")
-		if _, err := reaperConfigFromEnv(); err == nil {
-			t.Error("reaperConfigFromEnv() accepted a zero quarantine, want it refused")
-		}
-	})
-}

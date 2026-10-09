@@ -143,23 +143,9 @@ spec:
               value: {{ .Values.settings.launch.instanceStartingDeadline | quote }}
             - name: OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE
               value: {{ .Values.settings.launch.instanceStoppingDeadline | quote }}
-            - name: OXIDE_REAPER_ENABLED
-              value: {{ .Values.settings.reaper.enabled | quote }}
-            - name: OXIDE_REAPER_PERIOD
-              value: {{ .Values.settings.reaper.period | quote }}
-            - name: OXIDE_REAPER_QUARANTINE
-              value: {{ .Values.settings.reaper.quarantine | quote }}
-            - name: OXIDE_QUOTA_ENABLED
-              value: {{ .Values.settings.quota.enabled | quote }}
-            - name: OXIDE_QUOTA_REFRESH_PERIOD
-              value: {{ .Values.settings.quota.refreshPeriod | quote }}
           {{- if .Values.settings.inventory.enabled }}
             - name: OXIDE_INVENTORY_ENABLED
               value: "true"
-            - name: OXIDE_INVENTORY_REFRESH_PERIOD
-              value: {{ .Values.settings.inventory.refreshPeriod | quote }}
-            - name: OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION
-              value: {{ .Values.settings.inventory.repairTolerationDuration | quote }}
           {{- end }}
           {{- with .Values.controller.env }}
             {{- toYaml . | nindent 12 }}

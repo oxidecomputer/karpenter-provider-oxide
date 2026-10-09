@@ -30,6 +30,14 @@ kubectl create secret generic oxide-api-token \
   --from-literal=token=${OXIDE_TOKEN}
 ```
 
+## Local simulation with KWOK
+
+The [KWOK stack](kwok/README.md) combines the production controller, a synthetic
+Node registration bridge, and pinned KWOK in one Helm chart. It supports kind or
+an existing test cluster, plus a shareable bundle with local images. Supply your
+own Omicron/Nexus endpoint, credentials, image and subnet; the normal instance
+launch and cleanup paths remain in use.
+
 ## Example
 
 To start scaling nodes, apply the following NodePool and OxideNodeClass in your K8s cluster:

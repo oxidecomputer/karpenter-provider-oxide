@@ -39,7 +39,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
@@ -72,31 +71,18 @@ const (
 	envLaunchInstanceStartingDeadline = "OXIDE_LAUNCH_INSTANCE_STARTING_DEADLINE"
 	envLaunchInstanceStoppingDeadline = "OXIDE_LAUNCH_INSTANCE_STOPPING_DEADLINE"
 
-	envReaperEnabled    = "OXIDE_REAPER_ENABLED"
-	envReaperPeriod     = "OXIDE_REAPER_PERIOD"
-	envReaperQuarantine = "OXIDE_REAPER_QUARANTINE"
-
-	envInventoryEnabled                  = "OXIDE_INVENTORY_ENABLED"
-	envInventoryRefreshPeriod            = "OXIDE_INVENTORY_REFRESH_PERIOD"
-	envInventoryRepairTolerationDuration = "OXIDE_INVENTORY_REPAIR_TOLERATION_DURATION"
-
-	envQuotaEnabled       = "OXIDE_QUOTA_ENABLED"
-	envQuotaRefreshPeriod = "OXIDE_QUOTA_REFRESH_PERIOD"
+	envInventoryEnabled = "OXIDE_INVENTORY_ENABLED"
 )
 
-const defaultQuotaRefreshPeriod = time.Minute
-
-const defaultInventoryRefreshPeriod = 5 * time.Minute
-
-const capacityPublishPeriod = 15 * time.Second
-
-const defaultInventoryRepairTolerationDuration = 30 * time.Minute
-
-const apiRequestTimeout = 60 * time.Second
-
-const defaultReaperPeriod = time.Minute
-
-const defaultReaperQuarantine = 5 * time.Minute
+const (
+	quotaRefreshPeriod                = time.Minute
+	inventoryRefreshPeriod            = 5 * time.Minute
+	capacityPublishPeriod             = 15 * time.Second
+	inventoryRepairTolerationDuration = 30 * time.Minute
+	apiRequestTimeout                 = 60 * time.Second
+	reaperPeriod                      = time.Minute
+	reaperQuarantine                  = 5 * time.Minute
+)
 
 func run() error {
 	ctx, karpcore := karpentercore.NewOperator()
@@ -128,24 +114,13 @@ func run() error {
 		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient()),
 	)
 
-	inventoryCfg, err := inventoryConfigFromEnv()
-	if err != nil {
-		return err
-	}
+	inventoryCfg := inventoryConfigFromEnv()
 	var sledProvider *sled.Provider
 	if inventoryCfg.enabled {
-		sledProvider = sled.NewProvider(ox, project, inventoryCfg.refreshPeriod)
+		sledProvider = sled.NewProvider(ox, project, inventoryRefreshPeriod)
 	}
 
-	quotaCfg, err := quotaConfigFromEnv()
-	if err != nil {
-		return err
-	}
-	var quotas *utilization.Provider
-	if quotaCfg.enabled {
-
-		quotas = utilization.NewProvider(ox, quotaCfg.refreshPeriod/4)
-	}
+	quotas := utilization.NewProvider(ox, quotaRefreshPeriod/4)
 
 	shapeCfg, err := shapeConfigFromEnv()
 	if err != nil {
@@ -154,7 +129,7 @@ func run() error {
 	availabilityManager := availability.New(inventoryProvider(sledProvider))
 	storageRefusals := storagerefusal.NewTracker()
 	instanceTypes, err := instancetype.NewProviderWithShapeConfig(
-		quotaProvider(quotas),
+		quotas,
 		availabilityManager,
 		shapeCfg,
 	)
@@ -275,41 +250,24 @@ func run() error {
 		affinitycontroller.NewController(karpcore.GetClient(), ox),
 
 		launchcontroller.NewController(karpcore.GetClient(), ox, deadlines),
-	)
 
-	reaperCfg, err := reaperConfigFromEnv()
-	if err != nil {
-		return err
-	}
-	if reaperCfg.enabled {
-		controllers = append(controllers, reapercontroller.NewController(
+		reapercontroller.NewController(
 			karpcore.GetClient(),
-
 			karpcore.GetAPIReader(),
 			ox,
 			project,
 			clusterUID,
 			instanceProvider,
-			reaperCfg.period,
-			reaperCfg.quarantine,
-		))
-	} else {
-		log.FromContext(ctx).Info(
-			"the orphan reaper is disabled; instances left behind by an abandoned launch will not be reclaimed",
-			"env", envReaperEnabled,
-		)
-	}
+			reaperPeriod,
+			reaperQuarantine,
+		),
 
+		utilizationcontroller.NewController(quotas, quotaRefreshPeriod),
+	)
 	if inventoryCfg.enabled {
 		controllers = append(controllers,
-			inventory.NewRefreshController(sledProvider, inventoryCfg.refreshPeriod),
-			inventory.NewController(karpcore.GetClient(), sledProvider, inventoryCfg.refreshPeriod),
-		)
-	}
-	if quotaCfg.enabled {
-		controllers = append(
-			controllers,
-			utilizationcontroller.NewController(quotas, quotaCfg.refreshPeriod),
+			inventory.NewRefreshController(sledProvider, inventoryRefreshPeriod),
+			inventory.NewController(karpcore.GetClient(), sledProvider, inventoryRefreshPeriod),
 		)
 	}
 
@@ -374,92 +332,6 @@ func deadlinesFromEnv() (instance.Deadlines, error) {
 	return deadlines, nil
 }
 
-type reaperConfig struct {
-	enabled    bool
-	period     time.Duration
-	quarantine time.Duration
-}
-
-func reaperConfigFromEnv() (reaperConfig, error) {
-	cfg := reaperConfig{
-		enabled:    true,
-		period:     defaultReaperPeriod,
-		quarantine: defaultReaperQuarantine,
-	}
-
-	if raw := os.Getenv(envReaperEnabled); raw != "" {
-		enabled, err := strconv.ParseBool(raw)
-		if err != nil {
-			return reaperConfig{}, fmt.Errorf(
-				"%s is not a valid boolean: %w",
-				envReaperEnabled,
-				err,
-			)
-		}
-		cfg.enabled = enabled
-	}
-	for _, field := range []struct {
-		name   string
-		target *time.Duration
-	}{
-		{envReaperPeriod, &cfg.period},
-		{envReaperQuarantine, &cfg.quarantine},
-	} {
-		raw := os.Getenv(field.name)
-		if raw == "" {
-			continue
-		}
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return reaperConfig{}, fmt.Errorf("%s is not a valid duration: %w", field.name, err)
-		}
-		if parsed <= 0 {
-			return reaperConfig{}, fmt.Errorf("%s must be positive, got %s", field.name, parsed)
-		}
-		*field.target = parsed
-	}
-	return cfg, nil
-}
-
-type quotaConfig struct {
-	enabled       bool
-	refreshPeriod time.Duration
-}
-
-func quotaConfigFromEnv() (quotaConfig, error) {
-	cfg := quotaConfig{enabled: true, refreshPeriod: defaultQuotaRefreshPeriod}
-
-	if raw := os.Getenv(envQuotaEnabled); raw != "" {
-		enabled, err := strconv.ParseBool(raw)
-		if err != nil {
-			return quotaConfig{}, fmt.Errorf("%s is not a valid boolean: %w", envQuotaEnabled, err)
-		}
-		cfg.enabled = enabled
-	}
-	if raw := os.Getenv(envQuotaRefreshPeriod); raw != "" {
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return quotaConfig{}, fmt.Errorf(
-				"%s is not a valid duration: %w", envQuotaRefreshPeriod, err,
-			)
-		}
-		if parsed <= 0 {
-			return quotaConfig{}, fmt.Errorf(
-				"%s must be positive, got %s", envQuotaRefreshPeriod, parsed,
-			)
-		}
-		cfg.refreshPeriod = parsed
-	}
-	return cfg, nil
-}
-
-func quotaProvider(quotas *utilization.Provider) instancetype.QuotaProvider {
-	if quotas == nil {
-		return nil
-	}
-	return quotas
-}
-
 func inventoryProvider(sledProvider *sled.Provider) availability.InventoryProvider {
 	if sledProvider == nil {
 		return nil
@@ -468,68 +340,21 @@ func inventoryProvider(sledProvider *sled.Provider) availability.InventoryProvid
 }
 
 type inventoryConfig struct {
-	enabled       bool
-	refreshPeriod time.Duration
-
-	repairTolerationDuration time.Duration
+	enabled bool
 }
 
-func inventoryConfigFromEnv() (inventoryConfig, error) {
-	cfg := inventoryConfig{
-		refreshPeriod:            defaultInventoryRefreshPeriod,
-		repairTolerationDuration: defaultInventoryRepairTolerationDuration,
-	}
-	if enabled, _ := strconv.ParseBool(os.Getenv(envInventoryEnabled)); !enabled {
-		return cfg, nil
-	}
-	cfg.enabled = true
-
-	for _, field := range []struct {
-		name    string
-		target  *time.Duration
-		allowed func(time.Duration) bool
-		must    string
-	}{
-		{
-			name:    envInventoryRefreshPeriod,
-			target:  &cfg.refreshPeriod,
-			allowed: func(d time.Duration) bool { return d > 0 },
-			must:    "be positive",
-		},
-		{
-
-			name:    envInventoryRepairTolerationDuration,
-			target:  &cfg.repairTolerationDuration,
-			allowed: func(d time.Duration) bool { return d >= 0 },
-			must:    "not be negative",
-		},
-	} {
-		raw := os.Getenv(field.name)
-		if raw == "" {
-			continue
-		}
-		parsed, err := time.ParseDuration(raw)
-		if err != nil {
-			return inventoryConfig{}, fmt.Errorf("%s is not a valid duration: %w", field.name, err)
-		}
-		if !field.allowed(parsed) {
-			return inventoryConfig{}, fmt.Errorf(
-				"%s must %s, got %s", field.name, field.must, parsed,
-			)
-		}
-		*field.target = parsed
-	}
-
-	return cfg, nil
+func inventoryConfigFromEnv() inventoryConfig {
+	enabled, _ := strconv.ParseBool(os.Getenv(envInventoryEnabled))
+	return inventoryConfig{enabled: enabled}
 }
 
 func (c inventoryConfig) repairPolicies() []karpcloudprovider.RepairPolicy {
-	if !c.enabled || c.repairTolerationDuration == 0 {
+	if !c.enabled {
 		return nil
 	}
 	return []karpcloudprovider.RepairPolicy{{
 		ConditionType:      v1alpha1.ConditionTypeSledUnhealthy,
 		ConditionStatus:    corev1.ConditionTrue,
-		TolerationDuration: c.repairTolerationDuration,
+		TolerationDuration: inventoryRepairTolerationDuration,
 	}}
 }

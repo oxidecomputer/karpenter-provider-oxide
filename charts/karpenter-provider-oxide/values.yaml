@@ -148,32 +148,14 @@ settings:
     instanceStartingDeadline: 5m
     # -- How long a teardown waits for an instance to reach a state the Oxide API accepts a delete in.
     instanceStoppingDeadline: 1m
-  # -- Orphan reaper.
-  reaper:
-    # -- Enable the orphan reaper. Disabling it leaves instances from abandoned launches to be reclaimed by hand.
-    enabled: true
-    # -- How often the project is rescanned.
-    period: 1m
-    # -- How long a resource must look orphaned before it is deleted.
-    quarantine: 5m
   # -- Instance type catalog generation.
   instanceTypes:
     # -- Percentage increase between successive CPU and memory values in the generated catalog.
     incrementPercent: 10
-  # -- Silo quota configuration.
-  quota:
-    # -- Enable silo quota awareness.
-    enabled: true
-    # -- How often the silo's quota is re-read.
-    refreshPeriod: 1m
   # -- Sled inventory configuration.
   inventory:
     # -- Enable the sled inventory controllers.
     enabled: false
-    # -- How often the sled inventory is re-read from the Oxide API.
-    refreshPeriod: 5m
-    # -- Time before replacing a node on an unhealthy sled.
-    repairTolerationDuration: 30m
   # -- The maximum length of a batch window.
   batchMaxDuration: 10s
   # -- The maximum amount of time with no new pending pods that if exceeded ends the current batching window.
