@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oxide-kwok-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inflate
+  namespace: oxide-kwok-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: oxide-kwok-inflate}
+  template:
+    metadata:
+      labels: {app: oxide-kwok-inflate}
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: oxide-kwok
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests: {cpu: "1", memory: 1Gi}

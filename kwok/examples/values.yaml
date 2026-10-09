@@ -1,0 +1,14 @@
+# Copy and fill this file. These are shared by the production provider and bridge.
+provider:
+  settings:
+    oxide:
+      host: http://host.docker.internal:12220
+      project: kwok-test
+      tokenSecret:
+        name: oxide-api-token
+        key: token
+  # When using unpublished local builds, make -C kwok apply supplies these overrides.
+  # controller:
+  #   image: {repository: karpenter-oxide, tag: dev}
+# bridge:
+#   image: {repository: oxide-kwok-bridge, tag: dev}

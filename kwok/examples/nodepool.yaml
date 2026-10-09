@@ -1,0 +1,29 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: oxide-kwok
+  labels:
+    kwok.oxide.computer/fixture: "true"
+spec:
+  limits:
+    cpu: "32"
+    memory: 128Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 10s
+    budgets:
+      - nodes: 100%
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.oxide.computer
+        kind: OxideNodeClass
+        name: oxide-kwok
+      expireAfter: 1h
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]

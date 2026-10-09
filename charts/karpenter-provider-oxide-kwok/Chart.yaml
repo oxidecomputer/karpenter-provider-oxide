@@ -1,0 +1,14 @@
+apiVersion: v2
+name: karpenter-provider-oxide-kwok
+description: Production Oxide Karpenter with a synthetic kubelet bridge and pinned KWOK.
+type: application
+version: 0.0.1
+appVersion: 0.0.1
+dependencies:
+  - name: karpenter-provider-oxide
+    alias: provider
+    version: 0.0.1
+    repository: file://../karpenter-provider-oxide
+  - name: karpenter-provider-oxide-crds
+    version: 0.0.1
+    repository: file://../karpenter-provider-oxide-crds

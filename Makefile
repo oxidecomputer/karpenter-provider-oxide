@@ -197,6 +197,7 @@ manifests: generate
 		--destination $(ARTIFACTS)/helm
 	test -f $(ARTIFACTS)/helm/$(CONTROLLER_CHART_NAME)-$(VERSION).tgz
 	test -f $(ARTIFACTS)/helm/$(CRD_CHART_NAME)-$(VERSION).tgz
+	$(MAKE) -C kwok bundle VERSION=$(VERSION) ARTIFACTS=$(ARTIFACTS) HELM=$(HELM)
 
 ##@ Dev Deployment
 

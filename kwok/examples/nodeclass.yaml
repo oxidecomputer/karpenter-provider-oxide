@@ -1,0 +1,22 @@
+apiVersion: karpenter.oxide.computer/v1alpha1
+kind: OxideNodeClass
+metadata:
+  name: oxide-kwok
+  labels:
+    kwok.oxide.computer/fixture: "true"
+spec:
+  # Explicitly use the in-cluster API endpoint; guests do not execute the bootstrap.
+  server: https://kubernetes.default.svc:443
+  bootstrap:
+    kubeadm:
+      tokenTTL: 15m
+      configVersion: kubeadm.k8s.io/v1beta4
+  storage:
+    boot:
+      size: 20Gi
+      pool:
+        enabled: false
+  imageSelector:
+    - id: REPLACE_IMAGE_UUID
+  subnetSelector:
+    - id: REPLACE_SUBNET_UUID

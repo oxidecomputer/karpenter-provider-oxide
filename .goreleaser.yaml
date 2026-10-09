@@ -24,8 +24,25 @@ builds:
       - amd64
       - arm64
 
+  - id: kwok-bridge
+    main: ./kwok
+    binary: oxide-kwok-bridge
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
 kos:
-  - build: karpenter
+  - id: karpenter
+    build: karpenter
     repositories:
       - ghcr.io/oxidecomputer/karpenter-provider-oxide
     platforms:
@@ -39,7 +56,27 @@ kos:
     creation_time: "{{ .CommitTimestamp }}"
     ko_data_creation_time: "{{ .CommitTimestamp }}"
 
+  - id: kwok-bridge
+    build: kwok-bridge
+    repositories:
+      - ghcr.io/oxidecomputer/karpenter-provider-oxide-kwok
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Version }}"
+    bare: true
+    preserve_import_paths: false
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+
 checksum:
   name_template: "checksums.txt"
   extra_files:
     - glob: ./_artifacts/helm/*.tgz
+    - glob: ./_artifacts/oxide-kwok-*.tar.gz
+
+release:
+  extra_files:
+    - glob: ./_artifacts/helm/*.tgz
+    - glob: ./_artifacts/oxide-kwok-*.tar.gz

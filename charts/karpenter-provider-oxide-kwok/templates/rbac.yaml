@@ -1,0 +1,78 @@
+{{- $root := . -}}
+{{- range $component := list "bridge" "simulator" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "oxide-kwok.name" $root }}-{{ $component }}
+  labels:
+    {{- include "oxide-kwok.labels" $root | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $root.Release.Namespace }}-{{ include "oxide-kwok.name" $root }}-{{ $component }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch{{ if eq $component "bridge" }}, create, patch{{ end }}]
+  - apiGroups: [""]
+    resources: [nodes/status]
+    verbs: [patch, update]
+  {{- if eq $component "bridge" }}
+  - apiGroups: [karpenter.sh]
+    resources: [nodeclaims]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
+  {{- else }}
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [patch, update]
+  {{- end }}
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Release.Namespace }}-{{ include "oxide-kwok.name" $root }}-{{ $component }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $root.Release.Namespace }}-{{ include "oxide-kwok.name" $root }}-{{ $component }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "oxide-kwok.name" $root }}-{{ $component }}
+    namespace: {{ $root.Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "oxide-kwok.name" $root }}-{{ $component }}-leases
+  namespace: {{ if eq $component "simulator" }}kube-node-lease{{ else }}{{ $root.Release.Namespace }}{{ end }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Release.Namespace }}-{{ include "oxide-kwok.name" $root }}-{{ $component }}-leases
+  namespace: {{ if eq $component "simulator" }}kube-node-lease{{ else }}{{ $root.Release.Namespace }}{{ end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "oxide-kwok.name" $root }}-{{ $component }}-leases
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "oxide-kwok.name" $root }}-{{ $component }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}

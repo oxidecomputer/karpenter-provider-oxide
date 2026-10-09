@@ -1,0 +1,9 @@
+dependencies:
+- name: karpenter-provider-oxide
+  repository: file://../karpenter-provider-oxide
+  version: 0.0.1
+- name: karpenter-provider-oxide-crds
+  repository: file://../karpenter-provider-oxide-crds
+  version: 0.0.1
+digest: sha256:aca47e755ca94d01c2ebc4157a06994c665c599cb8a74cbc73acf66dab931625
+generated: "2026-09-15T16:49:24.563832-04:00"

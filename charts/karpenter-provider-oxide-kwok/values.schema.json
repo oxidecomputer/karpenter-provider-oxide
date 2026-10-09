@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "bridge": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "concurrency": {"type": "integer", "minimum": 1},
+        "pollInterval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$"},
+        "staleAfter": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$"},
+        "apiTimeout": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$"},
+        "removeStartupTaints": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^.+:(NoSchedule|NoExecute|PreferNoSchedule)$"},
+          "uniqueItems": true
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string"},
+            "digest": {"type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$"},
+            "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        }
+      }
+    },
+    "kwok": {
+      "type": "object",
+      "properties": {
+        "image": {"type": "string", "minLength": 1},
+        "imagePullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    }
+  }
+}

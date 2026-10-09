@@ -1,0 +1,67 @@
+# A single release installs the existing provider and CRD charts, bridge and KWOK.
+# Oxide settings are shared with the bridge; tokens only come from an existing Secret.
+provider:
+  replicas: 1
+  bootstrap:
+    kubeadm:
+      enabled: true
+    rke2:
+      enabled: false
+  settings:
+    oxide:
+      host: ""
+      project: ""
+      clusterID: ""
+      tokenSecret:
+        name: oxide-api-token
+        key: token
+    inventory:
+      enabled: true
+  controller:
+    resources:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 1Gi}
+  tolerations:
+    - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+    - {key: CriticalAddonsOnly, operator: Exists}
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: kwok.x-k8s.io/node, operator: DoesNotExist}
+              - {key: karpenter.sh/nodepool, operator: DoesNotExist}
+    podAntiAffinity: {}
+  topologySpreadConstraints: []
+
+bridge:
+  replicas: 1
+  image:
+    repository: ghcr.io/oxidecomputer/karpenter-provider-oxide-kwok
+    tag: "" # Defaults to chart appVersion.
+    digest: ""
+    pullPolicy: IfNotPresent
+  pollInterval: 5s
+  staleAfter: 1m
+  apiTimeout: 60s
+  concurrency: 2
+  removeStartupTaints: [] # Exact key:effect strings. Permanent taints are never removed.
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 256Mi}
+
+kwok:
+  # Configuration and stages are pinned to this release and vendored in files/.
+  image: registry.k8s.io/kwok/kwok:v0.8.0@sha256:6d25aa8fbdfe78845423160bf125b5513f9522e2770981f0945c2a250c2b26f0
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+imagePullSecrets: []
+podAnnotations: {}
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+  - {key: CriticalAddonsOnly, operator: Exists}
