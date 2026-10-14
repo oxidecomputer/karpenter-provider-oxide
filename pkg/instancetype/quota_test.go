@@ -57,7 +57,7 @@ func TestQuotaMarksOversizedOfferingsUnavailable(t *testing.T) {
 		{"8-67", false},
 		{"67-143", false},
 	} {
-		it, ok := p.Get(tc.name, 0)
+		it, ok := p.Get(tc.name, Options{})
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.name)
 		}
@@ -78,7 +78,7 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := NewProvider(tc.quotas, availability.New(nil))
 
-			it, ok := p.Get("252-540", 0)
+			it, ok := p.Get("252-540", Options{})
 			if !ok {
 				t.Fatal("instance type 252-540 does not exist")
 			}
@@ -96,7 +96,7 @@ func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 	quotas := &fakeQuotas{quota: smallQuota(), gen: 1}
 	p := NewProvider(quotas, availability.New(nil))
 
-	if it, _ := p.Get("31-67", 0); it.Offerings[0].Available {
+	if it, _ := p.Get("31-67", Options{}); it.Offerings[0].Available {
 		t.Fatal("31-67 was available under a 16 vCPU quota")
 	}
 
@@ -107,7 +107,7 @@ func TestQuotaChangeRebuildsOfferings(t *testing.T) {
 	}
 	quotas.gen = 2
 
-	if it, _ := p.Get("31-67", 0); !it.Offerings[0].Available {
+	if it, _ := p.Get("31-67", Options{}); !it.Offerings[0].Available {
 		t.Error("31-67 is still unavailable after the quota was raised")
 	}
 }

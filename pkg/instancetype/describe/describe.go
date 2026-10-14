@@ -108,7 +108,7 @@ func describeOne(it *cloudprovider.InstanceType) (InstanceType, error) {
 			SystemReserved:    quantities(it.Overhead.SystemReserved),
 			EvictionThreshold: quantities(it.Overhead.EvictionThreshold),
 		},
-		KubeletArgs: instancetype.ReservedFor(specs).KubeletArgs(),
+		KubeletArgs: instancetype.ReservedFor(specs, instancetype.Reserved{}).KubeletArgs(),
 		Offerings:   offerings,
 	}, nil
 }

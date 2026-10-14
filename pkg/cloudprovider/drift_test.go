@@ -337,9 +337,10 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) { spec.Server = "10.0.0.1:6443" },
 		},
 		{
-			name: "kubelet args",
+			name: "the kubelet pod cap",
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
-				spec.KubeletArgs = []string{"max-pods=110"}
+				maxPods := int32(50)
+				spec.Kubelet = &v1alpha1.KubeletConfiguration{MaxPods: &maxPods}
 			},
 		},
 		{
@@ -392,6 +393,14 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 			name: "a diskSet's mount directory",
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
 				spec.Storage.DiskSets[0].MountDir = "/mnt/elsewhere"
+			},
+		},
+		{
+			name: "the kubelet reservations",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				spec.Kubelet = &v1alpha1.KubeletConfiguration{
+					SystemReserved: map[string]string{"memory": "1Gi"},
+				}
 			},
 		},
 		{

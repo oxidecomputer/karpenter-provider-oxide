@@ -37,20 +37,22 @@ type Request struct {
 	Storage *storage.Plan
 	// InstanceType is the shape being launched, which fixes the node's kubelet reservations.
 	InstanceType instancetype.Specs
+	// Kubelet is the nodeclass's own reservations, layered over the shape's.
+	Kubelet instancetype.Reserved
 }
 
 // KubeletArgs returns the kubelet arguments for a node of this shape: the
 // reservations the instance type provider modeled, then the nodeclass's own
-// arguments. A flag set twice takes its last value, so operators can override.
+// arguments. A flag set twice takes its last value.
 //
 // Without this the provider models reservations kubelet never applies, and the
 // scheduler's idea of allocatable drifts from the node's.
-func KubeletArgs(specs instancetype.Specs, extra []string) []string {
-	var reserved []string
+func KubeletArgs(specs instancetype.Specs, kubelet instancetype.Reserved, extra []string) []string {
+	reserved := kubelet
 	if specs.Ncpus > 0 && specs.MemInGiB > 0 {
-		reserved = instancetype.ReservedFor(specs).KubeletArgs()
+		reserved = instancetype.ReservedFor(specs, kubelet)
 	}
-	return MergeKubeletArgs(reserved, extra)
+	return MergeKubeletArgs(reserved.KubeletArgs(), extra)
 }
 
 // MergeKubeletArgs flattens "key=value" argument sets into one, keeping each

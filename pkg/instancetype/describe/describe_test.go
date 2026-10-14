@@ -19,7 +19,7 @@ func catalog(t *testing.T) Catalog {
 	if err != nil {
 		t.Fatal(err)
 	}
-	described, err := Describe(100, provider.InstanceTypes(0))
+	described, err := Describe(100, provider.InstanceTypes(instancetype.Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}

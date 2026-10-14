@@ -6,6 +6,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 )
 
@@ -68,5 +69,22 @@ func TestKubeletArgsDefaultAppliesOnItsOwn(t *testing.T) {
 	args := bootstrap.MergeKubeletArgs(kubeletArgsDefault, nil)
 	if len(args) != 1 || args[0] != "cloud-provider=external" {
 		t.Fatalf("got %v", args)
+	}
+}
+
+func TestKubeletArgsStatusRendersTheTypedConfiguration(t *testing.T) {
+	maxPods := int32(50)
+	kubelet, err := instancetype.ParseKubelet(&v1alpha1.KubeletConfiguration{
+		MaxPods:        &maxPods,
+		ClusterDNS:     []string{"10.96.0.10"},
+		SystemReserved: map[string]string{"memory": "1Gi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := bootstrap.MergeKubeletArgs(kubeletArgsDefault, kubelet.Args)
+	want := []string{cloudProviderExternal, "cluster-dns=10.96.0.10", "max-pods=50"}
+	if strings.Join(args, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v, want %v", args, want)
 	}
 }

@@ -227,3 +227,107 @@ func TestSubnetSelectorValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestKubeletValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		kubelet   map[string]any
+		wantValid bool
+	}{
+		{
+			name:      "an empty configuration is accepted",
+			kubelet:   map[string]any{},
+			wantValid: true,
+		},
+		{
+			name: "reservations in every resource kubelet takes are accepted",
+			kubelet: map[string]any{
+				"systemReserved": map[string]any{
+					"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi", "pid": "1000",
+				},
+				"kubeReserved": map[string]any{"cpu": "0.25", "memory": "512Mi"},
+				"evictionHard": map[string]any{
+					"memory.available":   "5%",
+					"nodefs.available":   "1Gi",
+					"imagefs.inodesFree": "2.5%",
+				},
+			},
+			wantValid: true,
+		},
+		{
+			name: "the flags kubelet only acts on are accepted",
+			kubelet: map[string]any{
+				"clusterDNS":                  []any{"10.96.0.10"},
+				"maxPods":                     60,
+				"podsPerCore":                 8,
+				"evictionSoft":                map[string]any{"memory.available": "500Mi"},
+				"evictionSoftGracePeriod":     map[string]any{"memory.available": "1m30s"},
+				"evictionMaxPodGracePeriod":   30,
+				"imageGCHighThresholdPercent": 85,
+				"imageGCLowThresholdPercent":  80,
+				"cpuCFSQuota":                 false,
+			},
+			wantValid: true,
+		},
+		{
+			name:    "a resource kubelet cannot reserve is refused",
+			kubelet: map[string]any{"systemReserved": map[string]any{"gpu": "1"}},
+		},
+		{
+			name:    "a reservation that is not a quantity is refused",
+			kubelet: map[string]any{"kubeReserved": map[string]any{"memory": "lots"}},
+		},
+		{
+			name:    "a negative reservation is refused",
+			kubelet: map[string]any{"systemReserved": map[string]any{"cpu": "-1"}},
+		},
+		{
+			name:    "an eviction signal kubelet does not have is refused",
+			kubelet: map[string]any{"evictionHard": map[string]any{"swap.available": "1Gi"}},
+		},
+		{
+			name: "an eviction threshold that is neither a quantity nor a percentage is refused",
+			kubelet: map[string]any{
+				"evictionHard": map[string]any{"memory.available": "10 percent"},
+			},
+		},
+		{
+			name:    "a soft threshold without a grace period is refused, since kubelet would not start",
+			kubelet: map[string]any{"evictionSoft": map[string]any{"memory.available": "500Mi"}},
+		},
+		{
+			name: "a grace period without a soft threshold is refused",
+			kubelet: map[string]any{
+				"evictionSoftGracePeriod": map[string]any{"memory.available": "1m"},
+			},
+		},
+		{
+			name: "an image GC low threshold at or above the high one is refused",
+			kubelet: map[string]any{
+				"imageGCHighThresholdPercent": 80, "imageGCLowThresholdPercent": 80,
+			},
+		},
+		{
+			name:    "a negative pod cap is refused",
+			kubelet: map[string]any{"maxPods": -1},
+		},
+	}
+
+	props, schema := nodeClassSchema(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := map[string]any{
+				"storage":        map[string]any{"boot": map[string]any{"size": "50Gi"}},
+				"subnetSelector": []any{map[string]any{"vpcName": "prod"}},
+				"kubelet":        tt.kubelet,
+			}
+			got := validate(t, props, schema, spec)
+			if tt.wantValid && len(got) > 0 {
+				t.Errorf("the spec was refused with %v, want it accepted", got)
+			}
+			if !tt.wantValid && len(got) == 0 {
+				t.Error("the spec was accepted, want it refused")
+			}
+		})
+	}
+}

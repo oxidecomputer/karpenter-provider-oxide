@@ -219,11 +219,15 @@ func (c *OxideCloudProvider) Create(
 	}
 
 	defer probe.Release()
+	catalog, err := instancetype.OptionsFor(nodeClass)
+	if err != nil {
+		return nil, err
+	}
 	effectiveInstanceType, err := c.effectiveInstanceType(
 		ctx,
 		nodeClaim,
 		instancetype.SpecsToInstanceTypeName(instanceType.Ncpus, instanceType.MemInGiB),
-		nodeClass.BootSizeBytes(),
+		catalog,
 	)
 	if err != nil {
 		return nil, err
@@ -275,6 +279,7 @@ func (c *OxideCloudProvider) Create(
 		Hostname:     name,
 		Storage:      &plan,
 		InstanceType: instanceType,
+		Kubelet:      catalog.Kubelet.Reserved,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
@@ -627,9 +632,9 @@ func (c *OxideCloudProvider) effectiveInstanceType(
 	ctx context.Context,
 	nodeClaim *karpcorev1.NodeClaim,
 	instanceTypeName string,
-	bootSizeBytes int64,
+	catalog instancetype.Options,
 ) (*cloudprovider.InstanceType, error) {
-	instanceType, ok := c.instanceTypeProvider.Get(instanceTypeName, bootSizeBytes)
+	instanceType, ok := c.instanceTypeProvider.Get(instanceTypeName, catalog)
 	if !ok {
 		return nil, fmt.Errorf("selected instance type %q is no longer available", instanceTypeName)
 	}
@@ -766,12 +771,16 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 	}
 	nodeClaim.Status.ProviderID = fmt.Sprintf("oxide://%s", oxideInstance.Id)
 	labels := map[string]string{}
+	catalog, err := instancetype.OptionsFor(nodeClass)
+	if err != nil {
+		return nil, err
+	}
 	if it, ok := c.instanceTypeProvider.Get(
 		instancetype.SpecsToInstanceTypeName(
 			int(oxideInstance.Ncpus),
 			int(oxideInstance.Memory)/GiB,
 		),
-		nodeClass.BootSizeBytes(),
+		catalog,
 	); ok {
 		for key, req := range it.Requirements {
 			if req.Operator() != corev1.NodeSelectorOpIn {
@@ -884,7 +893,7 @@ func (c *OxideCloudProvider) rejectOwnership(
 
 // GetInstanceTypes returns instance types supported by the cloudprovider. The
 // nodepool's nodeclass fixes the boot disk, and with it the ephemeral storage
-// the shapes advertise.
+// the shapes advertise, and the kubelet reservations, and with them the overhead.
 func (c *OxideCloudProvider) GetInstanceTypes(
 	ctx context.Context,
 	nodePool *karpcorev1.NodePool,
@@ -893,7 +902,11 @@ func (c *OxideCloudProvider) GetInstanceTypes(
 	if err != nil {
 		return nil, err
 	}
-	return c.instanceTypeProvider.InstanceTypes(nodeClass.BootSizeBytes()), nil
+	catalog, err := instancetype.OptionsFor(nodeClass)
+	if err != nil {
+		return nil, err
+	}
+	return c.instanceTypeProvider.InstanceTypes(catalog), nil
 }
 
 func (c *OxideCloudProvider) nodeClassFor(

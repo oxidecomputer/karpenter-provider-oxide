@@ -81,7 +81,7 @@ type OxideNodeClassStatus struct {
 	// Server is the user-defined or system discovered endpoint that nodes will use to join the cluster.
 	// +optional
 	Server string `json:"server,omitempty"`
-	// KubeletArgs are applied to launched nodes.
+	// KubeletArgs are the rendered flags every node of this class starts with; bootstrap adds the per-shape reservations.
 	// +optional
 	KubeletArgs []string `json:"kubeletArgs,omitempty"`
 	// NodeTaints are applied to launched nodes.

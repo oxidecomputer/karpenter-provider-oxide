@@ -10,7 +10,7 @@ import (
 func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 	p := NewProvider(nil, availability.New(nil))
 	prices := map[Specs]float64{}
-	for _, it := range p.InstanceTypes(0) {
+	for _, it := range p.InstanceTypes(Options{}) {
 		specs, err := InstanceTypeToSpecs(it.Name)
 		if err != nil {
 			t.Fatalf("instance type %s: %v", it.Name, err)
@@ -74,11 +74,11 @@ func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 		{"1-4", "384-1536"},
 		{"16-31", "16-67"},
 	} {
-		a, ok := p.Get(tc.cheaper, 0)
+		a, ok := p.Get(tc.cheaper, Options{})
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.cheaper)
 		}
-		b, ok := p.Get(tc.dearer, 0)
+		b, ok := p.Get(tc.dearer, Options{})
 		if !ok {
 			t.Fatalf("instance type %s does not exist", tc.dearer)
 		}
@@ -104,7 +104,7 @@ func TestComparePriceMatchesSchedulerOrdering(t *testing.T) {
 		}
 	}
 	shapes := make([]Specs, 0)
-	for _, it := range p.InstanceTypes(0) {
+	for _, it := range p.InstanceTypes(Options{}) {
 		specs, _ := InstanceTypeToSpecs(it.Name)
 		shapes = append(shapes, specs)
 	}

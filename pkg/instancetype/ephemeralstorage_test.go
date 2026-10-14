@@ -10,7 +10,7 @@ import (
 func TestEphemeralStorageIsAdvertisedFromTheBootDisk(t *testing.T) {
 	const bootSizeBytes = 50 * GiB
 	provider := NewProvider(nil, availability.New(nil))
-	it, ok := provider.Get("4-16", bootSizeBytes)
+	it, ok := provider.Get("4-16", Options{BootSizeBytes: bootSizeBytes})
 	if !ok {
 		t.Fatal("4-16 not offered")
 	}
@@ -42,11 +42,11 @@ func TestEphemeralStorageIsAdvertisedFromTheBootDisk(t *testing.T) {
 // zero and every shape was rejected.
 func TestEphemeralStorageScalesWithTheBootDisk(t *testing.T) {
 	provider := NewProvider(nil, availability.New(nil))
-	small, ok := provider.Get("4-16", 20*GiB)
+	small, ok := provider.Get("4-16", Options{BootSizeBytes: 20 * GiB})
 	if !ok {
 		t.Fatal("4-16 not offered")
 	}
-	large, ok := provider.Get("4-16", 200*GiB)
+	large, ok := provider.Get("4-16", Options{BootSizeBytes: 200 * GiB})
 	if !ok {
 		t.Fatal("4-16 not offered")
 	}
@@ -69,13 +69,13 @@ func TestEphemeralStorageScalesWithTheBootDisk(t *testing.T) {
 
 func TestEphemeralStorageOmittedWhenTheBootDiskCannotCoverIt(t *testing.T) {
 	for _, bootSizeBytes := range []int64{0, -1, GiB, GiB + MiB} {
-		if _, ok := EphemeralStorageFor(bootSizeBytes); ok {
+		if _, ok := EphemeralStorageFor(bootSizeBytes, Reserved{}); ok {
 			t.Errorf("boot disk of %d bytes should carry no ephemeral storage", bootSizeBytes)
 		}
 	}
 
 	provider := NewProvider(nil, availability.New(nil))
-	it, ok := provider.Get("4-16", 0)
+	it, ok := provider.Get("4-16", Options{})
 	if !ok {
 		t.Fatal("4-16 not offered")
 	}
@@ -91,9 +91,9 @@ func TestEphemeralStorageOmittedWhenTheBootDiskCannotCoverIt(t *testing.T) {
 // may see the other's storage.
 func TestEphemeralStorageIsCachedPerBootDiskSize(t *testing.T) {
 	provider := NewProvider(nil, availability.New(nil))
-	first := provider.InstanceTypes(50 * GiB)[0]
-	second := provider.InstanceTypes(100 * GiB)[0]
-	again := provider.InstanceTypes(50 * GiB)[0]
+	first := provider.InstanceTypes(Options{BootSizeBytes: 50 * GiB})[0]
+	second := provider.InstanceTypes(Options{BootSizeBytes: 100 * GiB})[0]
+	again := provider.InstanceTypes(Options{BootSizeBytes: 50 * GiB})[0]
 
 	firstCapacity := first.Capacity[corev1.ResourceEphemeralStorage]
 	secondCapacity := second.Capacity[corev1.ResourceEphemeralStorage]

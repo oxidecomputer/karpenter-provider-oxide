@@ -116,10 +116,14 @@ func (b *Bootstrapper) UserData(
 	}
 
 	configYAML, err := yaml.Marshal(Config{
-		Server:      nodeClass.Status.Server,
-		KubeletArgs: bootstrap.KubeletArgs(req.InstanceType, nodeClass.Status.KubeletArgs),
-		NodeTaints:  req.NodeTaints,
-		Token:       token,
+		Server: nodeClass.Status.Server,
+		KubeletArgs: bootstrap.KubeletArgs(
+			req.InstanceType,
+			req.Kubelet,
+			nodeClass.Status.KubeletArgs,
+		),
+		NodeTaints: req.NodeTaints,
+		Token:      token,
 	})
 	if err != nil {
 		return "", fmt.Errorf("unable to marshal RKE2 config to YAML: %w", err)

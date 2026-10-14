@@ -8,6 +8,7 @@ import (
 	"github.com/awslabs/operatorpkg/reasonable"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/affinitygroup"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
@@ -39,9 +40,10 @@ import (
 )
 
 // kubeletArgsDefault is what a node needs to be managed by an out-of-tree cloud provider,
-// which is the only way Oxide nodes are managed. It comes first so spec.kubeletArgs can
-// override it.
-var kubeletArgsDefault = []string{"cloud-provider=external"}
+// which is the only way Oxide nodes are managed.
+const cloudProviderExternal = "cloud-provider=external"
+
+var kubeletArgsDefault = []string{cloudProviderExternal}
 
 const maxStatusImages = 3
 
@@ -130,10 +132,13 @@ func (c *Controller) Reconcile(
 	}
 	nodeClass.Status.Bootstrap.Kind = bootstrapper.Name()
 
-	nodeClass.Status.KubeletArgs = bootstrap.MergeKubeletArgs(
-		kubeletArgsDefault,
-		nodeClass.Spec.KubeletArgs,
-	)
+	// Reservations are per shape, so bootstrap adds them at launch; status carries
+	// the flags that hold for every node of the class.
+	kubelet, err := instancetype.ParseKubelet(nodeClass.Spec.Kubelet)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("unable to resolve kubelet configuration: %w", err)
+	}
+	nodeClass.Status.KubeletArgs = bootstrap.MergeKubeletArgs(kubeletArgsDefault, kubelet.Args)
 
 	cluster, err := c.resolveCluster(ctx, nodeClass)
 	if err != nil {

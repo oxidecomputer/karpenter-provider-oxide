@@ -64,7 +64,10 @@ is left out.`,
 			if err != nil {
 				return err
 			}
-			catalog, err := describe.Describe(cfg.IncrementPercent, provider.InstanceTypes(0))
+			catalog, err := describe.Describe(
+				cfg.IncrementPercent,
+				provider.InstanceTypes(instancetype.Options{}),
+			)
 			if err != nil {
 				return err
 			}

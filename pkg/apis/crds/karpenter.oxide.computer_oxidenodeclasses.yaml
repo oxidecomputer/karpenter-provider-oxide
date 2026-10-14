@@ -243,12 +243,138 @@ spec:
                       type: string
                   type: object
                 type: array
-              kubeletArgs:
-                description: KubeletArgs are extra kubelet arguments in "key=value"
-                  form applied to launched nodes.
-                items:
-                  type: string
-                type: array
+              kubelet:
+                description: Kubelet configures the kubelet on launched nodes.
+                properties:
+                  clusterDNS:
+                    description: ClusterDNS is the list of cluster DNS server addresses.
+                    items:
+                      type: string
+                    type: array
+                  cpuCFSQuota:
+                    description: CPUCFSQuota enables CPU CFS quota enforcement for
+                      containers that specify CPU limits.
+                    type: boolean
+                  evictionHard:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      EvictionHard maps eviction signals to the hard thresholds, absolute or a percentage of
+                      capacity, at which kubelet evicts. memory.available and nodefs.available replace the
+                      provider's own thresholds and are modeled into overhead; the rest only reach kubelet.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionHard are memory.available, nodefs.available,
+                        nodefs.inodesFree, imagefs.available, imagefs.inodesFree and
+                        pid.available
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                    - message: evictionHard values must be non-negative resource quantities
+                        or percentages
+                      rule: self.all(x, self[x].matches('^[0-9]+([.][0-9]+)?%$') ||
+                        (isQuantity(self[x]) && sign(quantity(self[x])) >= 0))
+                  evictionMaxPodGracePeriod:
+                    description: |-
+                      EvictionMaxPodGracePeriod is the longest grace period, in seconds, kubelet
+                      gives a pod it evicts for a soft threshold.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  evictionSoft:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      EvictionSoft maps eviction signals to the thresholds at which kubelet evicts once
+                      the signal's grace period has passed. Soft thresholds do not change allocatable.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionSoft are memory.available, nodefs.available,
+                        nodefs.inodesFree, imagefs.available, imagefs.inodesFree and
+                        pid.available
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                    - message: evictionSoft values must be non-negative resource quantities
+                        or percentages
+                      rule: self.all(x, self[x].matches('^[0-9]+([.][0-9]+)?%$') ||
+                        (isQuantity(self[x]) && sign(quantity(self[x])) >= 0))
+                  evictionSoftGracePeriod:
+                    additionalProperties:
+                      type: string
+                    description: EvictionSoftGracePeriod maps eviction signals to
+                      how long a soft threshold must hold before kubelet evicts.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionSoftGracePeriod are memory.available,
+                        nodefs.available, nodefs.inodesFree, imagefs.available, imagefs.inodesFree
+                        and pid.available
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                  imageGCHighThresholdPercent:
+                    description: |-
+                      ImageGCHighThresholdPercent is the disk usage percentage above which image
+                      garbage collection always runs.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  imageGCLowThresholdPercent:
+                    description: |-
+                      ImageGCLowThresholdPercent is the disk usage percentage below which image
+                      garbage collection never runs.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  kubeReserved:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      KubeReserved is held back for Kubernetes system components. Each key set here
+                      replaces the provider's own per-shape reservation for that resource.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for kubeReserved are cpu, memory, ephemeral-storage
+                        and pid
+                      rule: self.all(x, x in ['cpu','memory','ephemeral-storage','pid'])
+                    - message: kubeReserved values must be non-negative resource quantities
+                      rule: self.all(x, isQuantity(self[x]) && sign(quantity(self[x]))
+                        >= 0)
+                  maxPods:
+                    description: MaxPods caps the pods a node runs. The provider advertises
+                      110 by default.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  podsPerCore:
+                    description: |-
+                      PodsPerCore caps the pods a node runs at this many per vCPU. The lower of
+                      it and maxPods wins, as in kubelet.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  systemReserved:
+                    additionalProperties:
+                      type: string
+                    description: SystemReserved is held back for OS daemons and the
+                      kernel. The provider reserves nothing here by default.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for systemReserved are cpu, memory, ephemeral-storage
+                        and pid
+                      rule: self.all(x, x in ['cpu','memory','ephemeral-storage','pid'])
+                    - message: systemReserved values must be non-negative resource
+                        quantities
+                      rule: self.all(x, isQuantity(self[x]) && sign(quantity(self[x]))
+                        >= 0)
+                type: object
+                x-kubernetes-validations:
+                - message: imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent
+                  rule: '!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent)
+                    || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent'
+                - message: every evictionSoft signal needs a matching evictionSoftGracePeriod,
+                    or kubelet refuses to start
+                  rule: '!has(self.evictionSoft) || self.evictionSoft.all(e, has(self.evictionSoftGracePeriod)
+                    && e in self.evictionSoftGracePeriod)'
+                - message: every evictionSoftGracePeriod signal needs a matching evictionSoft
+                  rule: '!has(self.evictionSoftGracePeriod) || self.evictionSoftGracePeriod.all(e,
+                    has(self.evictionSoft) && e in self.evictionSoft)'
               server:
                 description: Server is the endpoint nodes use to join the cluster.
                 type: string
@@ -675,7 +801,8 @@ spec:
                   type: object
                 type: array
               kubeletArgs:
-                description: KubeletArgs are applied to launched nodes.
+                description: KubeletArgs are the rendered flags every node of this
+                  class starts with; bootstrap adds the per-shape reservations.
                 items:
                   type: string
                 type: array

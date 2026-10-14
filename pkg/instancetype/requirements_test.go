@@ -14,7 +14,7 @@ import (
 func TestRequirementsCoverTopologyLabels(t *testing.T) {
 	provider := providerUsing(t, nil, availability.New(nil))
 
-	it, ok := provider.Get("8-16", 0)
+	it, ok := provider.Get("8-16", Options{})
 	if !ok {
 		t.Fatal("instance type 8-16 is missing from the catalog")
 	}

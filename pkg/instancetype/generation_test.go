@@ -60,12 +60,12 @@ func TestCatalogUsesNexusInstanceLimits(t *testing.T) {
 
 	provider := NewProvider(nil, availability.New(nil))
 	for _, name := range []string{"385-790", "500-790", "385-1536"} {
-		if _, ok := provider.Get(name, 0); ok {
+		if _, ok := provider.Get(name, Options{}); ok {
 			t.Errorf("Get(%q) found an instance type above the Nexus vCPU limit", name)
 		}
 	}
 	for _, name := range []string{"384-790", "384-1536"} {
-		if _, ok := provider.Get(name, 0); !ok {
+		if _, ok := provider.Get(name, Options{}); !ok {
 			t.Errorf("Get(%q) did not find a maximum-vCPU instance type", name)
 		}
 	}
@@ -80,13 +80,13 @@ func TestShapeIncrementIsConfigurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := provider.Get("4-8", 0); !ok {
+	if _, ok := provider.Get("4-8", Options{}); !ok {
 		t.Error("a shape on both 100% progressions is missing")
 	}
-	if _, ok := provider.Get("3-8", 0); ok {
+	if _, ok := provider.Get("3-8", Options{}); ok {
 		t.Error("a CPU value outside the configured progression was generated")
 	}
-	if _, ok := provider.Get("4-12", 0); ok {
+	if _, ok := provider.Get("4-12", Options{}); ok {
 		t.Error("a memory value outside the configured progression was generated")
 	}
 }
@@ -108,7 +108,7 @@ func TestInstanceTypesHaveSchedulingLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	instanceType, ok := provider.Get("4-16", 0)
+	instanceType, ok := provider.Get("4-16", Options{})
 	if !ok {
 		t.Fatal("instance type 4-16 does not exist")
 	}
