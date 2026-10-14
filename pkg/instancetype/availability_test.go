@@ -38,7 +38,7 @@ func TestInstanceTypesReflectSharedAvailability(t *testing.T) {
 		want bool
 	}{
 		{"8-16", false},
-		{"16-30", false},
+		{"16-31", false},
 		{"4-8", true},
 	} {
 		instanceType, ok := provider.Get(tc.name, 0)
@@ -80,8 +80,8 @@ func TestInstanceTypesReflectSharedInventory(t *testing.T) {
 	}{
 		{"8-16", true},
 		{"4-8", true},
-		{"16-30", false},
-		{"8-64", false},
+		{"16-31", false},
+		{"8-67", false},
 	} {
 		instanceType, ok := provider.Get(tc.name, 0)
 		if !ok {

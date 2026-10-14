@@ -1,6 +1,7 @@
 package instancetype
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
@@ -70,8 +71,8 @@ func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 	for _, tc := range []struct{ cheaper, dearer string }{
 		{"2-4", "4-8"},
 		{"4-8", "4-16"},
-		{"1-4", "254-757"},
-		{"16-30", "16-64"},
+		{"1-4", "384-1536"},
+		{"16-31", "16-67"},
 	} {
 		a, ok := p.Get(tc.cheaper, 0)
 		if !ok {
@@ -84,6 +85,33 @@ func TestPriceOrdersSmallerShapesCheaper(t *testing.T) {
 		if a.Offerings[0].Price >= b.Offerings[0].Price {
 			t.Errorf("%s price %v is not cheaper than %s price %v",
 				tc.cheaper, a.Offerings[0].Price, tc.dearer, b.Offerings[0].Price)
+		}
+	}
+}
+
+func TestComparePriceMatchesSchedulerOrdering(t *testing.T) {
+	p := NewProvider(nil, availability.New(nil))
+	for _, tc := range []struct{ first, second string }{
+		{"2-4", "4-8"},
+		{"1-12", "2-10"},
+		{"1-12", "2-4"},
+		{"1-4", "1-8"},
+	} {
+		a, _ := InstanceTypeToSpecs(tc.first)
+		b, _ := InstanceTypeToSpecs(tc.second)
+		if ComparePrice(a, b) >= 0 {
+			t.Errorf("ComparePrice(%s, %s) >= 0, want %s first", tc.first, tc.second, tc.first)
+		}
+	}
+	shapes := make([]Specs, 0)
+	for _, it := range p.InstanceTypes(0) {
+		specs, _ := InstanceTypeToSpecs(it.Name)
+		shapes = append(shapes, specs)
+	}
+	slices.SortFunc(shapes, ComparePrice)
+	for i := 1; i < len(shapes); i++ {
+		if price(shapes[i-1]) > price(shapes[i]) {
+			t.Fatalf("%v sorted before dearer %v", shapes[i-1], shapes[i])
 		}
 	}
 }

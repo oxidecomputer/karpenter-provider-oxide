@@ -32,11 +32,10 @@ kubectl create secret generic oxide-api-token \
 
 ## Local simulation with KWOK
 
-The [KWOK stack](kwok/README.md) combines the production controller, a synthetic
-Node registration bridge, and pinned KWOK in one Helm chart. It supports kind or
+The [KWOK stack](kwok/README.md) combines the production controller-manager, a synthetic
+Node registration bridge, and pinned KWOK in one Helm chart. It supports KinD or
 an existing test cluster, plus a shareable bundle with local images. Supply your
-own Omicron/Nexus endpoint, credentials, image and subnet; the normal instance
-launch and cleanup paths remain in use.
+own Omicron/Nexus endpoint, credentials, image and subnet.
 
 ## Example
 

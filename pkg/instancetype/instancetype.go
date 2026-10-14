@@ -1,6 +1,7 @@
 package instancetype
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -37,12 +38,12 @@ const (
 
 	// These match Nexus MAX_VCPU_PER_INSTANCE and MAX_MEMORY_BYTES_PER_INSTANCE in
 	// omicron/nexus/src/app/mod.rs.
-	maxInstanceVCPUs     = 254
+	maxInstanceVCPUs     = 384
 	maxInstanceMemoryGiB = 1536
 
 	// DefaultShapeIncrementPercent is the default catalog step.
 	DefaultShapeIncrementPercent = 10.0
-	minInstanceMemoryGiB         = 4
+	minInstanceMemoryGiB         = 1
 
 	cpuCostWeight = 1.0
 	memCostWeight = 0.125
@@ -545,11 +546,15 @@ func evictionThreshold(
 	return list
 }
 
-// There is some overhead when allocating memory to a guest that scales as the shape increases in size.
-// These constants take that memory loss into account.
+// Propolis presents the whole shape, but the guest kernel keeps some of it
+// (struct page, text, firmware ranges). Measured loss on a rack: 1 GiB 68 MiB,
+// 4 GiB 185 MiB, 10 GiB 306 MiB, 40 GiB 858 MiB, 128 GiB 2260 MiB, 196 GiB
+// 3446 MiB. Each vCPU adds about 0.4 MiB (per-CPU chunks), which the slope's
+// slack covers at the catalog's 2 vCPU/GiB cap. These bound every point from
+// above so modeled allocatable never exceeds the node's.
 const (
 	guestMemoryFixedBytes int64 = 128 * MiB
-	guestMemoryLossBasisP int64 = 250
+	guestMemoryLossBasisP int64 = 200
 )
 
 // guestMemory is how much of a shape's memory the guest kernel actually reports.
@@ -659,6 +664,18 @@ func greatestCommonDivisor(a, b int) int {
 
 func price(specs Specs) float64 {
 	return float64(specs.Ncpus)*cpuCostWeight + float64(specs.MemInGiB)*memCostWeight
+}
+
+// ComparePrice orders shapes the way the scheduler does, cheapest first, so a launch
+// never picks a shape consolidation would immediately replace. Ties break on CPU, then memory.
+func ComparePrice(a, b Specs) int {
+	if pa, pb := price(a), price(b); pa != pb {
+		return cmp.Compare(pa, pb)
+	}
+	if delta := a.Ncpus - b.Ncpus; delta != 0 {
+		return delta
+	}
+	return a.MemInGiB - b.MemInGiB
 }
 
 type tier struct {

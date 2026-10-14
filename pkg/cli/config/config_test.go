@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"strings"
@@ -9,8 +9,8 @@ import (
 
 func TestShapeConfigFromEnv(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
-		t.Setenv(envInstanceTypeIncrementPercent, "")
-		cfg, err := shapeConfigFromEnv()
+		t.Setenv(EnvInstanceTypeIncrementPercent, "")
+		cfg, err := ShapeConfigFromEnv()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -24,8 +24,8 @@ func TestShapeConfigFromEnv(t *testing.T) {
 	})
 
 	t.Run("configured", func(t *testing.T) {
-		t.Setenv(envInstanceTypeIncrementPercent, "25")
-		cfg, err := shapeConfigFromEnv()
+		t.Setenv(EnvInstanceTypeIncrementPercent, "25")
+		cfg, err := ShapeConfigFromEnv()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -36,10 +36,10 @@ func TestShapeConfigFromEnv(t *testing.T) {
 
 	for _, value := range []string{"not-a-number", "0", "101", "NaN"} {
 		t.Run("invalid "+value, func(t *testing.T) {
-			t.Setenv(envInstanceTypeIncrementPercent, value)
-			_, err := shapeConfigFromEnv()
-			if err == nil || !strings.Contains(err.Error(), envInstanceTypeIncrementPercent) {
-				t.Fatalf("error = %v, want one naming %s", err, envInstanceTypeIncrementPercent)
+			t.Setenv(EnvInstanceTypeIncrementPercent, value)
+			_, err := ShapeConfigFromEnv()
+			if err == nil || !strings.Contains(err.Error(), EnvInstanceTypeIncrementPercent) {
+				t.Fatalf("error = %v, want one naming %s", err, EnvInstanceTypeIncrementPercent)
 			}
 		})
 	}

@@ -194,12 +194,7 @@ func (c *OxideCloudProvider) Create(
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
 		return specs, err == nil
 	})
-	slices.SortFunc(ordered, func(a, b instancetype.Specs) int {
-		if cpuDelta := a.Ncpus - b.Ncpus; cpuDelta != 0 {
-			return cpuDelta
-		}
-		return a.MemInGiB - b.MemInGiB
-	})
+	slices.SortFunc(ordered, instancetype.ComparePrice)
 
 	if len(ordered) == 0 {
 		return nil, fmt.Errorf("no instance types match NodeClaim requirements")

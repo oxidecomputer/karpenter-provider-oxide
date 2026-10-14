@@ -54,17 +54,17 @@ func TestGeneratedShapesHonorMemorySanityBound(t *testing.T) {
 }
 
 func TestCatalogUsesNexusInstanceLimits(t *testing.T) {
-	if got := CatalogLimits(); got != (Specs{Ncpus: 254, MemInGiB: 1536}) {
+	if got := CatalogLimits(); got != (Specs{Ncpus: 384, MemInGiB: 1536}) {
 		t.Errorf("CatalogLimits() = %v, want the Nexus instance limits", got)
 	}
 
 	provider := NewProvider(nil, availability.New(nil))
-	for _, name := range []string{"255-757", "384-757", "384-1536"} {
+	for _, name := range []string{"385-790", "500-790", "385-1536"} {
 		if _, ok := provider.Get(name, 0); ok {
 			t.Errorf("Get(%q) found an instance type above the Nexus vCPU limit", name)
 		}
 	}
-	for _, name := range []string{"254-757", "254-1536"} {
+	for _, name := range []string{"384-790", "384-1536"} {
 		if _, ok := provider.Get(name, 0); !ok {
 			t.Errorf("Get(%q) did not find a maximum-vCPU instance type", name)
 		}
