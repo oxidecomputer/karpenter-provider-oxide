@@ -15,6 +15,7 @@ const (
 // OxideBootDisk is one provider-owned boot disk.
 // +kubebuilder:object:root=true
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
+// +kubebuilder:printcolumn:name="Pool",type="string",JSONPath=".spec.poolRef.name"
 // +kubebuilder:printcolumn:name="NodeClass",type="string",JSONPath=".spec.nodeClassRef.name"
 // +kubebuilder:printcolumn:name="NodeClaim",type="string",JSONPath=".spec.claimRef.name"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
@@ -32,6 +33,9 @@ type OxideBootDisk struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.claimRef) || !has(self.claimRef) || self.claimRef == oldSelf.claimRef",message="claimRef can only be set or cleared, never reassigned"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.retire) || !oldSelf.retire || (has(self.retire) && self.retire)",message="retire cannot be cleared"
 type OxideBootDiskSpec struct {
+	// PoolRef is the OxideBootDiskPool that created the disk and sizes its retirement.
+	PoolRef BootDiskOwnerRef `json:"poolRef"`
+	// NodeClassRef is the OxideNodeClass the disk was built for, which is what a launch matches on.
 	NodeClassRef BootDiskOwnerRef `json:"nodeClassRef"`
 	DiskName     string           `json:"diskName"`
 	ImageID      string           `json:"imageID"`

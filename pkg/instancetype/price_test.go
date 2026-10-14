@@ -103,8 +103,9 @@ func TestComparePriceMatchesSchedulerOrdering(t *testing.T) {
 			t.Errorf("ComparePrice(%s, %s) >= 0, want %s first", tc.first, tc.second, tc.first)
 		}
 	}
-	shapes := make([]Specs, 0)
-	for _, it := range p.InstanceTypes(Options{}) {
+	instanceTypes := p.InstanceTypes(Options{})
+	shapes := make([]Specs, 0, len(instanceTypes))
+	for _, it := range instanceTypes {
 		specs, _ := InstanceTypeToSpecs(it.Name)
 		shapes = append(shapes, specs)
 	}

@@ -1,0 +1,10 @@
+apiVersion: karpenter.oxide.computer/v1alpha1
+kind: OxideBootDiskPool
+metadata:
+  name: default
+spec:
+  nodeClassRef:
+    name: default
+  minReady: 2
+  percentage: 10
+  maxReady: 20

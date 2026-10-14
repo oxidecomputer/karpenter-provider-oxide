@@ -193,21 +193,16 @@ func TestResolveStorageRejectsUnknownAndMissingSources(t *testing.T) {
 }
 
 func TestInvalidStorageClearsStaleLayoutAndMakesReadyFalse(t *testing.T) {
-	pool := &v1alpha1.BootDiskPoolStatus{Ready: 2}
 	nodeClass := storageNodeClass("20Gi", storageSet("512Mi", v1alpha1.DiskSetTypeDistributed))
 	nodeClass.Status.Storage = &v1alpha1.StorageStatus{
 		BootSizeBytes: 99,
 		DiskSets:      []v1alpha1.DiskSetStatus{{Name: "stale"}},
-		BootDiskPool:  pool,
 	}
 
 	if err := (&Controller{}).resolveStorage(context.Background(), nodeClass); err != nil {
 		t.Fatal(err)
 	}
-	if nodeClass.Status.Storage == nil || nodeClass.Status.Storage.BootDiskPool != pool {
-		t.Fatal("boot-pool status was not preserved")
-	}
-	if nodeClass.Status.Storage.BootSizeBytes != 0 || len(nodeClass.Status.Storage.DiskSets) != 0 {
+	if nodeClass.Status.Storage != nil {
 		t.Fatalf("stale resolved layout remains published: %#v", nodeClass.Status.Storage)
 	}
 	if ready := nodeClass.StatusConditions().Get(status.ConditionReady); !ready.IsFalse() {

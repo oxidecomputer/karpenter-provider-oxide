@@ -13,19 +13,10 @@ func (c *Controller) resolveStorage(
 	nodeClass *v1alpha1.OxideNodeClass,
 ) error {
 	sets := nodeClass.Spec.Storage.DiskSets
-	var bootDiskPool *v1alpha1.BootDiskPoolStatus
-	if nodeClass.Status.Storage != nil {
-		bootDiskPool = nodeClass.Status.Storage.BootDiskPool
-	}
-	if bootDiskPool == nil {
-		nodeClass.Status.Storage = nil
-	} else {
-		nodeClass.Status.Storage = &v1alpha1.StorageStatus{BootDiskPool: bootDiskPool}
-	}
+	nodeClass.Status.Storage = nil
 	resolved := &v1alpha1.StorageStatus{
 		BootSizeBytes: nodeClass.Spec.Storage.Boot.Size.Value(),
 		DiskSets:      make([]v1alpha1.DiskSetStatus, 0, len(sets)),
-		BootDiskPool:  bootDiskPool,
 	}
 
 	if err := nodeClass.Spec.Storage.Boot.ValidateSize(); err != nil {

@@ -397,37 +397,6 @@ spec:
                   boot:
                     description: Boot is the disk the instance boots from.
                     properties:
-                      pool:
-                        description: Pool keeps unused boot disks ready.
-                        properties:
-                          enabled:
-                            default: true
-                            description: Enabled defaults to true.
-                            type: boolean
-                          maxReady:
-                            default: 20
-                            description: MaxReady is the largest ready pool.
-                            format: int32
-                            minimum: 0
-                            type: integer
-                          minReady:
-                            default: 2
-                            description: MinReady is the smallest ready pool.
-                            format: int32
-                            minimum: 0
-                            type: integer
-                          percentage:
-                            default: 10
-                            description: Percentage is the ready disks per 100 nodes.
-                            format: int32
-                            maximum: 100
-                            minimum: 0
-                            type: integer
-                        type: object
-                        x-kubernetes-validations:
-                        - message: minReady must not exceed maxReady
-                          rule: '!has(self.minReady) || !has(self.maxReady) || self.minReady
-                            <= self.maxReady'
                       size:
                         anyOf:
                         - type: integer
@@ -831,35 +800,6 @@ spec:
               storage:
                 description: Storage is the resolved disk layout of a launched instance.
                 properties:
-                  bootDiskPool:
-                    description: BootDiskPool is the current unused boot disk pool.
-                    properties:
-                      claimed:
-                        format: int32
-                        type: integer
-                      configHash:
-                        type: string
-                      creating:
-                        format: int32
-                        type: integer
-                      desired:
-                        format: int32
-                        type: integer
-                      message:
-                        type: string
-                      ready:
-                        format: int32
-                        type: integer
-                      stale:
-                        format: int32
-                        type: integer
-                    required:
-                    - claimed
-                    - creating
-                    - desired
-                    - ready
-                    - stale
-                    type: object
                   bootSizeBytes:
                     description: BootSizeBytes is the boot disk size in bytes.
                     format: int64

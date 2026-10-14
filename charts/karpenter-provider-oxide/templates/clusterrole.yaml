@@ -105,6 +105,12 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidebootdisks", "oxidebootdisks/status", "oxidebootdisks/finalizers"]
     verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidebootdiskpools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidebootdiskpools/status"]
+    verbs: ["update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

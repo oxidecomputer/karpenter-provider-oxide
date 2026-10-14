@@ -22,3 +22,6 @@ rules:
   - apiGroups: ["karpenter.oxide.computer"]
     resources: ["oxidebootdisks", "oxidebootdisks/status"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.oxide.computer"]
+    resources: ["oxidebootdiskpools", "oxidebootdiskpools/status"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]

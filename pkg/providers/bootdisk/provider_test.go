@@ -36,7 +36,9 @@ func TestAcquireIsSingleUse(t *testing.T) {
 	if !ok {
 		t.Fatal("ConfigFor() did not resolve")
 	}
-	record := NewRecord(config, nodeClass)
+	record := NewRecord(config, &v1alpha1.OxideBootDiskPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", UID: types.UID("pool-uid")},
+	})
 	record.UID = types.UID("record-uid")
 	record.ResourceVersion = "1"
 	record.CreationTimestamp = metav1.NewTime(time.Now())

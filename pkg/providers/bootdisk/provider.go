@@ -75,7 +75,7 @@ func ConfigFor(nodeClass *v1alpha1.OxideNodeClass) (Config, bool) {
 	}, true
 }
 
-func NewRecord(config Config, nodeClass *v1alpha1.OxideNodeClass) *v1alpha1.OxideBootDisk {
+func NewRecord(config Config, pool *v1alpha1.OxideBootDiskPool) *v1alpha1.OxideBootDisk {
 	name := "kbd-" + config.Hash[:6] + "-" + strings.ReplaceAll(uuid.NewString()[:13], "-", "")
 	return &v1alpha1.OxideBootDisk{
 		ObjectMeta: metav1.ObjectMeta{
@@ -83,17 +83,21 @@ func NewRecord(config Config, nodeClass *v1alpha1.OxideNodeClass) *v1alpha1.Oxid
 			Finalizers: []string{v1alpha1.BootDiskFinalizer},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "OxideNodeClass",
-				Name:       nodeClass.Name,
-				UID:        nodeClass.UID,
+				Kind:       "OxideBootDiskPool",
+				Name:       pool.Name,
+				UID:        pool.UID,
 			}},
 		},
 		Spec: v1alpha1.OxideBootDiskSpec{
-			NodeClassRef: v1alpha1.BootDiskOwnerRef{Name: nodeClass.Name, UID: nodeClass.UID},
-			DiskName:     name,
-			ImageID:      config.ImageID,
-			SizeBytes:    config.SizeBytes,
-			ConfigHash:   config.Hash,
+			PoolRef: v1alpha1.BootDiskOwnerRef{Name: pool.Name, UID: pool.UID},
+			NodeClassRef: v1alpha1.BootDiskOwnerRef{
+				Name: config.NodeClass,
+				UID:  config.NodeClassUID,
+			},
+			DiskName:   name,
+			ImageID:    config.ImageID,
+			SizeBytes:  config.SizeBytes,
+			ConfigHash: config.Hash,
 		},
 		Status: v1alpha1.OxideBootDiskStatus{State: v1alpha1.BootDiskStatePending},
 	}
@@ -120,7 +124,7 @@ func (p *Provider) Acquire(
 	}
 
 	config, ok := ConfigFor(nodeClass)
-	if !ok || !nodeClass.Spec.Storage.Boot.PoolEnabled() {
+	if !ok {
 		return nil, nil
 	}
 	slices.SortFunc(list.Items, func(a, b v1alpha1.OxideBootDisk) int {

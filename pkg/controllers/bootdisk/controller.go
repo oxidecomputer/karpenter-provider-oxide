@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/awslabs/operatorpkg/reconciler"
@@ -43,15 +44,23 @@ type Controller struct {
 	lastOrphanScan time.Time
 }
 
+// poolState is one reconcile's view of every pool, keyed by pool UID.
 type poolState struct {
-	nodeClasses    []v1alpha1.OxideNodeClass
-	records        *v1alpha1.OxideBootDiskList
-	liveClaims     map[types.UID]struct{}
-	active         map[string]bool
-	classByUID     map[types.UID]*v1alpha1.OxideNodeClass
-	configByUID    map[types.UID]bootdiskprovider.Config
-	desiredByUID   map[types.UID]int32
-	recordsByClass map[types.UID][]*v1alpha1.OxideBootDisk
+	nodeClasses   []v1alpha1.OxideNodeClass
+	records       *v1alpha1.OxideBootDiskList
+	liveClaims    map[types.UID]struct{}
+	active        map[string]bool
+	poolByUID     map[types.UID]*v1alpha1.OxideBootDiskPool
+	configByUID   map[types.UID]bootdiskprovider.Config
+	desiredByUID  map[types.UID]int32
+	unresolved    map[types.UID]resolution
+	recordsByPool map[types.UID][]*v1alpha1.OxideBootDisk
+}
+
+// resolution is why a pool cannot size itself from its nodeclass.
+type resolution struct {
+	reason  string
+	message string
 }
 
 func NewController(
@@ -73,7 +82,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 		return reconciler.Result{RequeueAfter: period}, err
 	}
 	c.scanOrphans(ctx, state.records)
-	c.retireOld(state.recordsByClass, state.configByUID, state.desiredByUID)
+	c.retireOld(state.recordsByPool, state.configByUID, state.desiredByUID)
 	if err := c.createRecords(ctx, state); err != nil {
 		return reconciler.Result{RequeueAfter: period}, err
 	}
@@ -95,12 +104,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	}
 	_ = group.Wait()
 
-	if err := c.publish(
-		ctx,
-		state.classByUID,
-		state.configByUID,
-		state.desiredByUID,
-	); err != nil {
+	if err := c.publish(ctx, state); err != nil {
 		return reconciler.Result{RequeueAfter: period}, err
 	}
 	return reconciler.Result{RequeueAfter: period}, nil
@@ -108,10 +112,11 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 
 func (c *Controller) readState(ctx context.Context) (*poolState, error) {
 	nodeClasses := &v1alpha1.OxideNodeClassList{}
+	pools := &v1alpha1.OxideBootDiskPoolList{}
 	nodePools := &karpv1.NodePoolList{}
 	nodeClaims := &karpv1.NodeClaimList{}
 	records := &v1alpha1.OxideBootDiskList{}
-	for _, list := range []client.ObjectList{nodeClasses, nodePools, nodeClaims, records} {
+	for _, list := range []client.ObjectList{nodeClasses, pools, nodePools, nodeClaims, records} {
 		if err := c.kubeClient.List(ctx, list); err != nil {
 			return nil, err
 		}
@@ -145,42 +150,77 @@ func (c *Controller) readState(ctx context.Context) (*poolState, error) {
 		}
 	}
 
-	classByUID := map[types.UID]*v1alpha1.OxideNodeClass{}
+	classByName := map[string]*v1alpha1.OxideNodeClass{}
+	for i := range nodeClasses.Items {
+		classByName[nodeClasses.Items[i].Name] = &nodeClasses.Items[i]
+	}
+
+	// The oldest pool naming a nodeclass owns it; later duplicates idle with a condition.
+	slices.SortFunc(pools.Items, func(a, b v1alpha1.OxideBootDiskPool) int {
+		if by := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); by != 0 {
+			return by
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	claimedBy := map[string]string{}
+	poolByUID := map[types.UID]*v1alpha1.OxideBootDiskPool{}
 	configByUID := map[types.UID]bootdiskprovider.Config{}
 	desiredByUID := map[types.UID]int32{}
-	for i := range nodeClasses.Items {
-		nodeClass := &nodeClasses.Items[i]
-		classByUID[nodeClass.UID] = nodeClass
-		config, ok := bootdiskprovider.ConfigFor(nodeClass)
-		if ok {
-			configByUID[nodeClass.UID] = config
+	unresolved := map[types.UID]resolution{}
+	for i := range pools.Items {
+		pool := &pools.Items[i]
+		poolByUID[pool.UID] = pool
+		className := pool.Spec.NodeClassRef.Name
+		nodeClass, found := classByName[className]
+		if !found {
+			unresolved[pool.UID] = resolution{
+				reason:  v1alpha1.ConditionReasonNodeClassNotFound,
+				message: fmt.Sprintf("OxideNodeClass %q does not exist", className),
+			}
+			continue
 		}
-		activeClass := active[nodeClass.Name] || population[nodeClass.Name] > 0
-		if ok && nodeClass.DeletionTimestamp.IsZero() &&
-			nodeClass.Spec.Storage.Boot.PoolEnabled() && activeClass {
-			desiredByUID[nodeClass.UID] = target(
-				nodeClass.Spec.Storage.Boot,
-				population[nodeClass.Name],
-			)
+		if owner, claimed := claimedBy[className]; claimed {
+			unresolved[pool.UID] = resolution{
+				reason: v1alpha1.ConditionReasonNodeClassClaimed,
+				message: fmt.Sprintf(
+					"OxideNodeClass %q is already pooled by OxideBootDiskPool %q", className, owner,
+				),
+			}
+			continue
+		}
+		claimedBy[className] = pool.Name
+		config, ok := bootdiskprovider.ConfigFor(nodeClass)
+		if !ok {
+			unresolved[pool.UID] = resolution{
+				reason:  v1alpha1.ConditionReasonNodeClassNotReady,
+				message: fmt.Sprintf("OxideNodeClass %q has no resolved boot image", className),
+			}
+			continue
+		}
+		configByUID[pool.UID] = config
+		activeClass := active[className] || population[className] > 0
+		if pool.DeletionTimestamp.IsZero() && nodeClass.DeletionTimestamp.IsZero() && activeClass {
+			desiredByUID[pool.UID] = target(pool.Spec, population[className])
 		}
 	}
 
-	recordsByClass := map[types.UID][]*v1alpha1.OxideBootDisk{}
+	recordsByPool := map[types.UID][]*v1alpha1.OxideBootDisk{}
 	for i := range records.Items {
 		record := &records.Items[i]
-		uid := record.Spec.NodeClassRef.UID
-		recordsByClass[uid] = append(recordsByClass[uid], record)
+		uid := record.Spec.PoolRef.UID
+		recordsByPool[uid] = append(recordsByPool[uid], record)
 	}
 
 	return &poolState{
-		nodeClasses:    nodeClasses.Items,
-		records:        records,
-		liveClaims:     liveClaims,
-		active:         active,
-		classByUID:     classByUID,
-		configByUID:    configByUID,
-		desiredByUID:   desiredByUID,
-		recordsByClass: recordsByClass,
+		nodeClasses:   nodeClasses.Items,
+		records:       records,
+		liveClaims:    liveClaims,
+		active:        active,
+		poolByUID:     poolByUID,
+		configByUID:   configByUID,
+		desiredByUID:  desiredByUID,
+		unresolved:    unresolved,
+		recordsByPool: recordsByPool,
 	}, nil
 }
 
@@ -203,23 +243,23 @@ func (c *Controller) createRecords(ctx context.Context, state *poolState) error 
 	budget := c.creationBudget(state.nodeClasses, state.active)
 	for uid, desired := range state.desiredByUID {
 		config := state.configByUID[uid]
-		class := state.classByUID[uid]
+		pool := state.poolByUID[uid]
 		current := int32(0)
-		for _, record := range state.recordsByClass[uid] {
+		for _, record := range state.recordsByPool[uid] {
 			if record.DeletionTimestamp.IsZero() && !record.Spec.Retire &&
 				record.Spec.ClaimRef == nil && record.Spec.ConfigHash == config.Hash {
 				current++
 			}
 		}
 		for current < desired && budget >= config.SizeBytes {
-			record := bootdiskprovider.NewRecord(config, class)
+			record := bootdiskprovider.NewRecord(config, pool)
 			if err := c.kubeClient.Create(ctx, record); err != nil {
 				return err
 			}
 			state.records.Items = append(state.records.Items, *record)
 			index := len(state.records.Items) - 1
-			state.recordsByClass[uid] = append(
-				state.recordsByClass[uid],
+			state.recordsByPool[uid] = append(
+				state.recordsByPool[uid],
 				&state.records.Items[index],
 			)
 			current++
@@ -229,10 +269,10 @@ func (c *Controller) createRecords(ctx context.Context, state *poolState) error 
 	return nil
 }
 
-func target(boot v1alpha1.BootDisk, nodes int64) int32 {
-	ready := int32((nodes*int64(boot.PoolPercentage()) + 99) / 100)
-	ready = max(ready, boot.PoolMinReady())
-	return min(ready, boot.PoolMaxReady())
+func target(spec v1alpha1.OxideBootDiskPoolSpec, nodes int64) int32 {
+	ready := int32((nodes*int64(spec.EffectivePercentage()) + 99) / 100)
+	ready = max(ready, spec.EffectiveMinReady())
+	return min(ready, spec.EffectiveMaxReady())
 }
 
 func oxideRef(ref *karpv1.NodeClassReference) bool {
@@ -452,26 +492,21 @@ func distributedBytes(storage v1alpha1.Storage) int64 {
 	return total
 }
 
-func (c *Controller) publish(
-	ctx context.Context,
-	classes map[types.UID]*v1alpha1.OxideNodeClass,
-	configs map[types.UID]bootdiskprovider.Config,
-	desired map[types.UID]int32,
-) error {
+func (c *Controller) publish(ctx context.Context, state *poolState) error {
 	records := &v1alpha1.OxideBootDiskList{}
 	if err := c.kubeClient.List(ctx, records); err != nil {
 		return err
 	}
 	metrics.BootDiskPoolDisks.Reset()
-	for uid, nodeClass := range classes {
-		status := v1alpha1.BootDiskPoolStatus{Desired: desired[uid]}
-		config, configured := configs[uid]
+	for uid, pool := range state.poolByUID {
+		status := v1alpha1.OxideBootDiskPoolStatus{Desired: state.desiredByUID[uid]}
+		config, configured := state.configByUID[uid]
 		if configured {
 			status.ConfigHash = config.Hash
 		}
 		for i := range records.Items {
 			record := &records.Items[i]
-			if record.Spec.NodeClassRef.UID != uid {
+			if record.Spec.PoolRef.UID != uid {
 				continue
 			}
 			switch {
@@ -488,39 +523,39 @@ func (c *Controller) publish(
 				status.Message = record.Status.Message
 			}
 		}
-		current := &v1alpha1.OxideNodeClass{}
-		if err := c.kubeClient.Get(
-			ctx,
-			client.ObjectKey{Name: nodeClass.Name},
-			current,
-		); err != nil {
+		current := &v1alpha1.OxideBootDiskPool{}
+		if err := c.kubeClient.Get(ctx, client.ObjectKey{Name: pool.Name}, current); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
 			return err
 		}
-		if current.Status.Storage == nil {
-			continue
-		}
 		stored := current.DeepCopy()
-		current.Status.Storage.BootDiskPool = &status
-		if !equality.Semantic.DeepEqual(
-			stored.Status.Storage.BootDiskPool,
-			current.Status.Storage.BootDiskPool,
-		) {
+		status.Conditions = current.Status.Conditions
+		current.Status = status
+		if why, failed := state.unresolved[uid]; failed {
+			current.StatusConditions().SetFalse(
+				v1alpha1.ConditionTypeNodeClassResolved, why.reason, why.message,
+			)
+		} else {
+			current.StatusConditions().SetTrue(v1alpha1.ConditionTypeNodeClassResolved)
+		}
+		if !equality.Semantic.DeepEqual(stored.Status, current.Status) {
 			err := c.kubeClient.Status().Patch(ctx, current, client.MergeFrom(stored))
 			if err != nil && !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("publish boot disk pool for %s: %w", current.Name, err)
+				return fmt.Errorf("publish boot disk pool %s: %w", current.Name, err)
 			}
 		}
-		for state, count := range map[string]int32{
+		for kind, count := range map[string]int32{
 			"desired":  status.Desired,
 			"ready":    status.Ready,
 			"creating": status.Creating,
 			"claimed":  status.Claimed,
 			"stale":    status.Stale,
 		} {
-			metrics.BootDiskPoolDisks.WithLabelValues(current.Name, state).Set(float64(count))
+			metrics.BootDiskPoolDisks.WithLabelValues(
+				pool.Name, pool.Spec.NodeClassRef.Name, kind,
+			).Set(float64(count))
 		}
 	}
 	return nil

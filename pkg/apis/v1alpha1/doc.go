@@ -24,6 +24,8 @@ func AddToScheme(s *runtime.Scheme) error {
 		&OxideNodeClassList{},
 		&OxideBootDisk{},
 		&OxideBootDiskList{},
+		&OxideBootDiskPool{},
+		&OxideBootDiskPoolList{},
 		&OxideCapacity{},
 		&OxideCapacityList{},
 	)

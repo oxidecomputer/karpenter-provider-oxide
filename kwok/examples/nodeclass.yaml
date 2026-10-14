@@ -14,8 +14,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-      pool:
-        enabled: false
   imageSelector:
     - id: REPLACE_IMAGE_UUID
   subnetSelector:

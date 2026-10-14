@@ -45,6 +45,7 @@ const (
 
 	providerLabel     = "provider"
 	nodeClassLabel    = "nodeclass"
+	poolLabel         = "pool"
 	operationLabel    = "operation"
 	resourceKindLabel = "resource_kind"
 )
@@ -131,8 +132,8 @@ var (
 		Namespace: namespace,
 		Subsystem: bootDiskSubsystem,
 		Name:      "disks",
-		Help:      "Boot disks by NodeClass and state.",
-	}, []string{nodeClassLabel, stateLabel})
+		Help:      "Boot disks by pool, NodeClass, and state.",
+	}, []string{poolLabel, nodeClassLabel, stateLabel})
 
 	BootDiskPoolAcquisitions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,

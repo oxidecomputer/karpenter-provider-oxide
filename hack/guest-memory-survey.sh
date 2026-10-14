@@ -80,6 +80,7 @@ launch() {
 }
 
 # Prints key=value pairs for everything the guest kernel knows about its memory.
+# shellcheck disable=SC2016 # expanded on the guest, not here
 REMOTE='
 set -e
 phys=0
