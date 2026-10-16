@@ -77,7 +77,7 @@ func TestKubeletArgsStatusRendersTheTypedConfiguration(t *testing.T) {
 	kubelet, err := instancetype.ParseKubelet(&v1alpha1.KubeletConfiguration{
 		MaxPods:        &maxPods,
 		ClusterDNS:     []string{"10.96.0.10"},
-		SystemReserved: map[string]string{"memory": "1Gi"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 	})
 	if err != nil {
 		t.Fatal(err)

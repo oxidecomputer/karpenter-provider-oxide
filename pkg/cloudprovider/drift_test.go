@@ -399,7 +399,7 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 			name: "the kubelet reservations",
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
 				spec.Kubelet = &v1alpha1.KubeletConfiguration{
-					SystemReserved: map[string]string{"memory": "1Gi"},
+					SystemReserved: map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 				}
 			},
 		},

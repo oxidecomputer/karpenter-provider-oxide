@@ -28,9 +28,9 @@ func TestKubeletArgsCarriesShapeReservations(t *testing.T) {
 
 func TestKubeletArgsCarriesNodeClassReservations(t *testing.T) {
 	kubelet, err := instancetype.ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"cpu": "500m", "memory": "1Gi", "pid": "4096"},
-		KubeReserved:   map[string]string{"memory": "2Gi"},
-		EvictionHard:   map[string]string{"memory.available": "5%", "imagefs.available": "15%"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"cpu": "500m", "memory": "1Gi", "pid": "4096"},
+		KubeReserved:   map[string]v1alpha1.KubeletValue{"memory": "2Gi"},
+		EvictionHard:   map[string]v1alpha1.KubeletValue{"memory.available": "5%", "imagefs.available": "15%"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestKubeletArgsWithoutShapeReservesOnlyWhatTheNodeClassAsks(t *testing.T) {
 	}
 
 	kubelet, err := instancetype.ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"memory": "1Gi"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -80,9 +80,9 @@ func TestReservationsMatchInstanceTypeOverhead(t *testing.T) {
 	for name, kubelet := range map[string]*v1alpha1.KubeletConfiguration{
 		"defaults": nil,
 		"overrides": {
-			SystemReserved: map[string]string{"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "2Gi"},
-			KubeReserved:   map[string]string{"cpu": "1", "ephemeral-storage": "3Gi"},
-			EvictionHard:   map[string]string{"memory.available": "10%", "nodefs.available": "4Gi"},
+			SystemReserved: map[string]v1alpha1.KubeletValue{"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "2Gi"},
+			KubeReserved:   map[string]v1alpha1.KubeletValue{"cpu": "1", "ephemeral-storage": "3Gi"},
+			EvictionHard:   map[string]v1alpha1.KubeletValue{"memory.available": "10%", "nodefs.available": "4Gi"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

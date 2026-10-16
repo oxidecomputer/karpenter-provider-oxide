@@ -272,11 +272,16 @@ spec:
                     type: boolean
                   evictionHard:
                     additionalProperties:
+                      description: |-
+                        KubeletValue is a resource quantity or percentage in a kubelet map. The length
+                        bound keeps the CEL rules over those maps within the API server's cost budget.
+                      maxLength: 64
                       type: string
                     description: |-
                       EvictionHard maps eviction signals to the hard thresholds, absolute or a percentage of
                       capacity, at which kubelet evicts. memory.available and nodefs.available replace the
                       provider's own thresholds and are modeled into overhead; the rest only reach kubelet.
+                    maxProperties: 6
                     type: object
                     x-kubernetes-validations:
                     - message: valid keys for evictionHard are memory.available, nodefs.available,
@@ -296,10 +301,15 @@ spec:
                     type: integer
                   evictionSoft:
                     additionalProperties:
+                      description: |-
+                        KubeletValue is a resource quantity or percentage in a kubelet map. The length
+                        bound keeps the CEL rules over those maps within the API server's cost budget.
+                      maxLength: 64
                       type: string
                     description: |-
                       EvictionSoft maps eviction signals to the thresholds at which kubelet evicts once
                       the signal's grace period has passed. Soft thresholds do not change allocatable.
+                    maxProperties: 6
                     type: object
                     x-kubernetes-validations:
                     - message: valid keys for evictionSoft are memory.available, nodefs.available,
@@ -339,10 +349,15 @@ spec:
                     type: integer
                   kubeReserved:
                     additionalProperties:
+                      description: |-
+                        KubeletValue is a resource quantity or percentage in a kubelet map. The length
+                        bound keeps the CEL rules over those maps within the API server's cost budget.
+                      maxLength: 64
                       type: string
                     description: |-
                       KubeReserved is held back for Kubernetes system components. Each key set here
                       replaces the provider's own per-shape reservation for that resource.
+                    maxProperties: 4
                     type: object
                     x-kubernetes-validations:
                     - message: valid keys for kubeReserved are cpu, memory, ephemeral-storage
@@ -366,9 +381,14 @@ spec:
                     type: integer
                   systemReserved:
                     additionalProperties:
+                      description: |-
+                        KubeletValue is a resource quantity or percentage in a kubelet map. The length
+                        bound keeps the CEL rules over those maps within the API server's cost budget.
+                      maxLength: 64
                       type: string
                     description: SystemReserved is held back for OS daemons and the
                       kernel. The provider reserves nothing here by default.
+                    maxProperties: 4
                     type: object
                     x-kubernetes-validations:
                     - message: valid keys for systemReserved are cpu, memory, ephemeral-storage

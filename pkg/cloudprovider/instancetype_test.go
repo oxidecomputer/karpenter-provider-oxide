@@ -133,9 +133,9 @@ func TestGetInstanceTypesModelsTheNodeClassKubeletReservations(t *testing.T) {
 	plain := nodeClassWithBootDisk("plain", 20<<30, 80<<30)
 	reserved := nodeClassWithBootDisk("reserved", 20<<30, 80<<30)
 	reserved.Spec.Kubelet = &v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"cpu": "500m", "memory": "1Gi"},
-		KubeReserved:   map[string]string{"memory": "3Gi"},
-		EvictionHard:   map[string]string{"memory.available": "10%"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"cpu": "500m", "memory": "1Gi"},
+		KubeReserved:   map[string]v1alpha1.KubeletValue{"memory": "3Gi"},
+		EvictionHard:   map[string]v1alpha1.KubeletValue{"memory.available": "10%"},
 	}
 	c := &OxideCloudProvider{
 		kubeClient: fake.NewClientBuilder().
@@ -202,7 +202,7 @@ func TestGetInstanceTypesModelsTheNodeClassKubeletReservations(t *testing.T) {
 func TestGetInstanceTypesRejectsUnparseableKubeletReservations(t *testing.T) {
 	nodeClass := nodeClassWithBootDisk("default", 20<<30, 80<<30)
 	nodeClass.Spec.Kubelet = &v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"memory": "lots"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"memory": "lots"},
 	}
 	c := &OxideCloudProvider{
 		kubeClient: fake.NewClientBuilder().

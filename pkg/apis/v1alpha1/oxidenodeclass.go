@@ -60,6 +60,11 @@ type OxideNodeClassSpec struct {
 	CPUPlatform string `json:"cpuPlatform,omitempty"`
 }
 
+// KubeletValue is a resource quantity or percentage in a kubelet map. The length
+// bound keeps the CEL rules over those maps within the API server's cost budget.
+// +kubebuilder:validation:MaxLength=64
+type KubeletValue string
+
 // KubeletConfiguration is the subset of kubelet configuration the provider lets a
 // nodeclass set, named after the upstream kubelet types. Fields that change what a
 // node can hold (reservations, eviction thresholds, pod limits) are modeled into
@@ -83,29 +88,33 @@ type KubeletConfiguration struct {
 	// +optional
 	PodsPerCore *int32 `json:"podsPerCore,omitempty"`
 	// SystemReserved is held back for OS daemons and the kernel. The provider reserves nothing here by default.
+	// +kubebuilder:validation:MaxProperties=4
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x in ['cpu','memory','ephemeral-storage','pid'])",message="valid keys for systemReserved are cpu, memory, ephemeral-storage and pid"
 	// +kubebuilder:validation:XValidation:rule="self.all(x, isQuantity(self[x]) && sign(quantity(self[x])) >= 0)",message="systemReserved values must be non-negative resource quantities"
 	// +optional
-	SystemReserved map[string]string `json:"systemReserved,omitempty"`
+	SystemReserved map[string]KubeletValue `json:"systemReserved,omitempty"`
 	// KubeReserved is held back for Kubernetes system components. Each key set here
 	// replaces the provider's own per-shape reservation for that resource.
+	// +kubebuilder:validation:MaxProperties=4
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x in ['cpu','memory','ephemeral-storage','pid'])",message="valid keys for kubeReserved are cpu, memory, ephemeral-storage and pid"
 	// +kubebuilder:validation:XValidation:rule="self.all(x, isQuantity(self[x]) && sign(quantity(self[x])) >= 0)",message="kubeReserved values must be non-negative resource quantities"
 	// +optional
-	KubeReserved map[string]string `json:"kubeReserved,omitempty"`
+	KubeReserved map[string]KubeletValue `json:"kubeReserved,omitempty"`
 	// EvictionHard maps eviction signals to the hard thresholds, absolute or a percentage of
 	// capacity, at which kubelet evicts. memory.available and nodefs.available replace the
 	// provider's own thresholds and are modeled into overhead; the rest only reach kubelet.
+	// +kubebuilder:validation:MaxProperties=6
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])",message="valid keys for evictionHard are memory.available, nodefs.available, nodefs.inodesFree, imagefs.available, imagefs.inodesFree and pid.available"
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self[x].matches('^[0-9]+([.][0-9]+)?%$') || (isQuantity(self[x]) && sign(quantity(self[x])) >= 0))",message="evictionHard values must be non-negative resource quantities or percentages"
 	// +optional
-	EvictionHard map[string]string `json:"evictionHard,omitempty"`
+	EvictionHard map[string]KubeletValue `json:"evictionHard,omitempty"`
 	// EvictionSoft maps eviction signals to the thresholds at which kubelet evicts once
 	// the signal's grace period has passed. Soft thresholds do not change allocatable.
+	// +kubebuilder:validation:MaxProperties=6
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])",message="valid keys for evictionSoft are memory.available, nodefs.available, nodefs.inodesFree, imagefs.available, imagefs.inodesFree and pid.available"
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self[x].matches('^[0-9]+([.][0-9]+)?%$') || (isQuantity(self[x]) && sign(quantity(self[x])) >= 0))",message="evictionSoft values must be non-negative resource quantities or percentages"
 	// +optional
-	EvictionSoft map[string]string `json:"evictionSoft,omitempty"`
+	EvictionSoft map[string]KubeletValue `json:"evictionSoft,omitempty"`
 	// EvictionSoftGracePeriod maps eviction signals to how long a soft threshold must hold before kubelet evicts.
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])",message="valid keys for evictionSoftGracePeriod are memory.available, nodefs.available, nodefs.inodesFree, imagefs.available, imagefs.inodesFree and pid.available"
 	// +optional

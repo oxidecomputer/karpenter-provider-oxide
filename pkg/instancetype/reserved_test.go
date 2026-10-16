@@ -46,9 +46,9 @@ func TestThresholdOfMatchesKubelet(t *testing.T) {
 
 func TestReservedForLayersTheNodeClassOverTheShape(t *testing.T) {
 	kubelet, err := ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"cpu": "1"},
-		KubeReserved:   map[string]string{"memory": "2Gi"},
-		EvictionHard:   map[string]string{"nodefs.available": "5%"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"cpu": "1"},
+		KubeReserved:   map[string]v1alpha1.KubeletValue{"memory": "2Gi"},
+		EvictionHard:   map[string]v1alpha1.KubeletValue{"nodefs.available": "5%"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestReservedForLayersTheNodeClassOverTheShape(t *testing.T) {
 // catalog build; neither may see the other's overhead.
 func TestCatalogIsCachedPerKubeletReservations(t *testing.T) {
 	kubelet, err := ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"memory": "1Gi"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestEphemeralStorageHonorsTheNodeClassReservations(t *testing.T) {
 		t.Fatal("a 10GiB boot disk should carry ephemeral storage by default")
 	}
 	kubelet, err := ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]string{"ephemeral-storage": "9Gi"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{"ephemeral-storage": "9Gi"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestParseKubeletRendersTheFlagsKubeletActsOn(t *testing.T) {
 		ClusterDNS:  []string{"10.96.0.10", "fd00::10"},
 		MaxPods:     int32p(60),
 		PodsPerCore: int32p(8),
-		EvictionSoft: map[string]string{
+		EvictionSoft: map[string]v1alpha1.KubeletValue{
 			"imagefs.available": "15%", "memory.available": "500Mi",
 		},
 		EvictionSoftGracePeriod: map[string]metav1.Duration{
@@ -190,7 +190,7 @@ func TestParseKubeletRendersTheFlagsKubeletActsOn(t *testing.T) {
 		ImageGCHighThresholdPercent: int32p(85),
 		ImageGCLowThresholdPercent:  int32p(80),
 		CPUCFSQuota:                 &quota,
-		SystemReserved:              map[string]string{"memory": "1Gi"},
+		SystemReserved:              map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -194,7 +194,7 @@ func parseReserved(kc *v1alpha1.KubeletConfiguration) (Reserved, error) {
 	}
 	var evictionHard map[string]Threshold
 	for signal, value := range kc.EvictionHard {
-		threshold, err := ParseThreshold(value)
+		threshold, err := ParseThreshold(string(value))
 		if err != nil {
 			return Reserved{}, fmt.Errorf("invalid evictionHard %s: %w", signal, err)
 		}
@@ -210,13 +210,13 @@ func parseReserved(kc *v1alpha1.KubeletConfiguration) (Reserved, error) {
 	}, nil
 }
 
-func parseResourceList(in map[string]string) (corev1.ResourceList, error) {
+func parseResourceList(in map[string]v1alpha1.KubeletValue) (corev1.ResourceList, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
 	list := make(corev1.ResourceList, len(in))
 	for name, value := range in {
-		quantity, err := resource.ParseQuantity(value)
+		quantity, err := resource.ParseQuantity(string(value))
 		if err != nil {
 			return nil, fmt.Errorf("%s %q: %w", name, value, err)
 		}
