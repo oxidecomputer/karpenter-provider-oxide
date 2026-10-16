@@ -28,9 +28,16 @@ func TestKubeletArgsCarriesShapeReservations(t *testing.T) {
 
 func TestKubeletArgsCarriesNodeClassReservations(t *testing.T) {
 	kubelet, err := instancetype.ParseKubelet(&v1alpha1.KubeletConfiguration{
-		SystemReserved: map[string]v1alpha1.KubeletValue{"cpu": "500m", "memory": "1Gi", "pid": "4096"},
-		KubeReserved:   map[string]v1alpha1.KubeletValue{"memory": "2Gi"},
-		EvictionHard:   map[string]v1alpha1.KubeletValue{"memory.available": "5%", "imagefs.available": "15%"},
+		SystemReserved: map[string]v1alpha1.KubeletValue{
+			"cpu":    "500m",
+			"memory": "1Gi",
+			"pid":    "4096",
+		},
+		KubeReserved: map[string]v1alpha1.KubeletValue{"memory": "2Gi"},
+		EvictionHard: map[string]v1alpha1.KubeletValue{
+			"memory.available":  "5%",
+			"imagefs.available": "15%",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
