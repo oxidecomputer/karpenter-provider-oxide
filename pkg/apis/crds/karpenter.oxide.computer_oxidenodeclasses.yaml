@@ -156,6 +156,16 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one bootstrap provider must be set
                   rule: '[has(self.rke2), has(self.kubeadm)].exists_one(x, x)'
+              cpuPlatform:
+                description: |-
+                  CPUPlatform pins launched instances to a minimum CPU platform, using the Oxide API
+                  names. Leave it unset to take the most general platform of whichever sled an
+                  instance lands on.
+                enum:
+                - amd_milan
+                - amd_turin
+                - amd_turin_v2
+                type: string
               env:
                 description: |-
                   Env contains environment variables exported before userData and the provider-generated

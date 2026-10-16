@@ -52,6 +52,12 @@ type OxideNodeClassSpec struct {
 	// network interface. Requires the fleet-wide jumbo-frames opt-in to be enabled by an operator.
 	// +optional
 	JumboFrames *bool `json:"jumboFrames,omitempty"`
+	// CPUPlatform pins launched instances to a minimum CPU platform, using the Oxide API
+	// names. Leave it unset to take the most general platform of whichever sled an
+	// instance lands on.
+	// +kubebuilder:validation:Enum=amd_milan;amd_turin;amd_turin_v2
+	// +optional
+	CPUPlatform string `json:"cpuPlatform,omitempty"`
 }
 
 // KubeletConfiguration is the subset of kubelet configuration the provider lets a
