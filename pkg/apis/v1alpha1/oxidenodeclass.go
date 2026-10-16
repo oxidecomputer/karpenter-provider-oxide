@@ -48,6 +48,10 @@ type OxideNodeClassSpec struct {
 	// Affinity controls which Oxide affinity and anti-affinity groups launched instances join.
 	// +optional
 	Affinity *Affinity `json:"affinity,omitempty"`
+	// JumboFrames opts launched instances in to jumbo frames (8500 byte MTU) on their primary
+	// network interface. Requires the fleet-wide jumbo-frames opt-in to be enabled by an operator.
+	// +optional
+	JumboFrames *bool `json:"jumboFrames,omitempty"`
 }
 
 // KubeletConfiguration is the subset of kubelet configuration the provider lets a

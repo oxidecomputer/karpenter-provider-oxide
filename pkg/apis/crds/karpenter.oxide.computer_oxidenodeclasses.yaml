@@ -243,6 +243,11 @@ spec:
                       type: string
                   type: object
                 type: array
+              jumboFrames:
+                description: |-
+                  JumboFrames opts launched instances in to jumbo frames (8500 byte MTU) on their primary
+                  network interface. Requires the fleet-wide jumbo-frames opt-in to be enabled by an operator.
+                type: boolean
               kubelet:
                 description: Kubelet configures the kubelet on launched nodes.
                 properties:

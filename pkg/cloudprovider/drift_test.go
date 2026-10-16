@@ -427,6 +427,13 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "jumboFrames",
+			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
+				jumbo := true
+				spec.JumboFrames = &jumbo
+			},
+		},
 	}
 
 	base := &v1alpha1.OxideNodeClass{

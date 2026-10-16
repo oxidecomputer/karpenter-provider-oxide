@@ -295,6 +295,8 @@ func (c *OxideCloudProvider) Create(
 			Ncpus:       oxide.InstanceCpuCount(instanceType.Ncpus),
 			UserData:    base64.StdEncoding.EncodeToString([]byte(userData)),
 
+			EnableJumboFrames: nodeClass.Spec.JumboFrames,
+
 			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
 
 			BootDisk: boot.attachment,
