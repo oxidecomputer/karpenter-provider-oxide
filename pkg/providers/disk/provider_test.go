@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 )
 
@@ -25,7 +26,11 @@ func TestWaitDetachedUsesTheFreshlyReadState(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(current)
 	}))
 	t.Cleanup(server.Close)
-	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +62,11 @@ func TestDeleteOwnedVerifiesBeforeDeleting(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(disk)
 	}))
 	t.Cleanup(server.Close)
-	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +107,11 @@ func TestDeleteOwnedEventuallyRetriesTransientFailures(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(disk)
 	}))
 	t.Cleanup(server.Close)
-	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

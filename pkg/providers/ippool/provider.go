@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
@@ -86,38 +87,27 @@ func (p *Provider) resolve(
 			continue
 		}
 
-		nameOrID := lo.Ternary(
-			ephemeralIP.Pool.ID != "",
-			ephemeralIP.Pool.ID,
-			ephemeralIP.Pool.Name,
-		)
-		pool, err := p.ox.IpPoolView(ctx, oxide.IpPoolViewParams{Pool: oxide.NameOrId(nameOrID)})
+		nameOrID := lo.CoalesceOrEmpty(string(ephemeralIP.Pool.ID), string(ephemeralIP.Pool.Name))
+		pools, failed, err := p.lookUp(ctx, ephemeralIP, nameOrID)
 		if err != nil {
-
-			return reading{
-				unresolved: []v1alpha1.EphemeralIP{ephemeralIP},
-				reason:     v1alpha1.ConditionReasonIPPoolNotFound,
-				message:    fmt.Sprintf("IP pool %q could not be read: %v", nameOrID, err),
-			}, nil
+			return reading{}, err
+		}
+		if failed != nil {
+			return *failed, nil
 		}
 
-		if ephemeralIP.IPVersion != "" && ephemeralIP.IPVersion != string(pool.IpVersion) {
-			return reading{
-				unresolved: []v1alpha1.EphemeralIP{ephemeralIP},
-				reason:     v1alpha1.ConditionReasonIPVersionMismatch,
-				message: fmt.Sprintf(
-					"IP pool %q allocates %s addresses but the entry asks for %s",
-					nameOrID,
-					pool.IpVersion,
-					ephemeralIP.IPVersion,
-				),
-			}, nil
+		entry := v1alpha1.OxideEphemeralIP{
+			IPVersion: string(pools[0].IpVersion),
+			PoolID:    pools[0].Id,
+			PoolName:  string(pools[0].Name),
 		}
-		resolved = append(resolved, v1alpha1.OxideEphemeralIP{
-			IPVersion: string(pool.IpVersion),
-			PoolID:    pool.Id,
-			PoolName:  string(pool.Name),
-		})
+		for _, pool := range pools[1:] {
+			entry.Fallbacks = append(
+				entry.Fallbacks,
+				v1alpha1.OxideIPPool{ID: pool.Id, Name: string(pool.Name)},
+			)
+		}
+		resolved = append(resolved, entry)
 	}
 
 	for i, ephemeralIP := range resolved {
@@ -140,6 +130,74 @@ func (p *Provider) resolve(
 	return reading{resolved: resolved}, nil
 }
 
+// lookUp finds the pools an entry allocates from, oldest first, or the reading to publish when it cannot.
+func (p *Provider) lookUp(
+	ctx context.Context,
+	ephemeralIP v1alpha1.EphemeralIP,
+	nameOrID string,
+) ([]oxide.SiloIpPool, *reading, error) {
+	var matched []oxide.SiloIpPool
+	if ephemeralIP.Pool.Name.IsPattern() {
+		pools, err := p.ox.IpPoolListAllPages(ctx, oxide.IpPoolListParams{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to list IP pools: %w", err)
+		}
+		matched = lo.Filter(pools, func(pool oxide.SiloIpPool, _ int) bool {
+			return ephemeralIP.Pool.Name.Matches(string(pool.Name))
+		})
+		if len(matched) == 0 {
+			return nil, &reading{
+				unresolved: []v1alpha1.EphemeralIP{ephemeralIP},
+				reason:     v1alpha1.ConditionReasonIPPoolNotFound,
+				message:    fmt.Sprintf("no IP pool matched %q", nameOrID),
+			}, nil
+		}
+		slices.SortStableFunc(matched, byAge)
+	} else {
+		pool, err := p.ox.IpPoolView(ctx, oxide.IpPoolViewParams{Pool: oxide.NameOrId(nameOrID)})
+		if err != nil {
+			return nil, &reading{
+				unresolved: []v1alpha1.EphemeralIP{ephemeralIP},
+				reason:     v1alpha1.ConditionReasonIPPoolNotFound,
+				message:    fmt.Sprintf("IP pool %q could not be read: %v", nameOrID, err),
+			}, nil
+		}
+		matched = []oxide.SiloIpPool{*pool}
+	}
+
+	// Fallbacks must keep the entry in one family; without a version asked for, the oldest match sets it.
+	version := lo.CoalesceOrEmpty(oxide.IpVersion(ephemeralIP.IPVersion), matched[0].IpVersion)
+	family := lo.Filter(matched, func(pool oxide.SiloIpPool, _ int) bool {
+		return pool.IpVersion == version
+	})
+	if len(family) == 0 {
+		return nil, &reading{
+			unresolved: []v1alpha1.EphemeralIP{ephemeralIP},
+			reason:     v1alpha1.ConditionReasonIPVersionMismatch,
+			message: fmt.Sprintf(
+				"IP pool %q allocates %s addresses but the entry asks for %s",
+				strings.Join(lo.Map(matched, func(pool oxide.SiloIpPool, _ int) string {
+					return string(pool.Name)
+				}), ", "),
+				matched[0].IpVersion,
+				ephemeralIP.IPVersion,
+			),
+		}, nil
+	}
+	return family, nil, nil
+}
+
+func byAge(a, b oxide.SiloIpPool) int {
+	switch {
+	case a.TimeCreated == nil || b.TimeCreated == nil:
+		return strings.Compare(string(a.Name), string(b.Name))
+	case a.TimeCreated.Equal(*b.TimeCreated):
+		return strings.Compare(string(a.Name), string(b.Name))
+	default:
+		return a.TimeCreated.Compare(*b.TimeCreated)
+	}
+}
+
 // DriftReason compares the addresses the instance was launched with against the entries the nodeclass declares now.
 func (p *Provider) DriftReason(
 	nodeClaim *karpv1.NodeClaim,
@@ -159,9 +217,16 @@ func (p *Provider) DriftReason(
 		if !held {
 			return providers.DriftReasonEphemeralIP
 		}
-		if ephemeralIP.PoolID != "" && record.PoolID != ephemeralIP.PoolID {
+		if ephemeralIP.PoolID != "" && !allocatesFrom(ephemeralIP, record.PoolID) {
 			return providers.DriftReasonEphemeralIP
 		}
 	}
 	return ""
+}
+
+func allocatesFrom(ephemeralIP v1alpha1.OxideEphemeralIP, poolID string) bool {
+	return poolID == ephemeralIP.PoolID ||
+		slices.ContainsFunc(ephemeralIP.Fallbacks, func(pool v1alpha1.OxideIPPool) bool {
+			return pool.ID == poolID
+		})
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -21,18 +22,24 @@ type Result = resolver.Resolution[v1alpha1.OxideSnapshot, v1alpha1.SnapshotSelec
 
 // Provider is everything that talks to the Oxide API about snapshots.
 type Provider struct {
-	ox *oxide.Client
+	ox       *oxide.Client
+	projects *project.Resolver
+	cache    *resolver.Cache[reading]
+}
 
-	project string
-	cache   *resolver.Cache[[]v1alpha1.OxideSnapshot]
+// reading is one resolution as cached: the snapshots matched, and the selectors that found their
+// snapshot in a project other than the one they meant.
+type reading struct {
+	snapshots []v1alpha1.OxideSnapshot
+	misplaced []string
 }
 
 // NewProvider returns a provider that re-resolves a selector's snapshots once its reading is older than ttl.
-func NewProvider(ox *oxide.Client, project string, ttl time.Duration) *Provider {
+func NewProvider(ox *oxide.Client, projects *project.Resolver, ttl time.Duration) *Provider {
 	return &Provider{
-		ox:      ox,
-		project: project,
-		cache:   resolver.NewCache[[]v1alpha1.OxideSnapshot]("snapshot", ttl),
+		ox:       ox,
+		projects: projects,
+		cache:    resolver.NewCache[reading]("snapshot", ttl),
 	}
 }
 
@@ -47,7 +54,7 @@ func (p *Provider) Resolve(
 	entry, err := p.cache.Get(
 		ctx,
 		resolver.Fingerprint(selectors),
-		func(ctx context.Context) ([]v1alpha1.OxideSnapshot, error) {
+		func(ctx context.Context) (reading, error) {
 			return p.resolve(ctx, selectors)
 		},
 	)
@@ -55,12 +62,16 @@ func (p *Provider) Resolve(
 		return Result{}, err
 	}
 	result := Result{
-		Resolved: slices.Clone(entry.Value),
+		Resolved: slices.Clone(entry.Value.snapshots),
 		Age:      entry.Age(time.Now()),
 		Stale:    entry.Stale,
 	}
 
-	if len(result.Resolved) == 0 {
+	switch {
+	case len(entry.Value.misplaced) > 0:
+		result.Reason = v1alpha1.ConditionReasonProjectMismatch
+		result.Message = strings.Join(entry.Value.misplaced, "; ")
+	case len(result.Resolved) == 0:
 		result.Unmatched = selectors
 		result.Reason = v1alpha1.ConditionReasonSnapshotsNotFound
 		result.Message = DescribeSelectors(selectors)
@@ -71,49 +82,66 @@ func (p *Provider) Resolve(
 func (p *Provider) resolve(
 	ctx context.Context,
 	selectors []v1alpha1.SnapshotSelector,
-) ([]v1alpha1.OxideSnapshot, error) {
+) (reading, error) {
+	var out reading
 	var resolved []oxide.Snapshot
 	var listSelectors []v1alpha1.SnapshotSelector
 
 	for _, selector := range selectors {
 		nameOrID := ""
-		project := p.projectFor(selector)
-		if selector.ID != "" {
-			nameOrID = selector.ID
-			project = ""
-		} else if selector.Name != "" && !strings.Contains(selector.Name, "*") {
-			nameOrID = selector.Name
-		} else {
+		switch {
+		case selector.ID != "":
+			nameOrID = string(selector.ID)
+		case selector.Name != "" && !selector.Name.IsPattern():
+			nameOrID = string(selector.Name)
+		default:
 			listSelectors = append(listSelectors, selector)
 			continue
 		}
+		in := project.Scope(p.projects.For(selector.Project), nameOrID)
 		snapshot, err := p.ox.SnapshotView(ctx, oxide.SnapshotViewParams{
 			Snapshot: oxide.NameOrId(nameOrID),
-			Project:  oxide.NameOrId(project),
+			Project:  in,
 		})
 		if err != nil {
 			if errors.Is(err, oxide.ErrObjectNotFound) {
 				continue
 			}
-			return nil, fmt.Errorf("snapshot %q from project %q: %w", nameOrID, project, err)
+			return reading{}, fmt.Errorf("snapshot %q from project %q: %w", nameOrID, in, err)
+		}
+		if selector.Name != "" && !selector.Name.Matches(string(snapshot.Name)) {
+			continue
+		}
+		if selector.ID != "" {
+			intended := p.projects.For(selector.Project)
+			ok, err := p.projects.Matches(ctx, intended, snapshot.ProjectId)
+			if err != nil {
+				return reading{}, err
+			}
+			if !ok {
+				out.misplaced = append(out.misplaced, fmt.Sprintf(
+					"snapshot %s is in project %s, not project %s",
+					snapshot.Id, snapshot.ProjectId, intended,
+				))
+				continue
+			}
 		}
 		resolved = append(resolved, *snapshot)
 	}
 
-	for project, grouped := range lo.GroupBy(
+	for in, grouped := range lo.GroupBy(
 		listSelectors,
-		func(selector v1alpha1.SnapshotSelector) string { return p.projectFor(selector) },
+		func(selector v1alpha1.SnapshotSelector) string { return p.projects.For(selector.Project) },
 	) {
 		snapshots, err := p.ox.SnapshotListAllPages(ctx, oxide.SnapshotListParams{
-			Project: oxide.NameOrId(project),
+			Project: oxide.NameOrId(in),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("unable to list snapshots in project %q: %w", project, err)
+			return reading{}, fmt.Errorf("unable to list snapshots in project %q: %w", in, err)
 		}
 		for _, selector := range grouped {
 			for _, snapshot := range snapshots {
-				if selector.Name != "" &&
-					!resolver.MatchName(selector.Name, string(snapshot.Name)) {
+				if selector.Name != "" && !selector.Name.Matches(string(snapshot.Name)) {
 					continue
 				}
 				resolved = append(resolved, snapshot)
@@ -136,8 +164,8 @@ func (p *Provider) resolve(
 		return b.TimeCreated.Compare(*a.TimeCreated)
 	})
 
-	return lo.Map(resolved, func(snapshot oxide.Snapshot, _ int) v1alpha1.OxideSnapshot {
-		out := v1alpha1.OxideSnapshot{
+	out.snapshots = lo.Map(resolved, func(snapshot oxide.Snapshot, _ int) v1alpha1.OxideSnapshot {
+		s := v1alpha1.OxideSnapshot{
 			ID:        snapshot.Id,
 			Name:      string(snapshot.Name),
 			Project:   snapshot.ProjectId,
@@ -145,17 +173,11 @@ func (p *Provider) resolve(
 			SizeBytes: int64(snapshot.Size),
 		}
 		if snapshot.TimeCreated != nil {
-			out.TimeCreated = metav1.NewTime(*snapshot.TimeCreated)
+			s.TimeCreated = metav1.NewTime(*snapshot.TimeCreated)
 		}
-		return out
-	}), nil
-}
-
-func (p *Provider) projectFor(selector v1alpha1.SnapshotSelector) string {
-	if selector.Project != "" {
-		return selector.Project
-	}
-	return p.project
+		return s
+	})
+	return out, nil
 }
 
 // DescribeSelectors renders snapshot selectors back as the terms they were written with.
@@ -166,8 +188,8 @@ func DescribeSelectors(selectors []v1alpha1.SnapshotSelector) string {
 	described := lo.Map(selectors, func(selector v1alpha1.SnapshotSelector, _ int) string {
 		terms := []string{}
 		for _, term := range []struct{ key, value string }{
-			{"id", selector.ID},
-			{"name", selector.Name},
+			{"id", string(selector.ID)},
+			{"name", string(selector.Name)},
 			{"project", selector.Project},
 		} {
 			if term.value != "" {

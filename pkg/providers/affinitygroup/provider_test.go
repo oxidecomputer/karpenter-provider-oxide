@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -53,9 +55,9 @@ func TestDescribeSelectors(t *testing.T) {
 }
 
 const (
-	groupID  = "77777777-0000-4000-8000-000000000001"
-	groupIDB = "77777777-0000-4000-8000-000000000002"
-	project  = "prod"
+	groupID     = "77777777-0000-4000-8000-000000000001"
+	groupIDB    = "77777777-0000-4000-8000-000000000002"
+	projectName = "prod"
 )
 
 type fakeAPI struct {
@@ -95,7 +97,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -126,7 +132,7 @@ func selecting(names ...string) *v1alpha1.OxideNodeClass {
 	for _, name := range names {
 		class.Spec.Affinity.AntiAffinityGroupSelector = append(
 			class.Spec.Affinity.AntiAffinityGroupSelector,
-			v1alpha1.AffinityGroupSelector{Name: name},
+			v1alpha1.AffinityGroupSelector{Name: selection.WildcardSelector(name)},
 		)
 	}
 	return class
@@ -134,7 +140,7 @@ func selecting(names ...string) *v1alpha1.OxideNodeClass {
 
 func TestResolveWithNoAffinityAsksNothing(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 
 	got, err := provider.Resolve(context.Background(), &v1alpha1.OxideNodeClass{})
 	if err != nil {
@@ -152,7 +158,7 @@ func TestResolveWithNoAffinityAsksNothing(t *testing.T) {
 
 func TestResolveMatchesEveryGroupAWildcardSelects(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 
 	got, err := provider.Resolve(context.Background(), selecting("rack-*"))
 	if err != nil {
@@ -172,7 +178,7 @@ func TestResolveMatchesEveryGroupAWildcardSelects(t *testing.T) {
 
 func TestASelectorThatMatchedNothingIsReportedRatherThanPublished(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 
 	got, err := provider.Resolve(context.Background(), selecting("gone-*"))
 	if err != nil {
@@ -201,7 +207,7 @@ func TestASelectorThatMatchedNothingIsReportedRatherThanPublished(t *testing.T) 
 
 func TestResolveServesACacheHit(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 	class := selecting("rack-*")
 
 	for range 3 {
@@ -216,7 +222,7 @@ func TestResolveServesACacheHit(t *testing.T) {
 
 func TestResolvePastTheTTLListsAgain(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, 0)
+	provider := NewProvider(api.server(t), projectName, 0)
 	class := selecting("rack-*")
 
 	for range 2 {
@@ -231,7 +237,7 @@ func TestResolvePastTheTTLListsAgain(t *testing.T) {
 
 func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 
 	for _, name := range []string{"rack-*", "rack-s*"} {
 		if _, err := provider.Resolve(context.Background(), selecting(name)); err != nil {
@@ -245,7 +251,7 @@ func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 
 func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	api := &fakeAPI{antiAffinity: fakeGroups()}
-	provider := NewProvider(api.server(t), project, time.Hour)
+	provider := NewProvider(api.server(t), projectName, time.Hour)
 
 	second := selecting("rack-*")
 	second.Name = "another"
@@ -267,10 +273,10 @@ func TestTheProjectIsPartOfTheKey(t *testing.T) {
 	client := api.server(t)
 	class := selecting("rack-*")
 
-	for _, project := range []string{"prod", "staging"} {
+	for _, in := range []string{"prod", "staging"} {
 		if _, err := NewProvider(
 			client,
-			project,
+			in,
 			time.Hour,
 		).Resolve(context.Background(), class); err != nil {
 			t.Fatalf("Resolve() error = %v", err)

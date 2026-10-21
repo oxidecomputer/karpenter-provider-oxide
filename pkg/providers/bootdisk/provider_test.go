@@ -11,6 +11,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -64,7 +65,11 @@ func TestAcquireIsSingleUse(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(disk)
 	}))
 	t.Cleanup(server.Close)
-	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +177,11 @@ func TestUnclaimReturnsADetachedDiskToThePool(t *testing.T) {
 				},
 			))
 			t.Cleanup(server.Close)
-			ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+			ox, err := oxide.NewClient(
+				oxide.WithHost(server.URL),
+				oxide.WithToken("token"),
+				projecttest.WithGuard(t),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}

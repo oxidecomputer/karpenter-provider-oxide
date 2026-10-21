@@ -31,6 +31,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/ippool"
+	projectprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
@@ -137,13 +138,14 @@ func Run() error {
 		return err
 	}
 
-	images := image.NewProvider(ox, providers.CoalesceWindow)
-	subnets := subnet.NewProvider(ox, providers.CoalesceWindow)
+	projects := projectprovider.NewResolver(ox, project, providers.CoalesceWindow)
+	images := image.NewProvider(ox, projects, providers.CoalesceWindow)
+	subnets := subnet.NewProvider(ox, projects, providers.CoalesceWindow)
 	sshKeys := sshkey.NewProvider(ox, providers.CoalesceWindow)
 	ipPools := ippool.NewProvider(ox, providers.CoalesceWindow)
 	affinityGroups := affinitygroup.NewProvider(ox, project, providers.CoalesceWindow)
 
-	snapshots := snapshot.NewProvider(ox, project, providers.CoalesceWindow)
+	snapshots := snapshot.NewProvider(ox, projects, providers.CoalesceWindow)
 
 	clusterUID, err := ownership.ClusterUID(ctx, karpcore.GetAPIReader(), os.Getenv(envClusterID))
 	if err != nil {

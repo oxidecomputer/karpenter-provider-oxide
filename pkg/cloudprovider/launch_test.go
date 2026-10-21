@@ -11,6 +11,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,9 +53,9 @@ func TestExternalIPsIsOneAttachmentPerEntry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := externalIPs(tt.ephemeralIPs); len(got) != len(tt.ephemeralIPs) {
+			if got := externalIPSets(tt.ephemeralIPs)[0]; len(got) != len(tt.ephemeralIPs) {
 				t.Errorf(
-					"externalIPs() asked for %d attachments, want one per declared entry (%d)",
+					"externalIPSets() asked for %d attachments, want one per declared entry (%d)",
 					len(got),
 					len(tt.ephemeralIPs),
 				)
@@ -63,7 +64,27 @@ func TestExternalIPsIsOneAttachmentPerEntry(t *testing.T) {
 	}
 }
 
-func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
+func TestExternalIPSetsTriesEveryPoolCombinationFirstChoicesFirst(t *testing.T) {
+	sets := externalIPSets([]v1alpha1.OxideEphemeralIP{
+		{IPVersion: "v4", PoolName: "v4-a", Fallbacks: []v1alpha1.OxideIPPool{{Name: "v4-b"}}},
+		{IPVersion: "v6", PoolName: "v6-a", Fallbacks: []v1alpha1.OxideIPPool{{Name: "v6-b"}}},
+	})
+	got := make([]string, 0, len(sets))
+	for _, set := range sets {
+		names := make([]string, 0, len(set))
+		for _, externalIP := range set {
+			selector := externalIP.Value.(*oxide.ExternalIpCreateEphemeral).PoolSelector
+			names = append(names, string(selector.Value.(*oxide.PoolSelectorExplicit).Pool))
+		}
+		got = append(got, strings.Join(names, "+"))
+	}
+	want := []string{"v4-a+v6-a", "v4-a+v6-b", "v4-b+v6-a", "v4-b+v6-b"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("externalIPSets() = %v, want %v", got, want)
+	}
+}
+
+func TestExternalIPSetsSelectsThePoolTheEntryNamed(t *testing.T) {
 	tests := []struct {
 		name        string
 		ephemeralIP v1alpha1.OxideEphemeralIP
@@ -87,18 +108,21 @@ func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := externalIPs([]v1alpha1.OxideEphemeralIP{tt.ephemeralIP})
+			got := externalIPSets([]v1alpha1.OxideEphemeralIP{tt.ephemeralIP})[0]
 			if len(got) != 1 {
-				t.Fatalf("externalIPs() = %v, want one attachment", got)
+				t.Fatalf("externalIPSets() = %v, want one attachment", got)
 			}
 			ephemeral, ok := got[0].Value.(*oxide.ExternalIpCreateEphemeral)
 			if !ok {
 
-				t.Fatalf("externalIPs() asked for %T, want an ephemeral attachment", got[0].Value)
+				t.Fatalf(
+					"externalIPSets() asked for %T, want an ephemeral attachment",
+					got[0].Value,
+				)
 			}
 			if ephemeral.PoolSelector.Type() != tt.want.Type() {
 				t.Fatalf(
-					"externalIPs() selected the pool by %q, want %q",
+					"externalIPSets() selected the pool by %q, want %q",
 					ephemeral.PoolSelector.Type(),
 					tt.want.Type(),
 				)
@@ -107,13 +131,13 @@ func TestExternalIPsSelectsThePoolTheEntryNamed(t *testing.T) {
 			case *oxide.PoolSelectorExplicit:
 				got := ephemeral.PoolSelector.Value.(*oxide.PoolSelectorExplicit)
 				if got.Pool != want.Pool {
-					t.Errorf("externalIPs() named pool %q, want %q", got.Pool, want.Pool)
+					t.Errorf("externalIPSets() named pool %q, want %q", got.Pool, want.Pool)
 				}
 			case *oxide.PoolSelectorAuto:
 				got := ephemeral.PoolSelector.Value.(*oxide.PoolSelectorAuto)
 				if got.IpVersion != want.IpVersion {
 					t.Errorf(
-						"externalIPs() asked the default pool for %q, want %q",
+						"externalIPSets() asked the default pool for %q, want %q",
 						got.IpVersion,
 						want.IpVersion,
 					)
@@ -222,7 +246,11 @@ func TestReleaseUnstartedBootDiskRetiresWhenTheDiskIsUnreadable(t *testing.T) {
 		func(w http.ResponseWriter, _ *http.Request) {},
 	))
 	server.Close()
-	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	ox, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,7 +54,11 @@ func (f *memberAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	oxideClient, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	oxideClient, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}

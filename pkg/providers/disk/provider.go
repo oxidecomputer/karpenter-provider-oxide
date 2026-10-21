@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,10 +53,10 @@ func WithDeleteAttemptTimeout(timeout time.Duration) Option {
 }
 
 // NewProvider constructs an Oxide disk provider.
-func NewProvider(ox *oxide.Client, project string, opts ...Option) *Provider {
+func NewProvider(ox *oxide.Client, oxideProject string, opts ...Option) *Provider {
 	p := &Provider{
 		ox:                   ox,
-		project:              project,
+		project:              oxideProject,
 		pollInterval:         defaultPollInterval,
 		deleteTimeout:        DefaultDeleteTimeout,
 		deleteAttemptTimeout: defaultDeleteAttemptTimeout,
@@ -79,7 +79,7 @@ func (p *Provider) Create(ctx context.Context, body *oxide.DiskCreate) (*oxide.D
 func (p *Provider) View(ctx context.Context, ref string) (*oxide.Disk, error) {
 	return p.ox.DiskView(ctx, oxide.DiskViewParams{
 		Disk:    oxide.NameOrId(ref),
-		Project: p.projectFor(ref),
+		Project: project.Scope(p.project, ref),
 	})
 }
 
@@ -226,13 +226,6 @@ func (p *Provider) DeleteOwnedEventually(
 		return fmt.Errorf("unable to delete disk %s, %w", ref, err)
 	}
 	return nil
-}
-
-func (p *Provider) projectFor(ref string) oxide.NameOrId {
-	if _, err := uuid.Parse(ref); err == nil {
-		return ""
-	}
-	return oxide.NameOrId(p.project)
 }
 
 func isAttachable(state oxide.DiskStateState) bool {

@@ -73,9 +73,11 @@ spec:
                       properties:
                         id:
                           description: ID is the exact group UUID.
+                          pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                           type: string
                         name:
-                          description: Name is the name of a group.
+                          description: Name is the name of a group, "*" wildcards
+                            allowed.
                           type: string
                       type: object
                     type: array
@@ -88,9 +90,11 @@ spec:
                       properties:
                         id:
                           description: ID is the exact group UUID.
+                          pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                           type: string
                         name:
-                          description: Name is the name of a group.
+                          description: Name is the name of a group, "*" wildcards
+                            allowed.
                           type: string
                       type: object
                     type: array
@@ -216,9 +220,12 @@ spec:
                       properties:
                         id:
                           description: ID is the exact IP pool UUID.
+                          pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                           type: string
                         name:
-                          description: Name is the exact name of an IP pool.
+                          description: |-
+                            Name is the name of an IP pool, "*" wildcards allowed. When several pools match, the oldest
+                            is used and the rest are tried in turn as it runs out of addresses.
                           type: string
                       type: object
                       x-kubernetes-validations:
@@ -238,18 +245,22 @@ spec:
                   properties:
                     id:
                       description: ID is the exact image UUID.
+                      pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                       type: string
                     name:
-                      description: Name is the name of an image.
+                      description: Name is the name of an image, "*" wildcards allowed.
                       type: string
                     os:
                       description: OS is the image operating system.
                       type: string
                     project:
-                      description: Project where the image is located.
+                      description: |-
+                        Project where the image is located. Defaults to the controller's project plus the silo's
+                        images, and an image selected by ID must be a silo image or in it.
                       type: string
                     version:
-                      description: Version is the version of the image or OS.
+                      description: Version is the version of the image or OS, "*"
+                        wildcards allowed per segment.
                       type: string
                   type: object
                 type: array
@@ -419,9 +430,10 @@ spec:
                   properties:
                     id:
                       description: ID is the exact SSH key ID.
+                      pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                       type: string
                     name:
-                      description: Name is the exact SSH key name.
+                      description: Name is the name of an SSH key, "*" wildcards allowed.
                       type: string
                   type: object
                 type: array
@@ -471,19 +483,23 @@ spec:
                             properties:
                               id:
                                 description: ID is the exact image UUID.
+                                pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                                 type: string
                               name:
-                                description: Name is the name of an image.
+                                description: Name is the name of an image, "*" wildcards
+                                  allowed.
                                 type: string
                               os:
                                 description: OS is the image operating system.
                                 type: string
                               project:
-                                description: Project where the image is located.
+                                description: |-
+                                  Project where the image is located. Defaults to the controller's project plus the silo's
+                                  images, and an image selected by ID must be a silo image or in it.
                                 type: string
                               version:
                                 description: Version is the version of the image or
-                                  OS.
+                                  OS, "*" wildcards allowed per segment.
                                 type: string
                             type: object
                           type: array
@@ -532,12 +548,16 @@ spec:
                             properties:
                               id:
                                 description: ID is the exact snapshot UUID.
+                                pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                                 type: string
                               name:
-                                description: Name is the name of a snapshot.
+                                description: Name is the name of a snapshot, "*" wildcards
+                                  allowed.
                                 type: string
                               project:
-                                description: Project where the snapshot is located.
+                                description: |-
+                                  Project where the snapshot is located. Defaults to the controller's project, and a snapshot
+                                  selected by ID must be in it.
                                 type: string
                             type: object
                           type: array
@@ -607,18 +627,22 @@ spec:
                   properties:
                     id:
                       description: ID is the exact subnet ID.
+                      pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                       type: string
                     name:
-                      description: Name is the exact subnet name.
+                      description: Name is the name of a subnet, "*" wildcards allowed.
                       type: string
                     project:
-                      description: Project where the subnet is located.
+                      description: |-
+                        Project where the subnet is located. Defaults to the controller's project, and a subnet
+                        selected by ID or VPC ID must be in it.
                       type: string
                     vpcID:
                       description: VPCID is the exact VPC ID.
+                      pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
                       type: string
                     vpcName:
-                      description: VPCName is the exact VPC name.
+                      description: VPCName is the name of a VPC, "*" wildcards allowed.
                       type: string
                   type: object
                   x-kubernetes-validations:
@@ -759,6 +783,23 @@ spec:
                 items:
                   description: OxideEphemeralIP is one resolved entry of spec.ephemeralIPs.
                   properties:
+                    fallbacks:
+                      description: |-
+                        Fallbacks are the other pools a wildcard matched, oldest first, tried in turn when the
+                        pool before runs out of addresses.
+                      items:
+                        description: OxideIPPool is one pool an ephemeral IP entry
+                          may allocate from.
+                        properties:
+                          id:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - id
+                        - name
+                        type: object
+                      type: array
                     ipVersion:
                       description: IPVersion is the resolved address family, taken
                         from the pool when the spec named one.

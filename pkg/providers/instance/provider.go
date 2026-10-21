@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	diskprovider "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +37,8 @@ type Options struct {
 	Owner ownership.Marker
 	// AffinityGroups are the affinity groups, by ID, the instance joins between the create and the start.
 	AffinityGroups []string
+	// ExternalIPFallbacks are external IP sets tried in turn when a pool has no address left.
+	ExternalIPFallbacks [][]oxide.ExternalIpCreate
 }
 
 // OwnedDisk is a disk whose immutable ID and description marker have both been verified.
@@ -78,13 +80,13 @@ func WithDiskProvider(disks *diskprovider.Provider) Option {
 // NewProvider builds an instance provider.
 func NewProvider(
 	ox *oxide.Client,
-	project string,
+	oxideProject string,
 	onRelease func(context.Context, Released),
 	opts ...Option,
 ) *Provider {
 	p := &Provider{
 		ox:        ox,
-		project:   project,
+		project:   oxideProject,
 		onRelease: onRelease,
 		deadlines: DefaultDeadlines(),
 	}
@@ -92,7 +94,7 @@ func NewProvider(
 		opt(p)
 	}
 	if p.disks == nil {
-		p.disks = diskprovider.NewProvider(ox, project)
+		p.disks = diskprovider.NewProvider(ox, oxideProject)
 	}
 	return p
 }
@@ -135,7 +137,7 @@ func (p *Provider) Create(
 	log.FromContext(ctx).V(1).Info("disks created", "disks", createdDiskNames)
 
 	log.FromContext(ctx).V(1).Info("creating instance", "instance", params.Body.Name)
-	created, err := p.ox.InstanceCreate(ctx, params)
+	created, err := p.createInstance(ctx, params, opts.ExternalIPFallbacks)
 	if err != nil {
 		switch {
 
@@ -196,7 +198,7 @@ func (p *Provider) Delete(ctx context.Context, ref string, teardown Teardown) er
 
 	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
 		Instance: oxide.NameOrId(ref),
-		Project:  p.projectFor(ref),
+		Project:  project.Scope(p.project, ref),
 	})
 	if err != nil {
 		if errors.Is(err, oxide.ErrObjectNotFound) {
@@ -619,6 +621,34 @@ func (p *Provider) findInstance(ctx context.Context, name string) (*oxide.Instan
 
 const sendFailure = "error sending request:"
 
+// createInstance moves to the next external IP set each time the pool before has no address left.
+func (p *Provider) createInstance(
+	ctx context.Context,
+	params oxide.InstanceCreateParams,
+	fallbacks [][]oxide.ExternalIpCreate,
+) (*oxide.Instance, error) {
+	for {
+		created, err := p.ox.InstanceCreate(ctx, params)
+		if err == nil || len(fallbacks) == 0 || !addressesExhausted(err) {
+			return created, err
+		}
+		log.FromContext(ctx).Info(
+			"an IP pool has no address left, retrying with the next",
+			"instance", params.Body.Name,
+		)
+		body := *params.Body
+		body.ExternalIps, fallbacks = fallbacks[0], fallbacks[1:]
+		params.Body = &body
+	}
+}
+
+func addressesExhausted(err error) bool {
+	var httpErr *oxide.HTTPError
+	return errors.Is(err, oxide.ErrInsufficientCapacity) &&
+		errors.As(err, &httpErr) && httpErr.ErrorResponse != nil &&
+		strings.Contains(httpErr.ErrorResponse.Message, "No external IP addresses available")
+}
+
 func ambiguous(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -633,13 +663,6 @@ func ambiguous(ctx context.Context, err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), sendFailure)
-}
-
-func (p *Provider) projectFor(ref string) oxide.NameOrId {
-	if _, err := uuid.Parse(ref); err == nil {
-		return ""
-	}
-	return oxide.NameOrId(p.project)
 }
 
 func deletable(state oxide.InstanceState) bool {

@@ -9,8 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -23,7 +27,10 @@ const (
 )
 
 type fakeAPI struct {
+	// keys is what a list serves; a view serves whatever name it was asked for.
+	keys  []oxide.SshKey
 	views int
+	lists int
 }
 
 func (f *fakeAPI) server(t *testing.T) *oxide.Client {
@@ -31,6 +38,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+		if r.Method == http.MethodGet && path == "me/ssh-keys" {
+			f.lists++
+			writeJSON(t, w, http.StatusOK, map[string]any{"items": f.keys})
+			return
+		}
 		if r.Method != http.MethodGet || !strings.HasPrefix(path, "me/ssh-keys/") {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -38,11 +50,24 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 		}
 		f.views++
 		name := strings.TrimPrefix(path, "me/ssh-keys/")
-		writeJSON(t, w, http.StatusOK, oxide.SshKey{Id: sshKeyID, Name: oxide.Name(name)})
+		for _, key := range f.keys {
+			if string(key.Name) == name {
+				writeJSON(t, w, http.StatusOK, key)
+				return
+			}
+		}
+		writeJSON(t, w, http.StatusOK, oxide.SshKey{
+			Id:   uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String(),
+			Name: oxide.Name(name),
+		})
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -63,7 +88,7 @@ func nodeClass(names ...string) *v1alpha1.OxideNodeClass {
 	for _, name := range names {
 		class.Spec.SSHKeySelector = append(
 			class.Spec.SSHKeySelector,
-			v1alpha1.SSHKeySelector{Name: name},
+			v1alpha1.SSHKeySelector{Name: selection.WildcardSelector(name)},
 		)
 	}
 	return class
@@ -82,6 +107,33 @@ func TestResolveReturnsTheNamedKeys(t *testing.T) {
 	}
 	if got.Resolved[0].Name != "ops" || got.Resolved[1].Name != "ci" {
 		t.Errorf("Resolve() = %v, want the keys in the order they were selected", got.Resolved)
+	}
+}
+
+func TestAWildcardSelectsEveryMatchingKeyFromOneListing(t *testing.T) {
+	api := &fakeAPI{keys: []oxide.SshKey{
+		{Id: sshKeyID, Name: "ops-alice"},
+		{Id: sshKeyIDB, Name: "ops-bob"},
+		{Id: "55555555-0000-4000-8000-000000000003", Name: "ci"},
+	}}
+	provider := NewProvider(api.server(t), time.Hour)
+
+	got, err := provider.Resolve(context.Background(), nodeClass("ops-*", "ops-alice", "*-bob"))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	names := make([]string, 0, len(got.Resolved))
+	for _, key := range got.Resolved {
+		names = append(names, key.Name)
+	}
+	if len(names) != 2 || names[0] != "ops-alice" || names[1] != "ops-bob" {
+		t.Errorf("Resolve() = %v, want the two ops keys once each", names)
+	}
+	if api.lists != 1 || api.views != 1 {
+		t.Errorf(
+			"the API was listed %d times and viewed %d, want one listing shared and one view",
+			api.lists, api.views,
+		)
 	}
 }
 
@@ -153,7 +205,11 @@ func TestAKeyThatCannotBeViewedIsAnError(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}

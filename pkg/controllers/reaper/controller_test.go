@@ -11,6 +11,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,7 +111,11 @@ func (f *rackAPI) client(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	oxideClient, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	oxideClient, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}

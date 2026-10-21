@@ -285,6 +285,7 @@ func (c *OxideCloudProvider) Create(
 		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
 	}
 
+	externalIPSets := externalIPSets(nodeClass.Status.EphemeralIPs)
 	launched, err := c.instanceProvider.Create(ctx, oxide.InstanceCreateParams{
 		Project: oxide.NameOrId(c.project),
 		Body: &oxide.InstanceCreate{
@@ -319,7 +320,7 @@ func (c *OxideCloudProvider) Create(
 					},
 				},
 			},
-			ExternalIps: externalIPs(nodeClass.Status.EphemeralIPs),
+			ExternalIps: externalIPSets[0],
 			SshPublicKeys: lo.Map(
 				nodeClass.Status.SSHKeys,
 				func(sshKey v1alpha1.OxideSSHKey, _ int) oxide.NameOrId {
@@ -328,8 +329,9 @@ func (c *OxideCloudProvider) Create(
 			),
 		},
 	}, instance.Options{
-		Owner:          owner,
-		AffinityGroups: affinityGroups(nodeClass.Status.AffinityGroups),
+		Owner:               owner,
+		AffinityGroups:      affinityGroups(nodeClass.Status.AffinityGroups),
+		ExternalIPFallbacks: externalIPSets[1:],
 	})
 	if err != nil {
 		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, request, probe)
@@ -562,24 +564,42 @@ func (c *OxideCloudProvider) owner(nodeClaim *karpcorev1.NodeClaim) ownership.Ma
 	}
 }
 
-func externalIPs(ephemeralIPs []v1alpha1.OxideEphemeralIP) []oxide.ExternalIpCreate {
-	return lo.Map(
-		ephemeralIPs,
-		func(ephemeralIP v1alpha1.OxideEphemeralIP, _ int) oxide.ExternalIpCreate {
+// externalIPSets returns every combination of the entries' pools, the first choice of each
+// entry first, so a launch can fall back as pools run out of addresses.
+func externalIPSets(ephemeralIPs []v1alpha1.OxideEphemeralIP) [][]oxide.ExternalIpCreate {
+	sets := [][]oxide.ExternalIpCreate{{}}
+	for _, ephemeralIP := range ephemeralIPs {
+		extended := make([][]oxide.ExternalIpCreate, 0, len(sets)*(1+len(ephemeralIP.Fallbacks)))
+		for _, set := range sets {
+			for _, pool := range poolChoices(ephemeralIP) {
+				extended = append(extended, append(slices.Clone(set), pool))
+			}
+		}
+		sets = extended
+	}
+	return sets
+}
 
-			selector := oxide.PoolSelector{
+func poolChoices(ephemeralIP v1alpha1.OxideEphemeralIP) []oxide.ExternalIpCreate {
+	explicit := func(name string) oxide.ExternalIpCreate {
+		return oxide.ExternalIpCreate{Value: &oxide.ExternalIpCreateEphemeral{
+			PoolSelector: oxide.PoolSelector{
+				Value: &oxide.PoolSelectorExplicit{Pool: oxide.NameOrId(name)},
+			},
+		}}
+	}
+	if ephemeralIP.PoolName == "" {
+		return []oxide.ExternalIpCreate{{Value: &oxide.ExternalIpCreateEphemeral{
+			PoolSelector: oxide.PoolSelector{
 				Value: &oxide.PoolSelectorAuto{IpVersion: oxide.IpVersion(ephemeralIP.IPVersion)},
-			}
-			if ephemeralIP.PoolName != "" {
-				selector = oxide.PoolSelector{
-					Value: &oxide.PoolSelectorExplicit{Pool: oxide.NameOrId(ephemeralIP.PoolName)},
-				}
-			}
-			return oxide.ExternalIpCreate{
-				Value: &oxide.ExternalIpCreateEphemeral{PoolSelector: selector},
-			}
-		},
-	)
+			},
+		}}}
+	}
+	choices := []oxide.ExternalIpCreate{explicit(ephemeralIP.PoolName)}
+	for _, pool := range ephemeralIP.Fallbacks {
+		choices = append(choices, explicit(pool.Name))
+	}
+	return choices
 }
 
 func (c *OxideCloudProvider) ephemeralIPRecords(

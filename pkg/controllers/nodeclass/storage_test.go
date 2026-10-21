@@ -12,6 +12,8 @@ import (
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/image"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/snapshot"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -215,18 +217,25 @@ func sourceStorageController(t *testing.T, sourceSize int64, found bool) *Contro
 	created := time.Now()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
-		if !found {
+		image := oxide.Image{
+			Id: "image-id", Name: "source", Size: oxide.ByteCount(sourceSize),
+			TimeCreated: &created,
+		}
+		switch {
+		case r.Method == http.MethodGet && path == "images":
+			items := []oxide.Image{image}
+			if !found {
+				items = nil
+			}
+			writeStorageJSON(t, w, http.StatusOK, map[string]any{"items": items})
+			return
+		case !found:
 			writeStorageJSON(t, w, http.StatusNotFound, map[string]string{
 				"error_code": "ObjectNotFound", "message": "not found",
 			})
 			return
-		}
-		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "images/"):
-			writeStorageJSON(t, w, http.StatusOK, oxide.Image{
-				Id: "image-id", Name: "source", Size: oxide.ByteCount(sourceSize),
-				TimeCreated: &created,
-			})
+			writeStorageJSON(t, w, http.StatusOK, image)
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "snapshots/"):
 			writeStorageJSON(t, w, http.StatusOK, oxide.Snapshot{
 				Id: "snapshot-id", Name: "source", Size: oxide.ByteCount(sourceSize),
@@ -238,13 +247,18 @@ func sourceStorageController(t *testing.T, sourceSize int64, found bool) *Contro
 		}
 	}))
 	t.Cleanup(server.Close)
-	client, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	projects := project.NewResolver(client, "project", 0)
 	return &Controller{
-		images:    image.NewProvider(client, 0),
-		snapshots: snapshot.NewProvider(client, "project", 0),
+		images:    image.NewProvider(client, projects, 0),
+		snapshots: snapshot.NewProvider(client, projects, 0),
 	}
 }
 

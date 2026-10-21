@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -55,12 +58,27 @@ func TestDescribeSelectors(t *testing.T) {
 	}
 }
 
+const (
+	projectName    = "karpenter"
+	projectID      = "11111111-0000-4000-8000-000000000001"
+	otherProjectID = "11111111-0000-4000-8000-000000000002"
+)
+
 type fakeAPI struct {
 	images []oxide.Image
-	lists  int
-	views  int
+	// lists counts list calls by the project they named, "" being the silo.
+	lists map[string]int
+	views int
+	// viewQuery is the query string of the last view, to check what was sent alongside an ID.
+	viewQuery string
 	// listStatus, when set, is the status every list responds with instead of the images.
 	listStatus int
+}
+
+func newProvider(t *testing.T, api *fakeAPI, ttl time.Duration) *Provider {
+	t.Helper()
+	client := api.server(t)
+	return NewProvider(client, project.NewResolver(client, projectName, ttl), ttl)
 }
 
 func (f *fakeAPI) server(t *testing.T) *oxide.Client {
@@ -70,7 +88,10 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 		path := strings.TrimPrefix(r.URL.Path, "/v1/")
 		switch {
 		case r.Method == http.MethodGet && path == "images":
-			f.lists++
+			if f.lists == nil {
+				f.lists = map[string]int{}
+			}
+			f.lists[r.URL.Query().Get("project")]++
 			if f.listStatus != 0 {
 				writeJSON(t, w, f.listStatus, map[string]string{
 					"error_code": "InternalError", "message": "the rack is on fire",
@@ -81,6 +102,7 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "images/"):
 			f.views++
+			f.viewQuery = r.URL.RawQuery
 			name := strings.TrimPrefix(path, "images/")
 			for _, img := range f.images {
 				if string(img.Name) == name || img.Id == name {
@@ -90,6 +112,9 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			}
 			writeJSON(t, w, http.StatusNotFound, map[string]string{"error_code": "ObjectNotFound"})
 
+		case r.Method == http.MethodGet && path == "projects/"+projectName:
+			writeJSON(t, w, http.StatusOK, oxide.Project{Id: projectID, Name: projectName})
+
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -97,7 +122,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -137,7 +166,7 @@ func TestResolveReturnsTheMatchedImagesNewestFirst(t *testing.T) {
 		image("rke2-ubuntu-2", "33333333-0000-4000-8000-000000000002", 10),
 		image("other", "33333333-0000-4000-8000-000000000003", 20),
 	}}
-	provider := NewProvider(api.server(t), time.Minute)
+	provider := newProvider(t, api, time.Minute)
 
 	got, err := provider.Resolve(
 		context.Background(),
@@ -162,7 +191,7 @@ func TestResolveReturnsTheMatchedImagesNewestFirst(t *testing.T) {
 
 func TestResolveReportsTheSelectorsWhenNothingMatched(t *testing.T) {
 	api := &fakeAPI{}
-	provider := NewProvider(api.server(t), time.Minute)
+	provider := newProvider(t, api, time.Minute)
 
 	selector := v1alpha1.ImageSelector{Name: "rke2-*"}
 	got, err := provider.Resolve(context.Background(), nodeClass(selector))
@@ -194,7 +223,7 @@ func TestAnExactSelectorStillFiltersOnItsOtherTerms(t *testing.T) {
 	api := &fakeAPI{images: []oxide.Image{
 		image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0),
 	}}
-	provider := NewProvider(api.server(t), time.Minute)
+	provider := newProvider(t, api, time.Minute)
 
 	got, err := provider.Resolve(
 		context.Background(),
@@ -212,7 +241,7 @@ func TestTwoSelectorsNamingOneImageResolveItOnce(t *testing.T) {
 	api := &fakeAPI{images: []oxide.Image{
 		image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0),
 	}}
-	provider := NewProvider(api.server(t), time.Minute)
+	provider := newProvider(t, api, time.Minute)
 
 	got, err := provider.Resolve(context.Background(), nodeClass(
 		v1alpha1.ImageSelector{Name: "rke2-ubuntu-1"},
@@ -226,9 +255,137 @@ func TestTwoSelectorsNamingOneImageResolveItOnce(t *testing.T) {
 	}
 }
 
+func TestASelectorWithoutAProjectSearchesTheSiloAndTheControllerProject(t *testing.T) {
+	api := &fakeAPI{images: []oxide.Image{
+		image("rke2-silo", "33333333-0000-4000-8000-000000000001", 0),
+	}}
+	provider := newProvider(t, api, time.Minute)
+
+	got, err := provider.Resolve(
+		context.Background(),
+		nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"}),
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(got.Resolved) != 1 {
+		t.Fatalf("Resolve() matched %d images, want the silo image", len(got.Resolved))
+	}
+	if api.lists[""] != 1 || api.lists[projectName] != 1 {
+		t.Errorf(
+			"lists by project = %v, want one of the silo and one of %q", api.lists, projectName,
+		)
+	}
+}
+
+func TestASelectorNamingAProjectSearchesOnlyIt(t *testing.T) {
+	api := &fakeAPI{}
+	provider := newProvider(t, api, time.Minute)
+
+	if _, err := provider.Resolve(
+		context.Background(),
+		nodeClass(v1alpha1.ImageSelector{Name: "rke2-*", Project: "prod"}),
+	); err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(api.lists) != 1 || api.lists["prod"] != 1 {
+		t.Errorf("lists by project = %v, want only prod", api.lists)
+	}
+}
+
+func TestAnIDSelectorSendsOnlyTheIDAndChecksTheProjectAfterwards(t *testing.T) {
+	inProject := image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)
+	inProject.ProjectId = projectID
+	silo := image("rke2-silo", "33333333-0000-4000-8000-000000000002", 0)
+	elsewhere := image("rke2-ubuntu-2", "33333333-0000-4000-8000-000000000003", 0)
+	elsewhere.ProjectId = otherProjectID
+
+	tests := []struct {
+		name     string
+		selector v1alpha1.ImageSelector
+		want     int
+		reason   string
+	}{
+		{
+			name:     "an image in the controller's project needs no project written",
+			selector: v1alpha1.ImageSelector{ID: selection.IDSelector(inProject.Id)},
+			want:     1,
+		},
+		{
+			name:     "a silo image is usable from any project",
+			selector: v1alpha1.ImageSelector{ID: selection.IDSelector(silo.Id), Project: "prod"},
+			want:     1,
+		},
+		{
+			name: "an image in the project the selector named",
+			selector: v1alpha1.ImageSelector{
+				ID:      selection.IDSelector(inProject.Id),
+				Project: projectID,
+			},
+			want: 1,
+		},
+		{
+			name:     "an image outside the controller's project is a mismatch",
+			selector: v1alpha1.ImageSelector{ID: selection.IDSelector(elsewhere.Id)},
+			reason:   v1alpha1.ConditionReasonProjectMismatch,
+		},
+		{
+			name: "an image outside the project the selector named is a mismatch",
+			selector: v1alpha1.ImageSelector{
+				ID:      selection.IDSelector(inProject.Id),
+				Project: otherProjectID,
+			},
+			reason: v1alpha1.ConditionReasonProjectMismatch,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{images: []oxide.Image{inProject, silo, elsewhere}}
+			provider := newProvider(t, api, time.Minute)
+
+			got, err := provider.Resolve(context.Background(), nodeClass(tt.selector))
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if api.viewQuery != "" {
+				t.Errorf("the view sent %q alongside the ID, want nothing", api.viewQuery)
+			}
+			if len(got.Resolved) != tt.want {
+				t.Errorf("Resolve() matched %d images, want %d", len(got.Resolved), tt.want)
+			}
+			if got.Reason != tt.reason {
+				t.Errorf("Resolve() reason = %q, want %q: %s", got.Reason, tt.reason, got.Message)
+			}
+			if tt.reason != "" && !strings.Contains(got.Message, string(tt.selector.ID)) {
+				t.Errorf("Resolve() message = %q, want the image named", got.Message)
+			}
+		})
+	}
+}
+
+func TestAMismatchedSelectorFailsTheResolutionEvenWhenAnotherMatched(t *testing.T) {
+	elsewhere := image("rke2-ubuntu-2", "33333333-0000-4000-8000-000000000003", 0)
+	elsewhere.ProjectId = otherProjectID
+	api := &fakeAPI{images: []oxide.Image{
+		image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0), elsewhere,
+	}}
+	provider := newProvider(t, api, time.Minute)
+
+	got, err := provider.Resolve(context.Background(), nodeClass(
+		v1alpha1.ImageSelector{Name: "rke2-ubuntu-1"},
+		v1alpha1.ImageSelector{ID: selection.IDSelector(elsewhere.Id)},
+	))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.Complete() || got.Reason != v1alpha1.ConditionReasonProjectMismatch {
+		t.Errorf("Resolve() reason = %q, want a project mismatch", got.Reason)
+	}
+}
+
 func TestResolveReportsAFailedList(t *testing.T) {
 	api := &fakeAPI{listStatus: http.StatusInternalServerError}
-	provider := NewProvider(api.server(t), time.Minute)
+	provider := newProvider(t, api, time.Minute)
 
 	_, err := provider.Resolve(
 		context.Background(),
@@ -249,7 +406,7 @@ func TestResolveServesACacheHit(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
-	provider := NewProvider(api.server(t), time.Hour)
+	provider := newProvider(t, api, time.Hour)
 	class := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"})
 
 	for range 3 {
@@ -257,8 +414,11 @@ func TestResolveServesACacheHit(t *testing.T) {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 1 {
-		t.Errorf("the API was listed %d times across three resolutions, want 1", api.lists)
+	if api.lists[projectName] != 1 {
+		t.Errorf(
+			"the project was listed %d times across three resolutions, want 1",
+			api.lists[projectName],
+		)
 	}
 }
 
@@ -267,7 +427,7 @@ func TestResolvePastTheTTLListsAgain(t *testing.T) {
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
 
-	provider := NewProvider(api.server(t), 0)
+	provider := newProvider(t, api, 0)
 	class := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"})
 
 	for range 2 {
@@ -275,8 +435,8 @@ func TestResolvePastTheTTLListsAgain(t *testing.T) {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 2 {
-		t.Errorf("the API was listed %d times, want one per resolution", api.lists)
+	if api.lists[projectName] != 2 {
+		t.Errorf("the project was listed %d times, want one per resolution", api.lists[projectName])
 	}
 }
 
@@ -284,18 +444,21 @@ func TestAnEditedSelectorResolvesAgain(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
-	provider := NewProvider(api.server(t), time.Hour)
+	provider := newProvider(t, api, time.Hour)
 
 	for _, name := range []string{"rke2-*", "ubuntu-*"} {
 		if _, err := provider.Resolve(
 			context.Background(),
-			nodeClass(v1alpha1.ImageSelector{Name: name}),
+			nodeClass(v1alpha1.ImageSelector{Name: selection.WildcardSelector(name)}),
 		); err != nil {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 2 {
-		t.Errorf("the API was listed %d times for two different selectors, want 2", api.lists)
+	if api.lists[projectName] != 2 {
+		t.Errorf(
+			"the project was listed %d times for two different selectors, want 2",
+			api.lists[projectName],
+		)
 	}
 }
 
@@ -303,7 +466,7 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
-	provider := NewProvider(api.server(t), time.Hour)
+	provider := newProvider(t, api, time.Hour)
 
 	first := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"}, v1alpha1.ImageSelector{OS: "ubuntu"})
 
@@ -317,10 +480,10 @@ func TestTwoNodeClassesShareOneReading(t *testing.T) {
 			t.Fatalf("Resolve() error = %v", err)
 		}
 	}
-	if api.lists != 1 {
+	if api.lists[projectName] != 1 {
 		t.Errorf(
-			"the API was listed %d times for two nodeclasses selecting the same images, want 1",
-			api.lists,
+			"the project was listed %d times for two nodeclasses selecting the same images, want 1",
+			api.lists[projectName],
 		)
 	}
 }
@@ -329,7 +492,7 @@ func TestResolveDoesNotHandOutTheCachedSlice(t *testing.T) {
 	api := &fakeAPI{
 		images: []oxide.Image{image("rke2-ubuntu-1", "33333333-0000-4000-8000-000000000001", 0)},
 	}
-	provider := NewProvider(api.server(t), time.Hour)
+	provider := newProvider(t, api, time.Hour)
 	class := nodeClass(v1alpha1.ImageSelector{Name: "rke2-*"})
 
 	first, err := provider.Resolve(context.Background(), class)

@@ -17,6 +17,9 @@ const ConditionTypeSubnetsResolved = "SubnetsResolved"
 // ConditionReasonSubnetsNotFound is a subnet selector that matched nothing.
 const ConditionReasonSubnetsNotFound = "SubnetsNotFound"
 
+// ConditionReasonProjectMismatch is a selector whose ID named a resource outside the project it meant.
+const ConditionReasonProjectMismatch = "ProjectMismatch"
+
 // Condition types owned by the bootstrap providers.
 const (
 	// ConditionTypeTokenRefSecretAccessible reports whether the RKE2 agent token Secret can be read.
@@ -230,6 +233,16 @@ type OxideEphemeralIP struct {
 	PoolID string `json:"poolID,omitempty"`
 	// +optional
 	PoolName string `json:"poolName,omitempty"`
+	// Fallbacks are the other pools a wildcard matched, oldest first, tried in turn when the
+	// pool before runs out of addresses.
+	// +optional
+	Fallbacks []OxideIPPool `json:"fallbacks,omitempty"`
+}
+
+// OxideIPPool is one pool an ephemeral IP entry may allocate from.
+type OxideIPPool struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // BootstrapKind is the provider in effect: the one the spec names, or the one detection

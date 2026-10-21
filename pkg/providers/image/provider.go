@@ -11,6 +11,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -24,13 +25,21 @@ type Result = resolver.Resolution[v1alpha1.OxideImage, v1alpha1.ImageSelector]
 
 // Provider is everything that talks to the Oxide API about images.
 type Provider struct {
-	ox    *oxide.Client
-	cache *resolver.Cache[[]v1alpha1.OxideImage]
+	ox       *oxide.Client
+	projects *project.Resolver
+	cache    *resolver.Cache[reading]
+}
+
+// reading is one resolution as cached: the images matched, and the selectors that found their image
+// in a project other than the one they meant.
+type reading struct {
+	images    []v1alpha1.OxideImage
+	misplaced []string
 }
 
 // NewProvider returns a provider that re-resolves a nodeclass's images once its reading is older than ttl.
-func NewProvider(ox *oxide.Client, ttl time.Duration) *Provider {
-	return &Provider{ox: ox, cache: resolver.NewCache[[]v1alpha1.OxideImage]("image", ttl)}
+func NewProvider(ox *oxide.Client, projects *project.Resolver, ttl time.Duration) *Provider {
+	return &Provider{ox: ox, projects: projects, cache: resolver.NewCache[reading]("image", ttl)}
 }
 
 // Resolve returns the images the nodeclass's selectors match, newest first.
@@ -52,7 +61,7 @@ func (p *Provider) ResolveSelectors(
 	entry, err := p.cache.Get(
 		ctx,
 		resolver.Fingerprint(selectors),
-		func(ctx context.Context) ([]v1alpha1.OxideImage, error) {
+		func(ctx context.Context) (reading, error) {
 			return p.resolve(ctx, selectors)
 		},
 	)
@@ -60,13 +69,16 @@ func (p *Provider) ResolveSelectors(
 		return Result{}, err
 	}
 	result := Result{
-
-		Resolved: slices.Clone(entry.Value),
+		Resolved: slices.Clone(entry.Value.images),
 		Age:      entry.Age(time.Now()),
 		Stale:    entry.Stale,
 	}
 
-	if len(result.Resolved) == 0 {
+	switch {
+	case len(entry.Value.misplaced) > 0:
+		result.Reason = v1alpha1.ConditionReasonProjectMismatch
+		result.Message = strings.Join(entry.Value.misplaced, "; ")
+	case len(result.Resolved) == 0:
 		result.Unmatched = selectors
 		result.Reason = v1alpha1.ConditionReasonImagesNotFound
 		result.Message = DescribeSelectors(selectors)
@@ -77,62 +89,63 @@ func (p *Provider) ResolveSelectors(
 func (p *Provider) resolve(
 	ctx context.Context,
 	imageSelectors []v1alpha1.ImageSelector,
-) ([]v1alpha1.OxideImage, error) {
+) (reading, error) {
+	var out reading
 	var resolvedImages []oxide.Image
 	var listImageSelector []v1alpha1.ImageSelector
 
 	for _, imageSelector := range imageSelectors {
-		nameOrID := ""
-		project := imageSelector.Project
-		if imageSelector.ID != "" {
-			nameOrID = imageSelector.ID
-
-			project = ""
-		} else if imageSelector.Name != "" && !strings.Contains(imageSelector.Name, "*") {
-			nameOrID = imageSelector.Name
-		} else {
-
+		if imageSelector.ID == "" {
 			listImageSelector = append(listImageSelector, imageSelector)
 			continue
 		}
+		// The API refuses a project alongside an ID, so the project is checked after the fact.
 		image, err := p.ox.ImageView(ctx, oxide.ImageViewParams{
-			Image:   oxide.NameOrId(nameOrID),
-			Project: oxide.NameOrId(project),
+			Image: oxide.NameOrId(imageSelector.ID),
 		})
 		if err != nil {
 			if errors.Is(err, oxide.ErrObjectNotFound) {
 				continue
 			}
-			return nil, fmt.Errorf(
-				"image %q from project %q: %w",
-				nameOrID,
-				imageSelector.Project,
-				err,
-			)
+			return reading{}, fmt.Errorf("image %q: %w", imageSelector.ID, err)
 		}
 		if !matches(imageSelector, *image) {
+			continue
+		}
+		inProject, err := p.inProject(ctx, imageSelector, *image)
+		if err != nil {
+			return reading{}, err
+		}
+		if !inProject {
+			out.misplaced = append(out.misplaced, fmt.Sprintf(
+				"image %s is in project %s, not project %s",
+				image.Id, image.ProjectId, p.projects.For(imageSelector.Project),
+			))
 			continue
 		}
 		resolvedImages = append(resolvedImages, *image)
 	}
 
-	projectToSelectors := lo.GroupBy(
-		listImageSelector,
-		func(selector v1alpha1.ImageSelector) string { return selector.Project },
-	)
-	for project, selectors := range projectToSelectors {
-		images, err := p.ox.ImageListAllPages(ctx, oxide.ImageListParams{
-			Project: oxide.NameOrId(project),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("unable to list images in project %q: %w", project, err)
-		}
-		for _, selector := range selectors {
-			for _, image := range images {
-				if !matches(selector, image) {
-					continue
+	listed := map[string][]oxide.Image{}
+	for _, selector := range listImageSelector {
+		for _, in := range p.listProjects(selector) {
+			images, ok := listed[in]
+			if !ok {
+				var err error
+				images, err = p.ox.ImageListAllPages(ctx, oxide.ImageListParams{
+					Project: oxide.NameOrId(in),
+				})
+				if err != nil {
+					return reading{}, fmt.Errorf(
+						"unable to list images in %s: %w", describeProject(in), err,
+					)
 				}
-				resolvedImages = append(resolvedImages, image)
+				listed[in] = images
+			}
+			for _, image := range images {
+				if matches(selector, image) {
+					resolvedImages = append(resolvedImages, image)
+				}
 			}
 		}
 	}
@@ -145,7 +158,7 @@ func (p *Provider) resolve(
 		return b.TimeCreated.Compare(*a.TimeCreated)
 	})
 
-	return lo.Map(resolvedImages, func(image oxide.Image, _ int) v1alpha1.OxideImage {
+	out.images = lo.Map(resolvedImages, func(image oxide.Image, _ int) v1alpha1.OxideImage {
 		return v1alpha1.OxideImage{
 			Project:     image.ProjectId,
 			ID:          image.Id,
@@ -155,18 +168,47 @@ func (p *Provider) resolve(
 			SizeBytes:   int64(image.Size),
 			TimeCreated: metav1.NewTime(*image.TimeCreated),
 		}
-	}), nil
+	})
+	return out, nil
+}
+
+// listProjects is where a selector without an ID looks: its own project, or the controller's
+// project plus the silo images every project can boot from.
+func (p *Provider) listProjects(selector v1alpha1.ImageSelector) []string {
+	if selector.Project != "" {
+		return []string{selector.Project}
+	}
+	return []string{"", p.projects.For("")}
+}
+
+// inProject reports whether an image found by ID is one the selector's project can use.
+func (p *Provider) inProject(
+	ctx context.Context,
+	selector v1alpha1.ImageSelector,
+	image oxide.Image,
+) (bool, error) {
+	if image.ProjectId == "" {
+		return true, nil
+	}
+	return p.projects.Matches(ctx, p.projects.For(selector.Project), image.ProjectId)
+}
+
+func describeProject(in string) string {
+	if in == "" {
+		return "the silo"
+	}
+	return fmt.Sprintf("project %q", in)
 }
 
 // matches reports whether an image satisfies every term the selector sets other than its identity.
 func matches(selector v1alpha1.ImageSelector, image oxide.Image) bool {
-	if selector.Name != "" && !resolver.MatchName(selector.Name, string(image.Name)) {
+	if selector.Name != "" && !selector.Name.Matches(string(image.Name)) {
 		return false
 	}
 	if selector.OS != "" && !strings.EqualFold(selector.OS, image.Os) {
 		return false
 	}
-	if selector.Version != "" && !resolver.MatchVersion(selector.Version, image.Version) {
+	if selector.Version != "" && !selector.Version.Matches(image.Version) {
 		return false
 	}
 	return true
@@ -180,10 +222,10 @@ func DescribeSelectors(selectors []v1alpha1.ImageSelector) string {
 	described := lo.Map(selectors, func(selector v1alpha1.ImageSelector, _ int) string {
 		terms := []string{}
 		for _, term := range []struct{ key, value string }{
-			{"id", selector.ID},
-			{"name", selector.Name},
+			{"id", string(selector.ID)},
+			{"name", string(selector.Name)},
 			{"os", selector.OS},
-			{"version", selector.Version},
+			{"version", string(selector.Version)},
 			{"project", selector.Project},
 		} {
 			if term.value != "" {

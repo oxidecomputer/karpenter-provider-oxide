@@ -1,8 +1,8 @@
-package resolver
+package selection
 
 import "testing"
 
-func TestMatchVersion(t *testing.T) {
+func TestVersionSelectorMatches(t *testing.T) {
 	tests := []struct {
 		pattern string
 		version string
@@ -54,13 +54,19 @@ func TestMatchVersion(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := MatchVersion(tt.pattern, tt.version); got != tt.want {
-			t.Errorf("MatchVersion(%q, %q) = %v, want %v", tt.pattern, tt.version, got, tt.want)
+		if got := VersionSelector(tt.pattern).Matches(tt.version); got != tt.want {
+			t.Errorf(
+				"VersionSelector(%q).Matches(%q) = %v, want %v",
+				tt.pattern,
+				tt.version,
+				got,
+				tt.want,
+			)
 		}
 	}
 }
 
-func TestMatchName(t *testing.T) {
+func TestWildcardSelectorMatches(t *testing.T) {
 	tests := []struct {
 		pattern string
 		name    string
@@ -93,19 +99,38 @@ func TestMatchName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := MatchName(tt.pattern, tt.name); got != tt.want {
-			t.Errorf("MatchName(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		if got := WildcardSelector(tt.pattern).Matches(tt.name); got != tt.want {
+			t.Errorf(
+				"WildcardSelector(%q).Matches(%q) = %v, want %v",
+				tt.pattern,
+				tt.name,
+				got,
+				tt.want,
+			)
 		}
 	}
 }
 
-func TestMatchVersionEmptyImageVersion(t *testing.T) {
+func TestVersionSelectorMatchesEmptyImageVersion(t *testing.T) {
 	for _, pattern := range []string{"*", "1.*", "1.2.3"} {
-		if MatchVersion(pattern, "") {
-			t.Errorf("MatchVersion(%q, \"\") = true, want false", pattern)
+		if VersionSelector(pattern).Matches("") {
+			t.Errorf("VersionSelector(%q).Matches(\"\") = true, want false", pattern)
 		}
 	}
-	if !MatchVersion("", "") {
-		t.Error(`MatchVersion("", "") = false, want true`)
+	if !VersionSelector("").Matches("") {
+		t.Error(`VersionSelector("").Matches("") = false, want true`)
+	}
+}
+
+func TestIDSelectorMatchesExactlyAndNeverWildcards(t *testing.T) {
+	id := IDSelector("33333333-0000-4000-8000-00000000000a")
+	if !id.Matches("33333333-0000-4000-8000-00000000000a") {
+		t.Error("an ID does not match itself")
+	}
+	if !id.Matches("33333333-0000-4000-8000-00000000000A") {
+		t.Error("an ID is not matched case-insensitively")
+	}
+	if IDSelector("33333333-*").Matches(string(id)) {
+		t.Error("an ID wildcarded")
 	}
 }

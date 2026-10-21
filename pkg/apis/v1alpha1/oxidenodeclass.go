@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mitchellh/hashstructure/v2"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -375,11 +376,12 @@ func validateSourceSize(
 type SnapshotSelector struct {
 	// ID is the exact snapshot UUID.
 	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the name of a snapshot.
+	ID selection.IDSelector `json:"id,omitempty"`
+	// Name is the name of a snapshot, "*" wildcards allowed.
 	// +optional
-	Name string `json:"name,omitempty"`
-	// Project where the snapshot is located.
+	Name selection.WildcardSelector `json:"name,omitempty"`
+	// Project where the snapshot is located. Defaults to the controller's project, and a snapshot
+	// selected by ID must be in it.
 	// +optional
 	Project string `json:"project,omitempty"`
 }
@@ -415,10 +417,10 @@ type ManagedAffinityGroup struct {
 type AffinityGroupSelector struct {
 	// ID is the exact group UUID.
 	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the name of a group.
+	ID selection.IDSelector `json:"id,omitempty"`
+	// Name is the name of a group, "*" wildcards allowed.
 	// +optional
-	Name string `json:"name,omitempty"`
+	Name selection.WildcardSelector `json:"name,omitempty"`
 }
 
 // Bootstrap kinds, one per supported bootstrap provider.
@@ -514,19 +516,20 @@ type SecretRef struct {
 type ImageSelector struct {
 	// ID is the exact image UUID.
 	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the name of an image.
+	ID selection.IDSelector `json:"id,omitempty"`
+	// Name is the name of an image, "*" wildcards allowed.
 	// +optional
-	Name string `json:"name,omitempty"`
-	// Project where the image is located.
+	Name selection.WildcardSelector `json:"name,omitempty"`
+	// Project where the image is located. Defaults to the controller's project plus the silo's
+	// images, and an image selected by ID must be a silo image or in it.
 	// +optional
 	Project string `json:"project,omitempty"`
 	// OS is the image operating system.
 	// +optional
 	OS string `json:"os,omitempty"`
-	// Version is the version of the image or OS.
+	// Version is the version of the image or OS, "*" wildcards allowed per segment.
 	// +optional
-	Version string `json:"version,omitempty"`
+	Version selection.VersionSelector `json:"version,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.id) || has(self.vpcID) || has(self.vpcName)",message="a subnet selector needs a subnet id, VPC id, or VPC name"
@@ -535,17 +538,18 @@ type ImageSelector struct {
 type SubnetSelector struct {
 	// ID is the exact subnet ID.
 	// +optional
-	ID string `json:"id,omitempty"`
+	ID selection.IDSelector `json:"id,omitempty"`
 	// VPCID is the exact VPC ID.
 	// +optional
-	VPCID string `json:"vpcID,omitempty"`
-	// VPCName is the exact VPC name.
+	VPCID selection.IDSelector `json:"vpcID,omitempty"`
+	// VPCName is the name of a VPC, "*" wildcards allowed.
 	// +optional
-	VPCName string `json:"vpcName,omitempty"`
-	// Name is the exact subnet name.
+	VPCName selection.WildcardSelector `json:"vpcName,omitempty"`
+	// Name is the name of a subnet, "*" wildcards allowed.
 	// +optional
-	Name string `json:"name,omitempty"`
-	// Project where the subnet is located.
+	Name selection.WildcardSelector `json:"name,omitempty"`
+	// Project where the subnet is located. Defaults to the controller's project, and a subnet
+	// selected by ID or VPC ID must be in it.
 	// +optional
 	Project string `json:"project,omitempty"`
 }
@@ -567,19 +571,20 @@ type EphemeralIP struct {
 type IPPoolRef struct {
 	// ID is the exact IP pool UUID.
 	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the exact name of an IP pool.
+	ID selection.IDSelector `json:"id,omitempty"`
+	// Name is the name of an IP pool, "*" wildcards allowed. When several pools match, the oldest
+	// is used and the rest are tried in turn as it runs out of addresses.
 	// +optional
-	Name string `json:"name,omitempty"`
+	Name selection.WildcardSelector `json:"name,omitempty"`
 }
 
 type SSHKeySelector struct {
 	// ID is the exact SSH key ID.
 	// +optional
-	ID string `json:"id,omitempty"`
-	// Name is the exact SSH key name.
+	ID selection.IDSelector `json:"id,omitempty"`
+	// Name is the name of an SSH key, "*" wildcards allowed.
 	// +optional
-	Name string `json:"name,omitempty"`
+	Name selection.WildcardSelector `json:"name,omitempty"`
 }
 
 // OxideNodeClass is an Oxide Karpenter node class.

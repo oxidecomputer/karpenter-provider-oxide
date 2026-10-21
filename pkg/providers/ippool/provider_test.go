@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -56,7 +59,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -81,6 +88,11 @@ func pool(id, name string, isDefault bool, version oxide.IpVersion) oxide.SiloIp
 	}
 }
 
+func createdAt(pool oxide.SiloIpPool, year int) oxide.SiloIpPool {
+	pool.TimeCreated = new(time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC))
+	return pool
+}
+
 func fakePools() []oxide.SiloIpPool {
 	return []oxide.SiloIpPool{
 		pool(ipPoolID, "public-v4", true, oxide.IpVersionV4),
@@ -94,7 +106,9 @@ func nodeClass(ephemeralIPs ...v1alpha1.EphemeralIP) *v1alpha1.OxideNodeClass {
 	}
 }
 
-func byName(name string) *v1alpha1.IPPoolRef { return &v1alpha1.IPPoolRef{Name: name} }
+func byName(name string) *v1alpha1.IPPoolRef {
+	return &v1alpha1.IPPoolRef{Name: selection.WildcardSelector(name)}
+}
 
 func TestResolve(t *testing.T) {
 	tests := []struct {
@@ -204,7 +218,7 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("Resolve() = %v, want %v", got.Resolved, tt.want)
 			}
 			for i, want := range tt.want {
-				if got.Resolved[i] != want {
+				if !reflect.DeepEqual(got.Resolved[i], want) {
 					t.Errorf("Resolve()[%d] = %+v, want %+v", i, got.Resolved[i], want)
 				}
 			}
@@ -214,6 +228,95 @@ func TestResolve(t *testing.T) {
 
 			if api.lists != 0 {
 				t.Errorf("the API was listed %d times, want none", api.lists)
+			}
+		})
+	}
+}
+
+func TestAWildcardTakesTheOldestPoolAndKeepsTheRestAsFallbacks(t *testing.T) {
+	const (
+		ipPoolIDC = "66666666-0000-4000-8000-000000000003"
+		ipPoolIDD = "66666666-0000-4000-8000-000000000004"
+	)
+	pools := []oxide.SiloIpPool{
+		createdAt(pool(ipPoolID, "public-v4-2024", false, oxide.IpVersionV4), 2024),
+		createdAt(pool(ipPoolIDC, "public-v4-2023", false, oxide.IpVersionV4), 2023),
+		createdAt(pool(ipPoolIDB, "public-v6", false, oxide.IpVersionV6), 2022),
+		pool(ipPoolIDD, "public-v4-undated", false, oxide.IpVersionV4),
+	}
+	tests := []struct {
+		name    string
+		entry   v1alpha1.EphemeralIP
+		want    v1alpha1.OxideEphemeralIP
+		reason  string
+		message string
+	}{
+		{
+			name:  "one match has no fallbacks",
+			entry: v1alpha1.EphemeralIP{Pool: byName("*-v6")},
+			want: v1alpha1.OxideEphemeralIP{
+				IPVersion: "v6",
+				PoolID:    ipPoolIDB,
+				PoolName:  "public-v6",
+			},
+		},
+		{
+			name:  "several matches are ordered oldest first, undated last",
+			entry: v1alpha1.EphemeralIP{IPVersion: "v4", Pool: byName("public-v4-*")},
+			want: v1alpha1.OxideEphemeralIP{
+				IPVersion: "v4", PoolID: ipPoolIDC, PoolName: "public-v4-2023",
+				Fallbacks: []v1alpha1.OxideIPPool{
+					{ID: ipPoolID, Name: "public-v4-2024"},
+					{ID: ipPoolIDD, Name: "public-v4-undated"},
+				},
+			},
+		},
+		{
+			name:  "without a version the oldest match sets the family and the other family is left out",
+			entry: v1alpha1.EphemeralIP{Pool: byName("public-*")},
+			want: v1alpha1.OxideEphemeralIP{
+				IPVersion: "v6",
+				PoolID:    ipPoolIDB,
+				PoolName:  "public-v6",
+			},
+		},
+		{
+			name:    "a version keeps only the pools of that family",
+			entry:   v1alpha1.EphemeralIP{IPVersion: "v6", Pool: byName("public-v4-*")},
+			reason:  v1alpha1.ConditionReasonIPVersionMismatch,
+			message: "public-v4-2023, public-v4-2024, public-v4-undated",
+		},
+		{
+			name:   "no match is not found",
+			entry:  v1alpha1.EphemeralIP{Pool: byName("private-*")},
+			reason: v1alpha1.ConditionReasonIPPoolNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{pools: pools}
+			provider := NewProvider(api.server(t), time.Hour)
+
+			got, err := provider.Resolve(context.Background(), nodeClass(tt.entry))
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if got.Reason != tt.reason {
+				t.Errorf("Resolve() reason = %q, want %q: %s", got.Reason, tt.reason, got.Message)
+			}
+			if !strings.Contains(got.Message, tt.message) {
+				t.Errorf("Resolve() message = %q, want it to name %q", got.Message, tt.message)
+			}
+			if tt.reason == "" &&
+				(len(got.Resolved) != 1 || !reflect.DeepEqual(got.Resolved[0], tt.want)) {
+				t.Errorf("Resolve() = %+v, want %+v", got.Resolved, tt.want)
+			}
+			if api.lists != 1 || api.views != 0 {
+				t.Errorf(
+					"the API was listed %d times and viewed %d, want 1 and 0",
+					api.lists,
+					api.views,
+				)
 			}
 		})
 	}
@@ -345,6 +448,15 @@ func TestDriftReason(t *testing.T) {
 			recorded: new("v4=192.0.2.10@" + ipPoolID),
 			desired:  []v1alpha1.OxideEphemeralIP{{IPVersion: "v4", PoolID: ipPoolIDB}},
 			want:     providers.DriftReasonEphemeralIP,
+		},
+		{
+			name:     "a node that fell back to a later pool has not drifted",
+			recorded: new("v4=192.0.2.10@" + ipPoolIDB),
+			desired: []v1alpha1.OxideEphemeralIP{{
+				IPVersion: "v4",
+				PoolID:    ipPoolID,
+				Fallbacks: []v1alpha1.OxideIPPool{{ID: ipPoolIDB}},
+			}},
 		},
 		{
 

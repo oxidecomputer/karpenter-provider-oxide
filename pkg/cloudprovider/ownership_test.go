@@ -11,6 +11,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"k8s.io/apimachinery/pkg/types"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
@@ -42,7 +43,11 @@ func ownershipProvider(t *testing.T, instances []oxide.Instance) *OxideCloudProv
 		}
 	}))
 	t.Cleanup(server.Close)
-	client, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(server.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

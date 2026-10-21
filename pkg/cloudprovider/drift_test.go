@@ -35,8 +35,8 @@ const (
 
 func testDrifters() []providers.Drifter {
 	return []providers.Drifter{
-		image.NewProvider(nil, 0),
-		subnet.NewProvider(nil, 0),
+		image.NewProvider(nil, nil, 0),
+		subnet.NewProvider(nil, nil, 0),
 		sshkey.NewProvider(nil, 0),
 		ippool.NewProvider(nil, 0),
 		affinitygroup.NewProvider(nil, "", 0),

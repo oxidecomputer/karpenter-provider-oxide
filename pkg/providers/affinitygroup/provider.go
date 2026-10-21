@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/resolver"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/samber/lo"
@@ -37,19 +37,12 @@ type Provider struct {
 }
 
 // NewProvider returns a provider that re-resolves a nodeclass's groups once its reading is older than ttl.
-func NewProvider(ox *oxide.Client, project string, ttl time.Duration) *Provider {
+func NewProvider(ox *oxide.Client, oxideProject string, ttl time.Duration) *Provider {
 	return &Provider{
 		ox:      ox,
-		project: project,
+		project: oxideProject,
 		cache:   resolver.NewCache[reading]("affinitygroup", ttl),
 	}
-}
-
-func (p *Provider) projectFor(ref string) oxide.NameOrId {
-	if _, err := uuid.Parse(ref); err == nil {
-		return ""
-	}
-	return oxide.NameOrId(p.project)
 }
 
 type oxideGroup struct {
@@ -91,7 +84,7 @@ func (p *Provider) antiAffinityAPI() groupAPI {
 				ctx,
 				oxide.AntiAffinityGroupViewParams{
 					AntiAffinityGroup: oxide.NameOrId(nameOrID),
-					Project:           p.projectFor(nameOrID),
+					Project:           project.Scope(p.project, nameOrID),
 				},
 			)
 			if err != nil {
@@ -174,7 +167,7 @@ func (p *Provider) affinityAPI() groupAPI {
 				ctx,
 				oxide.AffinityGroupViewParams{
 					AffinityGroup: oxide.NameOrId(nameOrID),
-					Project:       p.projectFor(nameOrID),
+					Project:       project.Scope(p.project, nameOrID),
 				},
 			)
 			if err != nil {
@@ -338,13 +331,13 @@ func (p *Provider) resolveGroups(
 	var wildcards []v1alpha1.AffinityGroupSelector
 
 	for _, selector := range selectors {
-		nameOrID := selector.ID
+		nameOrID := string(selector.ID)
 		if nameOrID == "" {
-			if strings.Contains(selector.Name, "*") {
+			if selector.Name.IsPattern() {
 				wildcards = append(wildcards, selector)
 				continue
 			}
-			nameOrID = selector.Name
+			nameOrID = string(selector.Name)
 		}
 
 		if nameOrID == "" {
@@ -373,7 +366,7 @@ func (p *Provider) resolveGroups(
 	for _, selector := range wildcards {
 		matched := false
 		for _, group := range groups {
-			if !resolver.MatchName(selector.Name, group.name) {
+			if !selector.Name.Matches(group.name) {
 				continue
 			}
 
@@ -404,8 +397,8 @@ func DescribeSelectors(selectors []v1alpha1.AffinityGroupSelector) string {
 		func(selector v1alpha1.AffinityGroupSelector, _ int) string {
 			var terms []string
 			for _, term := range []struct{ key, value string }{
-				{"id", selector.ID},
-				{"name", selector.Name},
+				{"id", string(selector.ID)},
+				{"name", string(selector.Name)},
 			} {
 				if term.value != "" {
 					terms = append(terms, fmt.Sprintf("%s=%s", term.key, term.value))

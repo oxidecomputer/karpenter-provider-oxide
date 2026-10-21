@@ -12,6 +12,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/ownership"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
@@ -105,7 +106,11 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -132,6 +137,9 @@ func notFound(t *testing.T, w http.ResponseWriter) {
 type launchAPI struct {
 	diskCreateError     string
 	instanceCreateError string
+	// exhaustedCreates is how many creates refuse for want of an address before one succeeds.
+	exhaustedCreates int
+	externalIPsSent  [][]oxide.ExternalIpCreate
 
 	existing *oxide.Disk
 
@@ -257,7 +265,11 @@ func (f *launchAPI) server(t *testing.T) *oxide.Client {
 	}))
 	t.Cleanup(srv.Close)
 
-	client, err := oxide.NewClient(oxide.WithHost(srv.URL), oxide.WithToken("token"))
+	client, err := oxide.NewClient(
+		oxide.WithHost(srv.URL),
+		oxide.WithToken("token"),
+		projecttest.WithGuard(t),
+	)
 	if err != nil {
 		t.Fatalf("unable to build a client against the fake API: %v", err)
 	}
@@ -280,6 +292,15 @@ func (f *launchAPI) serveCreates(
 		}
 		f.startRequested = body.Start
 		f.antiAffinityRequested = body.AntiAffinityGroups
+		f.externalIPsSent = append(f.externalIPsSent, body.ExternalIps)
+		if f.exhaustedCreates > 0 {
+			f.exhaustedCreates--
+			writeJSON(t, w, http.StatusInsufficientStorage, map[string]string{
+				"error_code": "InsufficientCapacity",
+				"message":    "No external IP addresses available",
+			})
+			return true
+		}
 		if f.instanceCreateError != "" {
 			if f.cancelOnInstanceCreate != nil {
 				f.cancelOnInstanceCreate()
@@ -534,6 +555,55 @@ func TestCreateReportsACapacityRefusalAndRemovesTheBootDisk(t *testing.T) {
 	}
 	if len(api.diskDeletes) == 0 {
 		t.Error("the boot disk was left behind by a launch nothing will retry under this name")
+	}
+}
+
+func TestCreateMovesToTheNextPoolWhenAddressesRunOut(t *testing.T) {
+	explicit := func(name string) []oxide.ExternalIpCreate {
+		return []oxide.ExternalIpCreate{{Value: &oxide.ExternalIpCreateEphemeral{
+			PoolSelector: oxide.PoolSelector{
+				Value: &oxide.PoolSelectorExplicit{Pool: oxide.NameOrId(name)},
+			},
+		}}}
+	}
+	api := &launchAPI{exhaustedCreates: 2}
+	p := NewProvider(api.server(t), "project", nil)
+	params := launchParams()
+	params.Body.ExternalIps = explicit("first")
+	opts := testOptions()
+	opts.ExternalIPFallbacks = [][]oxide.ExternalIpCreate{explicit("second"), explicit("third")}
+
+	if _, err := p.Create(context.Background(), params, opts); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	sent := make([]string, 0, len(api.externalIPsSent))
+	for _, set := range api.externalIPsSent {
+		selector := set[0].Value.(*oxide.ExternalIpCreateEphemeral).PoolSelector
+		sent = append(sent, string(selector.Value.(*oxide.PoolSelectorExplicit).Pool))
+	}
+	if strings.Join(sent, ",") != "first,second,third" {
+		t.Errorf("the creates asked for pools %v, want each in turn", sent)
+	}
+	if api.diskCreates != 1 || len(api.diskDeletes) != 0 {
+		t.Errorf(
+			"the boot disk was created %d times and deleted %d, want it kept across the retries",
+			api.diskCreates, len(api.diskDeletes),
+		)
+	}
+}
+
+func TestCreateReportsExhaustedPoolsOnceTheFallbacksRunOut(t *testing.T) {
+	api := &launchAPI{exhaustedCreates: 3}
+	p := NewProvider(api.server(t), "project", nil)
+	opts := testOptions()
+	opts.ExternalIPFallbacks = [][]oxide.ExternalIpCreate{nil}
+
+	_, err := p.Create(context.Background(), launchParams(), opts)
+	if !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("Create() error = %v, want insufficient capacity", err)
+	}
+	if api.instanceCreates != 2 {
+		t.Errorf("the instance was created %d times, want once per IP set", api.instanceCreates)
 	}
 }
 

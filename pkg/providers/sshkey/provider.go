@@ -60,8 +60,30 @@ func (p *Provider) resolve(
 	sshKeySelectors []v1alpha1.SSHKeySelector,
 ) ([]v1alpha1.OxideSSHKey, error) {
 	var sshKeys []v1alpha1.OxideSSHKey
+	var listed []oxide.SshKey
 	for _, sshKeySelector := range sshKeySelectors {
-		nameOrID := lo.Ternary(sshKeySelector.ID != "", sshKeySelector.ID, sshKeySelector.Name)
+		if sshKeySelector.Name.IsPattern() {
+			if listed == nil {
+				var err error
+				listed, err = p.ox.CurrentUserSshKeyListAllPages(
+					ctx,
+					oxide.CurrentUserSshKeyListParams{},
+				)
+				if err != nil {
+					return nil, fmt.Errorf("unable to list ssh keys: %w", err)
+				}
+			}
+			for _, sshKey := range listed {
+				if sshKeySelector.Name.Matches(string(sshKey.Name)) {
+					sshKeys = append(sshKeys, v1alpha1.OxideSSHKey{
+						ID:   sshKey.Id,
+						Name: string(sshKey.Name),
+					})
+				}
+			}
+			continue
+		}
+		nameOrID := lo.CoalesceOrEmpty(string(sshKeySelector.ID), string(sshKeySelector.Name))
 		sshKey, err := p.ox.CurrentUserSshKeyView(ctx, oxide.CurrentUserSshKeyViewParams{
 			SshKey: oxide.NameOrId(nameOrID),
 		})
@@ -73,7 +95,7 @@ func (p *Provider) resolve(
 			Name: string(sshKey.Name),
 		})
 	}
-	return sshKeys, nil
+	return lo.UniqBy(sshKeys, func(sshKey v1alpha1.OxideSSHKey) string { return sshKey.ID }), nil
 }
 
 // DriftReason compares the keys copied into the instance at launch against the keys the nodeclass selects now.
