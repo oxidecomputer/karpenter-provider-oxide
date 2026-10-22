@@ -92,8 +92,13 @@ NodePool requirements:
 | `karpenter.oxide.computer/instance-cpu` | CPUs | `4` |
 | `karpenter.oxide.computer/instance-memory` | MiB | `16384` |
 | `karpenter.oxide.computer/instance-cpu-memory-ratio` | Reduced CPU:GiB ratio | `1-4` |
+| `karpenter.oxide.computer/instance-cpu-platform` | Oxide CPU platform | `amd_milan` |
 
 CPU and memory are numeric and support range operators. The ratio is reduced, so 8 CPU and
 32 GiB is also `1-4`. Kubernetes label values cannot contain `:`, so the label-safe value
 uses `-`: logical ratios `1:2`, `1:4`, `1:8`, `1:16`, and `1:32` are stored as `1-2`,
 `1-4`, `1-8`, `1-16`, and `1-32`. Select ratio values with `In` or `NotIn`.
+
+The CPU platform is one of `amd_milan`, `amd_turin`, or `amd_turin_v2` and defaults to
+`amd_milan` when a NodePool does not require one. A platform is a minimum: the instance only
+lands on sleds with every feature of that platform.
