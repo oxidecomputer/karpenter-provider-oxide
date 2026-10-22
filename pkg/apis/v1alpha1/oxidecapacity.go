@@ -137,6 +137,9 @@ type UnavailableRange struct {
 	// RefusedInstanceType is the shape whose launch was actually refused, which is the evidence the range rests on.
 	// +optional
 	RefusedInstanceType string `json:"refusedInstanceType,omitempty"`
+	// CPUPlatform is the platform the refusal was under; a range with none is out for every platform.
+	// +optional
+	CPUPlatform string `json:"cpuPlatform,omitempty"`
 	// LargestLaunchable is the largest shape known to work within this range.
 	// +optional
 	LargestLaunchable string `json:"largestLaunchable,omitempty"`

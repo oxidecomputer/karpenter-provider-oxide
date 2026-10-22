@@ -51,8 +51,8 @@ func TestDescribe(t *testing.T) {
 	if len(first.KubeletArgs) != 2 || !strings.HasPrefix(first.KubeletArgs[0], "kube-reserved=") {
 		t.Errorf("kubelet args = %v", first.KubeletArgs)
 	}
-	if len(first.Offerings) != 1 || first.Offerings[0].Price != 1.125 ||
-		first.Offerings[0].Zone != "rack" {
+	if len(first.Offerings) != 3 || first.Offerings[0].Price != 1.125 ||
+		first.Offerings[0].Zone != "rack" || first.Offerings[0].CPUPlatform != "amd_turin_v2" {
 		t.Errorf("offerings = %+v", first.Offerings)
 	}
 }

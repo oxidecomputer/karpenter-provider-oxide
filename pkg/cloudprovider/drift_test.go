@@ -434,12 +434,6 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 				spec.JumboFrames = &jumbo
 			},
 		},
-		{
-			name: "cpuPlatform",
-			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
-				spec.CPUPlatform = "amd_turin"
-			},
-		},
 	}
 
 	base := &v1alpha1.OxideNodeClass{

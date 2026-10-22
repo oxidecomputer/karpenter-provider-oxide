@@ -52,6 +52,7 @@ type Overhead struct {
 type Offering struct {
 	CapacityType string  `json:"capacityType"`
 	Zone         string  `json:"zone"`
+	CPUPlatform  string  `json:"cpuPlatform"`
 	Price        float64 `json:"price"`
 }
 
@@ -90,6 +91,7 @@ func describeOne(it *cloudprovider.InstanceType) (InstanceType, error) {
 		offerings = append(offerings, Offering{
 			CapacityType: offering.Requirements.Get(karpv1.CapacityTypeLabelKey).Any(),
 			Zone:         offering.Requirements.Get(corev1.LabelTopologyZone).Any(),
+			CPUPlatform:  offering.Requirements.Get(v1alpha1.LabelInstanceCPUPlatform).Any(),
 			Price:        offering.Price,
 		})
 	}

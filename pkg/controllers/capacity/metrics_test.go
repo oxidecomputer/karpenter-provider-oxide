@@ -15,9 +15,9 @@ func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 	c, _ := newController(t, nil)
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	reading := c.availability.Snapshot()
 	rack, inventory := reading.Rack()
@@ -30,7 +30,11 @@ func TestPublishMetricsClearsShapesThatCameBack(t *testing.T) {
 		t.Fatalf("unavailable shapes = %v, want 1", got)
 	}
 
-	c.availability.RecordSuccess(t.Context(), instancetype.Specs{Ncpus: 8, MemInGiB: 16})
+	c.availability.RecordSuccess(
+		t.Context(),
+		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
+		availability.Unpinned,
+	)
 	reading = c.availability.Snapshot()
 	rack, inventory = reading.Rack()
 	publishMetrics(c.render(reading), rack, inventory)
@@ -94,9 +98,9 @@ func TestPublishMetricsReportsFeasibilityForUnavailableShapes(t *testing.T) {
 	c, _ := newController(t, inventory)
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	reading := c.availability.Snapshot()
 	rack, state := reading.Rack()

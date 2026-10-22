@@ -67,11 +67,11 @@ func TestInventoryGainMakesABackedOffShapeHalfOpen(t *testing.T) {
 	ctx := context.Background()
 
 	for range 4 {
-		c.RecordICE(ctx, specs, ReasonCapacity)
+		c.RecordICE(ctx, specs, Unpinned, ReasonCapacity)
 		now = now.Add(retryAfterOf(t, c, specs).Sub(now))
 		inventory.snapshot = read(now, inventory.snapshot.Generation()+1, sledWithFree(4, 8))
 	}
-	c.RecordICE(ctx, specs, ReasonCapacity)
+	c.RecordICE(ctx, specs, Unpinned, ReasonCapacity)
 	if got := retryAfterOf(t, c, specs).Sub(now); got != 30*time.Minute {
 		t.Fatalf("backoff = %v, want the capped 30m to be shortened by the rack", got)
 	}
@@ -103,7 +103,7 @@ func TestUnrelatedInventoryChangesDoNotReopen(t *testing.T) {
 	inventory := &fakeInventory{snapshot: read(now, 1, sledWithFree(8, 16))}
 	c := newInventoryManager(&now, inventory)
 
-	c.RecordICE(context.Background(), specs, ReasonCapacity)
+	c.RecordICE(context.Background(), specs, Unpinned, ReasonCapacity)
 
 	now = now.Add(time.Minute)
 	inventory.snapshot = read(now, 2, sledWithFree(16, 32))
@@ -119,7 +119,7 @@ func TestMoreRoomForAnAlreadyFeasibleShapeDoesNotReopen(t *testing.T) {
 	inventory := &fakeInventory{snapshot: read(now, 1, sledWithFree(16, 32))}
 	c := newInventoryManager(&now, inventory)
 
-	c.RecordICE(context.Background(), specs, ReasonCapacity)
+	c.RecordICE(context.Background(), specs, Unpinned, ReasonCapacity)
 
 	now = now.Add(time.Minute)
 	inventory.snapshot = read(now, 2, sledWithFree(64, 128))
@@ -135,7 +135,7 @@ func TestTheFirstReadingReopensNothing(t *testing.T) {
 	inventory := &fakeInventory{}
 	c := newInventoryManager(&now, inventory)
 
-	c.RecordICE(context.Background(), specs, ReasonCapacity)
+	c.RecordICE(context.Background(), specs, Unpinned, ReasonCapacity)
 
 	now = now.Add(time.Minute)
 	inventory.snapshot = read(now, 1, sledWithFree(64, 128))
@@ -161,7 +161,7 @@ func TestStaleInventoryStopsRulingShapesOut(t *testing.T) {
 		t.Error("a stale reading is still ruling shapes out, so provisioning is frozen")
 	}
 
-	c.RecordICE(context.Background(), specs, ReasonCapacity)
+	c.RecordICE(context.Background(), specs, Unpinned, ReasonCapacity)
 	if unavailable, reason := unavailableFor(c, specs); !unavailable || reason != ReasonCapacity {
 		t.Errorf("Check = (%v, %q), want the refusal history to rule again",
 			unavailable, reason)

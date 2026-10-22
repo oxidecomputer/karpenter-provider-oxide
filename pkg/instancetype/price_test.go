@@ -15,12 +15,17 @@ func TestPriceIsMonotonicInBothDimensions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("instance type %s: %v", it.Name, err)
 		}
-		if len(it.Offerings) != 1 {
-			t.Fatalf("instance type %s has %d offerings, want 1", it.Name, len(it.Offerings))
+		if len(it.Offerings) == 0 {
+			t.Fatalf("instance type %s has no offerings", it.Name)
 		}
 		price := it.Offerings[0].Price
 		if price <= 0 {
 			t.Errorf("instance type %s price = %v, want > 0", it.Name, price)
+		}
+		for _, offering := range it.Offerings {
+			if offering.Price != price {
+				t.Errorf("instance type %s prices its offerings differently: %v", it.Name, offering)
+			}
 		}
 		prices[specs] = price
 	}

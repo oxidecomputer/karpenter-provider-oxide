@@ -118,9 +118,9 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 
 	manager.RecordICE(
 		context.Background(),
-		Specs{Ncpus: 4, MemInGiB: 8},
-		availability.ReasonCapacity,
-	)
+		Specs{Ncpus: 4, MemInGiB: 8}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	for _, tc := range []struct {
 		name   string

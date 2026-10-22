@@ -408,12 +408,39 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 		}
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
-		refused, _ := reading.Unavailable(specs)
 
 		overQuota := false
 		if quotaErr == nil {
 			admits, _ := quota.Admits(requestFor(specs))
 			overQuota = !admits
+		}
+		// One offering per pin, so a refusal under a narrow pin leaves the broader
+		// ones on offer. An unpinned launch is as placeable as any of them.
+		offerings := make(cloudprovider.Offerings, 0, len(v1alpha1.CPUPlatforms))
+		for _, platform := range v1alpha1.CPUPlatforms {
+			refused, _ := reading.Unavailable(specs, availability.Platform(platform))
+			offerings = append(offerings, &cloudprovider.Offering{
+				Available: !refused && !overQuota,
+
+				Price: price(specs),
+				Requirements: scheduling.Requirements{
+					corev1.LabelTopologyZone: scheduling.NewRequirement(
+						corev1.LabelTopologyZone,
+						corev1.NodeSelectorOpIn,
+						ZoneName,
+					),
+					karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
+						karpv1.CapacityTypeLabelKey,
+						corev1.NodeSelectorOpIn,
+						karpv1.CapacityTypeOnDemand,
+					),
+					v1alpha1.LabelInstanceCPUPlatform: scheduling.NewRequirement(
+						v1alpha1.LabelInstanceCPUPlatform,
+						corev1.NodeSelectorOpIn,
+						platform,
+					),
+				},
+			})
 		}
 		instanceTypes = append(instanceTypes, &cloudprovider.InstanceType{
 			Name:     fmt.Sprintf("%d-%d", cpus, mem),
@@ -453,7 +480,12 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 					corev1.NodeSelectorOpIn,
 					cpuMemoryRatio,
 				),
-				// Mirrors the sole offering. Upstream builds the topology-spread domain
+				v1alpha1.LabelInstanceCPUPlatform: scheduling.NewRequirement(
+					v1alpha1.LabelInstanceCPUPlatform,
+					corev1.NodeSelectorOpIn,
+					v1alpha1.CPUPlatforms...,
+				),
+				// Mirrors the offerings. Upstream builds the topology-spread domain
 				// universe from instance type requirements, never from offerings.
 				corev1.LabelTopologyZone: scheduling.NewRequirement(
 					corev1.LabelTopologyZone,
@@ -473,25 +505,7 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 					guestMemory(mem), ephemeral, hasEphemeral,
 				),
 			},
-			Offerings: cloudprovider.Offerings{
-				&cloudprovider.Offering{
-					Available: !refused && !overQuota,
-
-					Price: price(specs),
-					Requirements: scheduling.Requirements{
-						corev1.LabelTopologyZone: scheduling.NewRequirement(
-							corev1.LabelTopologyZone,
-							corev1.NodeSelectorOpIn,
-							ZoneName,
-						),
-						karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
-							karpv1.CapacityTypeLabelKey,
-							corev1.NodeSelectorOpIn,
-							karpv1.CapacityTypeOnDemand,
-						),
-					},
-				},
-			},
+			Offerings: offerings,
 		})
 	}
 	if i.instanceTypes == nil {

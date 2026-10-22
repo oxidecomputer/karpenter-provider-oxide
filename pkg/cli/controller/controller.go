@@ -167,7 +167,7 @@ func Run() error {
 				Ncpus: released.Ncpus,
 
 				MemInGiB: int(released.Memory / cloudprovider.GiB),
-			})
+			}, availability.Platform(released.CPUPlatform))
 		},
 		instance.WithDeadlines(instance.DefaultDeadlines()),
 		instance.WithDiskProvider(disks),

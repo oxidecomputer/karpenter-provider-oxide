@@ -52,9 +52,11 @@ const (
 // Entry is one refused shape, why it was refused, and what the breaker has learned about it.
 type Entry struct {
 	// Shape is the shape that was actually refused.
-	Shape  Shape
-	Reason Reason
-	State  State
+	Shape Shape
+	// Platform is the pin the shape was refused under.
+	Platform Platform
+	Reason   Reason
+	State    State
 
 	// Reach is the smallest shape this entry takes out of consideration, which is at most Shape and may be well below it.
 	Reach Shape
@@ -85,7 +87,8 @@ type Manager struct {
 	rack      capacity.Snapshot
 	rackFresh bool
 
-	launched Shape
+	// launched is the largest running shape seen under each pin.
+	launched map[Platform]Shape
 
 	now    func() time.Time
 	jitter func(time.Duration) time.Duration
@@ -102,22 +105,24 @@ func New(inventory InventoryProvider) *Manager {
 	return &Manager{
 		entries:    map[string]*Entry{},
 		placements: map[placementEntryKey]*placementEntry{},
+		launched:   map[Platform]Shape{},
 		inventory:  inventory,
 		now:        time.Now,
 		jitter:     randomJitter,
 	}
 }
 
-// RecordICE takes a shape, and every shape at least as large, out of consideration.
-func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
+// RecordICE takes a shape, and every shape at least as large, out of
+// consideration for this pin and every narrower one.
+func (c *Manager) RecordICE(ctx context.Context, specs Shape, platform Platform, reason Reason) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := c.now()
-	key := shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB})
+	key := entryKey(specs, platform)
 	entry, ok := c.entries[key]
 	if !ok {
-		entry = &Entry{Shape: specs}
+		entry = &Entry{Shape: specs, Platform: platform}
 		c.entries[key] = entry
 	}
 	from := entry.State
@@ -127,7 +132,7 @@ func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
 	floor := entry.Floor
 	subsumed := 0
 	for existing, other := range c.entries {
-		if existing == key {
+		if existing == key || other.Platform != platform {
 			continue
 		}
 		if !covers(specs, other.Shape) {
@@ -142,7 +147,7 @@ func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
 	}
 
 	if !known(floor) {
-		floor = c.launched
+		floor = c.launchedFor(platform)
 	}
 
 	if known(floor) && atLeast(floor, specs) {
@@ -158,7 +163,7 @@ func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
 	entry.Floor = floor
 	entry.Reach = reachFor(specs, floor, entry.ConsecutiveICEs)
 
-	covering, coveredByOther := c.coveredByOther(specs)
+	covering, coveredByOther := c.coveredByOther(specs, platform)
 	if coveredByOther {
 		entry.Reach = specs
 		entry.Floor = Shape{}
@@ -184,14 +189,18 @@ func (c *Manager) RecordICE(ctx context.Context, specs Shape, reason Reason) {
 	)
 }
 
-// RecordSuccess reports that a launch of this shape succeeded, which disproves every claim that it could not be placed.
-func (c *Manager) RecordSuccess(ctx context.Context, specs Shape) {
+// RecordSuccess reports that a launch of this shape succeeded under this pin,
+// which disproves every claim that it could not be placed under this pin or a broader one.
+func (c *Manager) RecordSuccess(ctx context.Context, specs Shape, platform Platform) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	changed := 0
 	cleared := 0
 	for key, entry := range c.entries {
+		if !entry.Platform.Covers(platform) {
+			continue
+		}
 		if covers(entry.Shape, specs) {
 			delete(c.entries, key)
 			cleared++
@@ -243,8 +252,9 @@ func (c *Manager) RecordSuccess(ctx context.Context, specs Shape) {
 	}
 }
 
-// SeedLaunchable reports that the cluster is running a node of this shape, which is proof the rack placed it.
-func (c *Manager) SeedLaunchable(ctx context.Context, specs Shape) {
+// SeedLaunchable reports that the cluster is running a node of this shape under
+// this pin, which is proof the rack placed it.
+func (c *Manager) SeedLaunchable(ctx context.Context, specs Shape, platform Platform) {
 	if !known(specs) {
 		return
 	}
@@ -252,27 +262,47 @@ func (c *Manager) SeedLaunchable(ctx context.Context, specs Shape) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if known(c.launched) && shapeSize(c.launched) >= shapeSize(specs) {
+	previous := c.launched[platform]
+	if known(previous) && shapeSize(previous) >= shapeSize(specs) {
 		return
 	}
-	previous := c.launched
-	c.launched = specs
+	c.launched[platform] = specs
 
 	log.FromContext(ctx).V(1).Info(
 		"recorded a running shape as the launchable floor",
-		"instance-type", shapeKey(Shape{Ncpus: specs.Ncpus, MemInGiB: specs.MemInGiB}),
+		"instance-type", entryKey(specs, platform),
 		"previous", floorName(previous),
 	)
 }
 
-// RecordCapacityReleased reports that the rack has taken back the resources of an instance of this shape.
-func (c *Manager) RecordCapacityReleased(ctx context.Context, released Shape) {
+// launchedFor is the largest running shape that proves this pin placeable: one
+// seen under this pin or any narrower one.
+func (c *Manager) launchedFor(platform Platform) Shape {
+	floor := Shape{}
+	for seeded, specs := range c.launched {
+		if !platform.Covers(seeded) {
+			continue
+		}
+		if !known(floor) || shapeSize(specs) > shapeSize(floor) {
+			floor = specs
+		}
+	}
+	return floor
+}
+
+// RecordCapacityReleased reports that the rack has taken back the resources of
+// an instance of this shape that ran under this pin. The freed sled can take
+// this pin and any broader one, so only those entries reopen.
+func (c *Manager) RecordCapacityReleased(ctx context.Context, released Shape, platform Platform) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweep(ctx)
 
 	for key, entry := range c.entries {
 		if entry.State != StateBackoff || !fits(entry.Shape, released) {
+			continue
+		}
+		if !entry.Platform.Covers(platform) {
 			continue
 		}
 		entry.State = StateHalfOpen
@@ -310,12 +340,12 @@ func (s Snapshot) Rack() (capacity.Snapshot, InventoryState) {
 	return s.rack, s.inventory
 }
 
-// Unavailable reports whether a shape is ruled out in this reading, and why.
-func (s Snapshot) Unavailable(specs Shape) (bool, Reason) {
+// Unavailable reports whether a shape is ruled out under this pin in this reading, and why.
+func (s Snapshot) Unavailable(specs Shape, platform Platform) (bool, Reason) {
 	if s.inventory == InventoryFresh && !s.rack.CanFit(resourcesFor(specs)) {
 		return true, ReasonCapacity
 	}
-	return covered(s.entries, specs)
+	return covered(s.entries, specs, platform)
 }
 
 // Snapshot takes one reading of the breaker and the rack together.
@@ -468,11 +498,14 @@ func stateOrAvailable(state State) string {
 	return string(state)
 }
 
-func covered(entries []Entry, specs Shape) (bool, Reason) {
+func covered(entries []Entry, specs Shape, platform Platform) (bool, Reason) {
 	found := false
 	reason := Reason("")
 	for _, e := range entries {
 		if e.State != StateBackoff || !covers(e.reachOrSpecs(), specs) {
+			continue
+		}
+		if !e.Platform.Covers(platform) {
 			continue
 		}
 		found = true
@@ -492,9 +525,12 @@ func fits(specs, released Shape) bool {
 	return specs.Ncpus <= released.Ncpus && specs.MemInGiB <= released.MemInGiB
 }
 
-func (c *Manager) coveredByOther(specs Shape) (Shape, bool) {
+func (c *Manager) coveredByOther(specs Shape, platform Platform) (Shape, bool) {
 	for _, entry := range c.entries {
-		if entry.Shape == specs {
+		if entry.Shape == specs && entry.Platform == platform {
+			continue
+		}
+		if !entry.Platform.Covers(platform) {
 			continue
 		}
 		if covers(entry.Shape, specs) {

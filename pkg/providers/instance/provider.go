@@ -51,6 +51,8 @@ type OwnedDisk struct {
 type Released struct {
 	Ncpus  int
 	Memory uint64
+	// CPUPlatform is the pin the instance ran under, empty when it had none.
+	CPUPlatform string
 }
 
 // Provider creates and deletes instances in a single Oxide project.
@@ -273,8 +275,9 @@ func (p *Provider) notifyReleased(ctx context.Context, instance *oxide.Instance)
 		return
 	}
 	p.onRelease(ctx, Released{
-		Ncpus:  int(instance.Ncpus),
-		Memory: uint64(instance.Memory),
+		Ncpus:       int(instance.Ncpus),
+		Memory:      uint64(instance.Memory),
+		CPUPlatform: string(instance.CpuPlatform),
 	})
 }
 

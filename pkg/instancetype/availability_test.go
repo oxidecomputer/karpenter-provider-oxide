@@ -31,7 +31,12 @@ func TestInstanceTypesReflectSharedAvailability(t *testing.T) {
 		t.Fatal("instance type 8-16 is unavailable before anything is refused")
 	}
 
-	manager.RecordICE(t.Context(), Specs{Ncpus: 8, MemInGiB: 16}, availability.ReasonCapacity)
+	manager.RecordICE(
+		t.Context(),
+		Specs{Ncpus: 8, MemInGiB: 16},
+		availability.Unpinned,
+		availability.ReasonCapacity,
+	)
 
 	for _, tc := range []struct {
 		name string
@@ -104,9 +109,9 @@ func TestAvailabilityDoesNotChangePrice(t *testing.T) {
 
 	manager.RecordICE(
 		context.Background(),
-		Specs{Ncpus: 8, MemInGiB: 16},
-		availability.ReasonCapacity,
-	)
+		Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	after, _ := provider.Get("8-16", Options{})
 	if after.Offerings[0].Available {

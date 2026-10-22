@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/nodeoverlay"
 	karpoptions "sigs.k8s.io/karpenter/pkg/operator/options"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
 )
 
 const (
@@ -163,26 +164,37 @@ func (c *OxideCloudProvider) Create(
 		candidates = req.Values
 	}
 	placement := placementFor(nodeClass.Status.AffinityGroups)
+	platforms, err := cpuPlatformsFor(nodeClaim)
+	if err != nil {
+		return nil, err
+	}
 
 	blockedBy := availability.Reason("")
-	available := lo.Filter(candidates, func(candidate string, _ int) bool {
+	var available []launchCandidate
+	for _, candidate := range candidates {
 		specs, err := instancetype.InstanceTypeToSpecs(candidate)
 		if err != nil {
-			return false
+			continue
 		}
 		if c.instanceTypeProvider.IsOverQuota(specs) {
 			blockedBy = availability.ReasonQuota
-			return false
+			continue
 		}
-		decision := c.availability.Check(availability.Request{Shape: specs, Placement: placement})
-		if !decision.Available {
-			if blockedBy != availability.ReasonQuota {
-				blockedBy = decision.Reason
+		for _, platform := range platforms {
+			decision := c.availability.Check(availability.Request{
+				Shape:     specs,
+				Platform:  platform,
+				Placement: placement,
+			})
+			if !decision.Available {
+				if blockedBy != availability.ReasonQuota {
+					blockedBy = decision.Reason
+				}
+				continue
 			}
-			return false
+			available = append(available, launchCandidate{specs: specs, platform: platform})
 		}
-		return true
-	})
+	}
 
 	if len(candidates) > 0 && len(available) == 0 {
 		return nil, cloudprovider.NewInsufficientCapacityError(
@@ -190,22 +202,27 @@ func (c *OxideCloudProvider) Create(
 		)
 	}
 
-	ordered := lo.FilterMap(available, func(candidate string, _ int) (instancetype.Specs, bool) {
-		specs, err := instancetype.InstanceTypeToSpecs(candidate)
-		return specs, err == nil
+	// Stable, so shapes of one price keep the platform order the NodeClaim allowed.
+	slices.SortStableFunc(available, func(a, b launchCandidate) int {
+		return instancetype.ComparePrice(a.specs, b.specs)
 	})
-	slices.SortFunc(ordered, instancetype.ComparePrice)
 
-	if len(ordered) == 0 {
+	if len(available) == 0 {
 		return nil, fmt.Errorf("no instance types match NodeClaim requirements")
 	}
 
-	instanceType, held := instancetype.Specs{}, false
+	var instanceType instancetype.Specs
+	var platform availability.Platform
+	held := false
 	var probe *availability.Probe
-	for _, specs := range ordered {
-		request := availability.Request{Shape: specs, Placement: placement}
+	for _, candidate := range available {
+		request := availability.Request{
+			Shape:     candidate.specs,
+			Platform:  candidate.platform,
+			Placement: placement,
+		}
 		if acquired, ok := c.availability.Acquire(request); ok {
-			instanceType, held = specs, true
+			instanceType, platform, held = candidate.specs, candidate.platform, true
 			probe = acquired
 			break
 		}
@@ -214,7 +231,7 @@ func (c *OxideCloudProvider) Create(
 
 		return nil, fmt.Errorf(
 			"all %d instance types the NodeClaim can use are being probed by another launch",
-			len(ordered),
+			len(available),
 		)
 	}
 
@@ -297,7 +314,7 @@ func (c *OxideCloudProvider) Create(
 			UserData:    base64.StdEncoding.EncodeToString([]byte(userData)),
 
 			EnableJumboFrames: nodeClass.Spec.JumboFrames,
-			CpuPlatform:       oxide.InstanceCpuPlatform(nodeClass.Spec.CPUPlatform),
+			CpuPlatform:       oxide.InstanceCpuPlatform(platform),
 
 			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
 
@@ -357,6 +374,39 @@ func (c *OxideCloudProvider) Create(
 	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
 
 	return resolvedNodeClaim, nil
+}
+
+// launchCandidate is one shape under one pin that a NodeClaim allows.
+type launchCandidate struct {
+	specs    instancetype.Specs
+	platform availability.Platform
+}
+
+// cpuPlatformsFor is the pins a NodeClaim allows, in launch order. A NodeClaim
+// that says nothing about the platform gets the default pin, which is what an
+// unpinned guest would see anyway but leaves the node labelled.
+func cpuPlatformsFor(nodeClaim *karpcorev1.NodeClaim) ([]availability.Platform, error) {
+	requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(
+		nodeClaim.Spec.Requirements...,
+	)
+	if !requirements.Has(v1alpha1.LabelInstanceCPUPlatform) {
+		return []availability.Platform{availability.Platform(v1alpha1.CPUPlatformDefault)}, nil
+	}
+	requirement := requirements.Get(v1alpha1.LabelInstanceCPUPlatform)
+	var platforms []availability.Platform
+	for _, platform := range v1alpha1.CPUPlatforms {
+		if requirement.Has(platform) {
+			platforms = append(platforms, availability.Platform(platform))
+		}
+	}
+	if len(platforms) == 0 {
+		return nil, fmt.Errorf(
+			"the NodeClaim requires a CPU platform the provider does not offer: %s %s",
+			requirement.Operator(),
+			requirement.Values(),
+		)
+	}
+	return platforms, nil
 }
 
 func selectSubnet(subnets []v1alpha1.OxideSubnet) (v1alpha1.OxideSubnet, error) {
@@ -806,19 +856,27 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 		catalog,
 	); ok {
 		for key, req := range it.Requirements {
-			if req.Operator() != corev1.NodeSelectorOpIn {
+			if req.Operator() != corev1.NodeSelectorOpIn || req.Len() != 1 {
 				continue
 			}
-			labels[key] = req.Values()[0]
+			labels[key] = req.Any()
 		}
+		// The platform is the one dimension offerings differ in, and only the
+		// instance says which one it launched under, if any.
 		for key, req := range it.Offerings.Cheapest().Requirements {
-			if req.Operator() != corev1.NodeSelectorOpIn {
+			if req.Operator() != corev1.NodeSelectorOpIn || req.Len() != 1 {
 				continue
 			}
-			labels[key] = req.Values()[0]
+			if key == v1alpha1.LabelInstanceCPUPlatform {
+				continue
+			}
+			labels[key] = req.Any()
 		}
 		nodeClaim.Status.Allocatable = it.Allocatable()
 		nodeClaim.Status.Capacity = it.Capacity
+	}
+	if oxideInstance.CpuPlatform != "" {
+		labels[v1alpha1.LabelInstanceCPUPlatform] = string(oxideInstance.CpuPlatform)
 	}
 	labels = lo.Assign(labels, nodeClaim.Labels)
 	nodeClaim.Labels = labels

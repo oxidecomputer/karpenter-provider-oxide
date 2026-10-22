@@ -77,7 +77,10 @@ func sortRanges(ranges []v1alpha1.UnavailableRange) {
 		if delta := a.MaxNcpus - b.MaxNcpus; delta != 0 {
 			return delta
 		}
-		return a.MaxMemoryGiB - b.MaxMemoryGiB
+		if delta := a.MaxMemoryGiB - b.MaxMemoryGiB; delta != 0 {
+			return delta
+		}
+		return strings.Compare(a.CPUPlatform, b.CPUPlatform)
 	})
 }
 

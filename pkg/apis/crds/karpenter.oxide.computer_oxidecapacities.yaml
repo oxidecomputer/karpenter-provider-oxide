@@ -107,6 +107,10 @@ spec:
                           description: ConsecutiveRefusals is how many times in a
                             row a launch in this range has been refused.
                           type: integer
+                        cpuPlatform:
+                          description: CPUPlatform is the platform the refusal was
+                            under; a range with none is out for every platform.
+                          type: string
                         fromMemoryGiB:
                           type: integer
                         fromNcpus:

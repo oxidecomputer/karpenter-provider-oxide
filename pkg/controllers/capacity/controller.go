@@ -126,7 +126,11 @@ func (c *Controller) seedLaunchableFloor(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		c.availability.SeedLaunchable(ctx, specs)
+		c.availability.SeedLaunchable(
+			ctx,
+			specs,
+			availability.Platform(nodeClaim.Labels[v1alpha1.LabelInstanceCPUPlatform]),
+		)
 	}
 }
 
@@ -160,6 +164,7 @@ func (c *Controller) render(reading availability.Snapshot) v1alpha1.OxideCapacit
 				entry.Shape.Ncpus,
 				entry.Shape.MemInGiB,
 			),
+			CPUPlatform:         string(entry.Platform),
 			Reason:              string(entry.Reason),
 			State:               shapeState(entry.State),
 			ConsecutiveRefusals: entry.ConsecutiveICEs,

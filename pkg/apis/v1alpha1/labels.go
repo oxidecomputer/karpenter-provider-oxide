@@ -29,6 +29,7 @@ func init() {
 		LabelInstanceCPU,
 		LabelInstanceMemory,
 		LabelInstanceCPUMemoryRatio,
+		LabelInstanceCPUPlatform,
 	)
 	karpv1.WellKnownResources.Insert()
 }
@@ -56,7 +57,23 @@ var (
 	LabelInstanceCPU            = apis.Group + "/instance-cpu"
 	LabelInstanceMemory         = apis.Group + "/instance-memory"
 	LabelInstanceCPUMemoryRatio = apis.Group + "/instance-cpu-memory-ratio"
-	LabelNodeClass              = apis.Group + "/oxidenodeclass"
+	// CPUPlatform is the Oxide CPU platform a launch is pinned to. A pin is a
+	// minimum: the instance only lands on sleds with every feature of that
+	// platform.
+	LabelInstanceCPUPlatform = apis.Group + "/instance-cpu-platform"
+	LabelNodeClass           = apis.Group + "/oxidenodeclass"
+
+	CPUPlatformAmdMilan   = "amd_milan"
+	CPUPlatformAmdTurin   = "amd_turin"
+	CPUPlatformAmdTurinV2 = "amd_turin_v2"
+
+	// CPUPlatforms is every platform offered, in the order a launch tries them
+	// when a NodeClaim leaves it more than one.
+	CPUPlatforms = []string{CPUPlatformAmdTurinV2, CPUPlatformAmdTurin, CPUPlatformAmdMilan}
+	// CPUPlatformDefault is the pin for a NodeClaim that asks for none. Milan is
+	// the feature set an unpinned guest gets on every known sled family, so the
+	// pin costs no placement and keeps the node's label honest.
+	CPUPlatformDefault = CPUPlatformAmdMilan
 
 	// Sled placement labels, written to Nodes by the optional inventory controller.
 	LabelSledID          = apis.Group + "/sled-id"

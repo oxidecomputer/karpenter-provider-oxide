@@ -108,9 +108,9 @@ func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
 	c, kubeClient := newController(t, nil)
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 2, MemInGiB: 4},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 2, MemInGiB: 4}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -137,14 +137,15 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 	c, kubeClient := newController(t, nil)
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
+
+		availability.ReasonCapacity)
+
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 32, MemInGiB: 64},
-		availability.ReasonQuota,
-	)
+		instancetype.Specs{Ncpus: 32, MemInGiB: 64}, availability.Unpinned,
+
+		availability.ReasonQuota)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -430,9 +431,9 @@ func TestUnchangedViewIsNotRewritten(t *testing.T) {
 	c, kubeClient := newController(t, nil)
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 8, MemInGiB: 16},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -450,9 +451,10 @@ func TestUnchangedViewIsNotRewritten(t *testing.T) {
 
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 4, MemInGiB: 8},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 4, MemInGiB: 8}, availability.Unpinned,
+
+		availability.ReasonCapacity)
+
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
@@ -575,14 +577,15 @@ func TestReconcilePublishesTheSkippedRangeNotJustTheRefusal(t *testing.T) {
 
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 32, MemInGiB: 64},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 32, MemInGiB: 64}, availability.Unpinned,
+
+		availability.ReasonCapacity)
+
 	c.availability.RecordICE(
 		t.Context(),
-		instancetype.Specs{Ncpus: 31, MemInGiB: 62},
-		availability.ReasonCapacity,
-	)
+		instancetype.Specs{Ncpus: 31, MemInGiB: 62}, availability.Unpinned,
+
+		availability.ReasonCapacity)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)

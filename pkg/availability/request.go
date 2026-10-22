@@ -18,7 +18,8 @@ func (m *Manager) Check(request Request) Decision {
 	if m.rackFresh && !m.rack.CanFit(resourcesFor(request.Shape)) {
 		return Decision{Reason: ReasonCapacity}
 	}
-	if unavailable, reason := coveredEntries(m.entries, request.Shape); unavailable {
+	unavailable, reason := coveredEntries(m.entries, request.Shape, request.Platform)
+	if unavailable {
 		return Decision{Reason: reason}
 	}
 	for _, entry := range m.placements {
@@ -48,7 +49,7 @@ func (m *Manager) Acquire(request Request) (*Probe, bool) {
 
 	probingGlobal := false
 	for _, entry := range m.entries {
-		if !covers(entry.Reach, request.Shape) {
+		if !covers(entry.Reach, request.Shape) || !entry.Platform.Covers(request.Platform) {
 			continue
 		}
 		probingGlobal = true
@@ -69,7 +70,7 @@ func (m *Manager) Acquire(request Request) (*Probe, bool) {
 	}
 
 	for _, entry := range m.entries {
-		if covers(entry.Reach, request.Shape) {
+		if covers(entry.Reach, request.Shape) && entry.Platform.Covers(request.Platform) {
 			entry.probeInFlight = true
 		}
 	}
@@ -91,7 +92,7 @@ func (m *Manager) release(request Request) {
 	defer m.mu.Unlock()
 
 	for _, entry := range m.entries {
-		if covers(entry.Reach, request.Shape) {
+		if covers(entry.Reach, request.Shape) && entry.Platform.Covers(request.Platform) {
 			entry.probeInFlight = false
 		}
 	}
@@ -102,10 +103,10 @@ func (m *Manager) release(request Request) {
 	}
 }
 
-func coveredEntries(entries map[string]*Entry, shape Shape) (bool, Reason) {
+func coveredEntries(entries map[string]*Entry, shape Shape, platform Platform) (bool, Reason) {
 	values := make([]Entry, 0, len(entries))
 	for _, entry := range entries {
 		values = append(values, *entry)
 	}
-	return covered(values, shape)
+	return covered(values, shape, platform)
 }
