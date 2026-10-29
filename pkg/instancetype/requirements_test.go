@@ -20,7 +20,7 @@ func TestRequirementsCoverTopologyLabels(t *testing.T) {
 	}
 
 	for label, want := range map[string]string{
-		corev1.LabelTopologyZone:    ZoneName,
+		corev1.LabelTopologyZone:    DefaultTopology.Zone,
 		karpv1.CapacityTypeLabelKey: karpv1.CapacityTypeOnDemand,
 	} {
 		got := it.Requirements.Get(label)
@@ -30,5 +30,34 @@ func TestRequirementsCoverTopologyLabels(t *testing.T) {
 		if offered := it.Offerings[0].Requirements.Get(label); !offered.Has(want) {
 			t.Errorf("offering %s is %v, want %q", label, offered.Values(), want)
 		}
+	}
+	region := it.Requirements.Get(corev1.LabelTopologyRegion)
+	if !region.Has(DefaultTopology.Region) || region.Len() != 1 {
+		t.Errorf("region requirement is %v, want only %q", region.Values(), DefaultTopology.Region)
+	}
+}
+
+func TestSetTopologyRebuildsCatalog(t *testing.T) {
+	provider := providerUsing(t, nil, availability.New(nil))
+	if _, ok := provider.Get("8-16", Options{}); !ok {
+		t.Fatal("instance type 8-16 is missing from the catalog")
+	}
+
+	provider.SetTopology(SiloTopology("prod"))
+
+	it, ok := provider.Get("8-16", Options{})
+	if !ok {
+		t.Fatal("instance type 8-16 is missing from the catalog")
+	}
+	for label, want := range map[string]string{
+		corev1.LabelTopologyZone:   "prod",
+		corev1.LabelTopologyRegion: "prod",
+	} {
+		if got := it.Requirements.Get(label); !got.Has(want) || got.Len() != 1 {
+			t.Errorf("%s requirement is %v, want only %q", label, got.Values(), want)
+		}
+	}
+	if zone := it.Offerings[0].Requirements.Get(corev1.LabelTopologyZone); !zone.Has("prod") {
+		t.Errorf("offering zone is %v, want %q", zone.Values(), "prod")
 	}
 }

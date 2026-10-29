@@ -101,8 +101,13 @@ func TestInstanceToNodeClaimLabelsOnlyAPinnedPlatform(t *testing.T) {
 		if got != tc.want || present != (tc.want != "") {
 			t.Errorf("pin %q: label = %q (present %v), want %q", tc.pin, got, present, tc.want)
 		}
-		if zone := nodeClaim.Labels[corev1.LabelTopologyZone]; zone != instancetype.ZoneName {
-			t.Errorf("pin %q: zone label = %q, want %q", tc.pin, zone, instancetype.ZoneName)
+		if zone := nodeClaim.Labels[corev1.LabelTopologyZone]; zone != instancetype.DefaultTopology.Zone {
+			t.Errorf(
+				"pin %q: zone label = %q, want %q",
+				tc.pin,
+				zone,
+				instancetype.DefaultTopology.Zone,
+			)
 		}
 	}
 }

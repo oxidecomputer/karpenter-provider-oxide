@@ -52,7 +52,7 @@ func TestDescribe(t *testing.T) {
 		t.Errorf("kubelet args = %v", first.KubeletArgs)
 	}
 	if len(first.Offerings) != 3 || first.Offerings[0].Price != 1.125 ||
-		first.Offerings[0].Zone != "rack" || first.Offerings[0].CPUPlatform != "amd_turin_v2" {
+		first.Offerings[0].Zone != instancetype.DefaultTopology.Zone || first.Offerings[0].CPUPlatform != "amd_turin_v2" {
 		t.Errorf("offerings = %+v", first.Offerings)
 	}
 }

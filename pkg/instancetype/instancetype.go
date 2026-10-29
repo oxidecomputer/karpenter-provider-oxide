@@ -37,11 +37,24 @@ const (
 
 	cpuCostWeight = 1.0
 	memCostWeight = 0.125
-
-	// Oxide has no zones; the rack is the whole failure domain. Advertised anyway so
-	// that topology spreads on topology.kubernetes.io/zone see a domain to spread over.
-	ZoneName = "rack"
 )
+
+// Topology is the region and zone every offering is placed in.
+type Topology struct {
+	Region string
+	Zone   string
+}
+
+// SiloTopology names the silo as both region and zone. A silo is one control plane
+// that will span availability zones, which is what a region is. Until an AZ can be
+// targeted at launch there is no finer failure domain to offer, so the zone is the
+// silo too; it becomes the AZ name once there is one to pick.
+func SiloTopology(silo string) Topology {
+	return Topology{Region: silo, Zone: silo}
+}
+
+// DefaultTopology stands in until the silo is known.
+var DefaultTopology = SiloTopology("silo")
 
 type Provider struct {
 	mu sync.Mutex
@@ -55,6 +68,8 @@ type Provider struct {
 	quotas QuotaProvider
 
 	shapes []Specs
+
+	topology Topology
 }
 
 // ShapeConfig controls the density of the generated instance type catalog.
@@ -120,7 +135,16 @@ func NewProviderWithShapeConfig(
 		availability: manager,
 		quotas:       quotas,
 		shapes:       shapes,
+		topology:     DefaultTopology,
 	}, nil
+}
+
+// SetTopology replaces the region and zone the catalog is offered in.
+func (i *Provider) SetTopology(topology Topology) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.topology = topology
+	i.instanceTypes = nil
 }
 
 func SpecsToInstanceTypeName(ncpus, memInGiB int) string {
@@ -427,7 +451,7 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 					corev1.LabelTopologyZone: scheduling.NewRequirement(
 						corev1.LabelTopologyZone,
 						corev1.NodeSelectorOpIn,
-						ZoneName,
+						i.topology.Zone,
 					),
 					karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
 						karpv1.CapacityTypeLabelKey,
@@ -490,7 +514,12 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 				corev1.LabelTopologyZone: scheduling.NewRequirement(
 					corev1.LabelTopologyZone,
 					corev1.NodeSelectorOpIn,
-					ZoneName,
+					i.topology.Zone,
+				),
+				corev1.LabelTopologyRegion: scheduling.NewRequirement(
+					corev1.LabelTopologyRegion,
+					corev1.NodeSelectorOpIn,
+					i.topology.Region,
 				),
 				karpv1.CapacityTypeLabelKey: scheduling.NewRequirement(
 					karpv1.CapacityTypeLabelKey,
