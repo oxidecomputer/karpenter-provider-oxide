@@ -1,13 +1,13 @@
 module github.com/oxidecomputer/karpenter-provider-oxide
 
-go 1.26.7
+go 1.26.10
 
 // Development tools live in tools/go.mod so their (very large) dependency
 // graph never reaches the controller's own module graph. See the GO_TOOL
 // variable in the Makefile.
 
 require (
-	github.com/awslabs/operatorpkg v0.0.0-20260812232916-6d329cee9a40
+	github.com/awslabs/operatorpkg v0.0.0-20261002163259-5e8ed3699dea
 	github.com/google/uuid v1.6.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/oxidecomputer/oxide.go v0.10.0
@@ -15,7 +15,7 @@ require (
 	github.com/samber/lo v1.53.0
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	k8s.io/api v0.36.4
 	k8s.io/apiextensions-apiserver v0.36.4
 	k8s.io/apimachinery v0.36.4
@@ -23,7 +23,7 @@ require (
 	k8s.io/client-go v0.36.4
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
 	sigs.k8s.io/controller-runtime v0.24.1
-	sigs.k8s.io/karpenter v1.14.1
+	sigs.k8s.io/karpenter v1.15.1
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -75,7 +75,6 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0 // indirect
@@ -90,11 +89,11 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260825221802-da73d73af1c5 // indirect
@@ -103,6 +102,7 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	k8s.io/autoscaler/vertical-pod-autoscaler v1.7.0 // indirect
 	k8s.io/cloud-provider v0.35.8 // indirect
 	k8s.io/component-base v0.36.4 // indirect
 	k8s.io/component-helpers v0.35.8 // indirect

@@ -215,6 +215,7 @@ func Run() error {
 			overlayUndecoratedCloudProvider,
 			clusterState,
 			karpcore.InstanceTypeStore,
+			karpcore.PredictionStore,
 		),
 		nodeclass.NewController(
 			karpcore.GetClient(),

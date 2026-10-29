@@ -1118,6 +1118,11 @@ func smallestSpecs(candidates []string) instancetype.Specs {
 	return smallest
 }
 
+// In-place reboot is not supported yet; no repair policy requests it.
+func (c *OxideCloudProvider) Reboot(context.Context, *karpcorev1.NodeClaim, string) error {
+	return cloudprovider.NewNodeRebootNotImplementedError()
+}
+
 // RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter to monitor on the node.
 func (c *OxideCloudProvider) RepairPolicies() []cloudprovider.RepairPolicy {
 	return c.repairPolicies
