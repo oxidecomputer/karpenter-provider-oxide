@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
+	"sigs.k8s.io/karpenter/pkg/controllers/node/health"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	karpentercore "sigs.k8s.io/karpenter/pkg/operator"
 )
@@ -190,7 +191,7 @@ func Run() error {
 		availabilityManager,
 		storageRefusals,
 		bootstrappers,
-		inventoryCfg.repairPolicies(),
+		repairPolicies(),
 
 		[]providers.Drifter{
 			images, storage.NewDrifter(), subnets, sshKeys, ipPools, affinityGroups,
@@ -202,7 +203,18 @@ func Run() error {
 		karpcore.GetClient(),
 		karpcore.InstanceTypeStore,
 	)
-	clusterState := state.NewCluster(karpcore.Clock, karpcore.GetClient(), cloudProvider)
+	// Nil unless the NodeRepair gate is on; the disruption repair method
+	// panics if cluster state was built without it.
+	repairPolicyMatcher, err := health.NewRepairPolicyMatcher(ctx, cloudProvider)
+	if err != nil {
+		return err
+	}
+	clusterState := state.NewCluster(
+		karpcore.Clock,
+		karpcore.GetClient(),
+		cloudProvider,
+		state.WithRepairPolicyMatcher(repairPolicyMatcher),
+	)
 
 	controllers := append(
 		corecontrollers.NewControllers(
@@ -292,10 +304,9 @@ func inventoryConfigFromEnv() inventoryConfig {
 	return inventoryConfig{enabled: enabled}
 }
 
-func (c inventoryConfig) repairPolicies() []karpcloudprovider.RepairPolicy {
-	if !c.enabled {
-		return nil
-	}
+// Defined even without inventory, which is what sets the condition: core
+// refuses to start NodeRepair against a provider with no policies.
+func repairPolicies() []karpcloudprovider.RepairPolicy {
 	return []karpcloudprovider.RepairPolicy{{
 		ConditionType:      v1alpha1.ConditionTypeSledUnhealthy,
 		ConditionStatus:    corev1.ConditionTrue,
