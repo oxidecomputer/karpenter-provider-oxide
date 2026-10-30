@@ -311,5 +311,6 @@ func repairPolicies() []karpcloudprovider.RepairPolicy {
 		ConditionType:      v1alpha1.ConditionTypeSledUnhealthy,
 		ConditionStatus:    corev1.ConditionTrue,
 		TolerationDuration: inventoryRepairTolerationDuration,
+		Action:             karpcloudprovider.ReplaceNode,
 	}}
 }
