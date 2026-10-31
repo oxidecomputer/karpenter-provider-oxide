@@ -261,7 +261,7 @@ func TestDriftReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nodeClaim := &karpv1.NodeClaim{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+				Annotations: map[string]string{},
 			}
 			if tt.recorded != nil {
 				nodeClaim.Annotations[v1alpha1.AnnotationSSHKeys] = *tt.recorded

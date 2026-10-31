@@ -14,7 +14,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/oxide.go/oxide"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -150,7 +149,7 @@ func TestExternalIPSetsSelectsThePoolTheEntryNamed(t *testing.T) {
 func TestOwnershipMarksEveryResourceOfALaunch(t *testing.T) {
 	c := &OxideCloudProvider{clusterUID: types.UID("cluster-uid")}
 	nodeClaim := &karpcorev1.NodeClaim{
-		ObjectMeta: v1.ObjectMeta{Name: "default-abc12", UID: types.UID("nodeclaim-uid")},
+		Name: "default-abc12", UID: types.UID("nodeclaim-uid"),
 	}
 	describe := c.ownership(nodeClaim)
 
@@ -184,12 +183,10 @@ func TestOwnershipMarksEveryResourceOfALaunch(t *testing.T) {
 
 func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 	nodeClaim := &karpcorev1.NodeClaim{
-		ObjectMeta: v1.ObjectMeta{
-			Name: "default-abc12",
-			Annotations: map[string]string{
-				v1alpha1.AnnotationDiskPrefix: "kd-abcdefghijkl-",
-				v1alpha1.AnnotationBootDisk:   "pooled-boot",
-			},
+		Name: "default-abc12",
+		Annotations: map[string]string{
+			v1alpha1.AnnotationDiskPrefix: "kd-abcdefghijkl-",
+			v1alpha1.AnnotationBootDisk:   "pooled-boot",
 		},
 	}
 
@@ -213,7 +210,7 @@ func TestTeardownUsesTheRecordedDiskPrefix(t *testing.T) {
 }
 
 func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
-	nodeClaim := &karpcorev1.NodeClaim{ObjectMeta: v1.ObjectMeta{Name: "default-abc12"}}
+	nodeClaim := &karpcorev1.NodeClaim{Name: "default-abc12"}
 
 	owner := ownership.Marker{
 		ClusterUID:    "cluster",
@@ -232,7 +229,7 @@ func TestTeardownFallsBackToTheLegacyNamesWithoutARecord(t *testing.T) {
 
 func TestReleaseUnstartedBootDiskRetiresWhenTheDiskIsUnreadable(t *testing.T) {
 	record := &v1alpha1.OxideBootDisk{
-		ObjectMeta: v1.ObjectMeta{Name: "pool-record"},
+		Name: "pool-record",
 		Spec: v1alpha1.OxideBootDiskSpec{
 			DiskName: "pool-disk",
 			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "claim", UID: types.UID("claim-uid")},
@@ -285,7 +282,7 @@ func TestReleaseUnstartedBootDiskRetiresWhenTheDiskIsUnreadable(t *testing.T) {
 }
 
 func TestCreateRejectsAnUnreadyNodeClass(t *testing.T) {
-	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: v1.ObjectMeta{Name: "default"}}
+	nodeClass := &v1alpha1.OxideNodeClass{Name: "default"}
 	nodeClass.StatusConditions().SetFalse(
 		v1alpha1.ConditionTypeSubnetsResolved,
 		"SubnetsNotFound",
@@ -299,7 +296,7 @@ func TestCreateRejectsAnUnreadyNodeClass(t *testing.T) {
 			Build(),
 	}
 	nodeClaim := &karpcorev1.NodeClaim{
-		ObjectMeta: v1.ObjectMeta{Name: "claim"},
+		Name: "claim",
 		Spec: karpcorev1.NodeClaimSpec{
 			NodeClassRef: &karpcorev1.NodeClassReference{Name: "default"},
 		},

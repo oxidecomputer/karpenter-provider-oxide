@@ -8,7 +8,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	karpoptions "sigs.k8s.io/karpenter/pkg/operator/options"
@@ -42,9 +41,9 @@ func TestEffectiveInstanceTypeUsesNodeOverlayStore(t *testing.T) {
 	ctx := karpoptions.ToContext(context.Background(), &karpoptions.Options{
 		FeatureGates: karpoptions.FeatureGates{NodeOverlay: true},
 	})
-	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+	nodeClaim := &karpv1.NodeClaim{Labels: map[string]string{
 		karpv1.NodePoolLabelKey: "priced-pool",
-	}}}
+	}}
 
 	got, err := provider.effectiveInstanceType(ctx, nodeClaim, base.Name, instancetype.Options{})
 	if err != nil {
@@ -67,10 +66,10 @@ func TestAnnotateHourlyPriceUsesResolvedOffering(t *testing.T) {
 	base := instancetype.NewProvider(nil, availability.New(nil)).InstanceTypes(instancetype.Options{})[0]
 	instanceType := base.DeepCopy()
 	instanceType.Offerings[0].Price = 0.42
-	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+	nodeClaim := &karpv1.NodeClaim{Labels: map[string]string{
 		corev1.LabelTopologyZone:    base.Offerings[0].Zone(),
 		karpv1.CapacityTypeLabelKey: base.Offerings[0].CapacityType(),
-	}}}
+	}}
 
 	annotateHourlyPrice(nodeClaim, instanceType)
 
@@ -81,10 +80,10 @@ func TestAnnotateHourlyPriceUsesResolvedOffering(t *testing.T) {
 
 func TestAnnotateHourlyPriceOmitsUnknownOffering(t *testing.T) {
 	base := instancetype.NewProvider(nil, availability.New(nil)).InstanceTypes(instancetype.Options{})[0]
-	nodeClaim := &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+	nodeClaim := &karpv1.NodeClaim{Labels: map[string]string{
 		corev1.LabelTopologyZone:    "another-rack",
 		karpv1.CapacityTypeLabelKey: base.Offerings[0].CapacityType(),
-	}}}
+	}}
 
 	annotateHourlyPrice(nodeClaim, base)
 

@@ -55,8 +55,8 @@ func (f *instanceAPI) client(t *testing.T) *oxide.Client {
 
 func launchedClaim(launchedAgo time.Duration) *karpv1.NodeClaim {
 	claim := &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
-		Status:     karpv1.NodeClaimStatus{ProviderID: "oxide://" + instanceID},
+		Name:   "node-1",
+		Status: karpv1.NodeClaimStatus{ProviderID: "oxide://" + instanceID},
 	}
 	claim.StatusConditions().SetTrue(karpv1.ConditionTypeLaunched)
 	for i := range claim.Status.Conditions {

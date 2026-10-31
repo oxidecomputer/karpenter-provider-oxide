@@ -298,7 +298,7 @@ func (c *Controller) publish(ctx context.Context, status v1alpha1.OxideCapacityS
 	switch {
 	case kerrors.IsNotFound(err):
 		created := &v1alpha1.OxideCapacity{
-			ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.OxideCapacityName},
+			Name: v1alpha1.OxideCapacityName,
 		}
 		if err := c.kubeClient.Create(ctx, created); err != nil {
 			return err

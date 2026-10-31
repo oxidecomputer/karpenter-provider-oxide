@@ -78,16 +78,14 @@ func ConfigFor(nodeClass *v1alpha1.OxideNodeClass) (Config, bool) {
 func NewRecord(config Config, pool *v1alpha1.OxideBootDiskPool) *v1alpha1.OxideBootDisk {
 	name := "kbd-" + config.Hash[:6] + "-" + strings.ReplaceAll(uuid.NewString()[:13], "-", "")
 	return &v1alpha1.OxideBootDisk{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       name,
-			Finalizers: []string{v1alpha1.BootDiskFinalizer},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "OxideBootDiskPool",
-				Name:       pool.Name,
-				UID:        pool.UID,
-			}},
-		},
+		Name:       name,
+		Finalizers: []string{v1alpha1.BootDiskFinalizer},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1alpha1.GroupVersion.String(),
+			Kind:       "OxideBootDiskPool",
+			Name:       pool.Name,
+			UID:        pool.UID,
+		}},
 		Spec: v1alpha1.OxideBootDiskSpec{
 			PoolRef: v1alpha1.BootDiskOwnerRef{Name: pool.Name, UID: pool.UID},
 			NodeClassRef: v1alpha1.BootDiskOwnerRef{

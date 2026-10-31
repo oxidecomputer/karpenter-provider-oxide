@@ -18,14 +18,14 @@ const defaultNodeClass = "default"
 
 func hashNodeClass(annotations map[string]string) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: defaultNodeClass, Annotations: annotations},
-		Spec:       v1alpha1.OxideNodeClassSpec{UserData: "#!/bin/sh\n"},
+		Name: defaultNodeClass, Annotations: annotations,
+		Spec: v1alpha1.OxideNodeClassSpec{UserData: "#!/bin/sh\n"},
 	}
 }
 
 func hashNodeClaim(name string, annotations map[string]string) *karpv1.NodeClaim {
 	return &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: annotations},
+		Name: name, Annotations: annotations,
 		Spec: karpv1.NodeClaimSpec{
 			NodeClassRef: &karpv1.NodeClassReference{
 				Group: "karpenter.oxide.computer",

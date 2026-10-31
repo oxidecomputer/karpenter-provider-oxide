@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,14 +37,12 @@ func (r *instanceReader) InstanceView(
 
 func fixture() (*karpv1.NodeClaim, *instanceReader) {
 	claim := &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "example",
-			UID:  "claim-uid",
-			Labels: map[string]string{
-				karpv1.NodePoolLabelKey: "test",
-				corev1.LabelOSStable:    "linux",
-				corev1.LabelArchStable:  "amd64",
-			},
+		Name: "example",
+		UID:  "claim-uid",
+		Labels: map[string]string{
+			karpv1.NodePoolLabelKey: "test",
+			corev1.LabelOSStable:    "linux",
+			corev1.LabelArchStable:  "amd64",
 		},
 		Spec: karpv1.NodeClaimSpec{
 			NodeClassRef: &karpv1.NodeClassReference{
@@ -99,7 +96,7 @@ func step(t *testing.T, c *Controller) error {
 	t.Helper()
 	_, err := c.Reconcile(
 		context.Background(),
-		ctrl.Request{NamespacedName: types.NamespacedName{Name: "example"}},
+		ctrl.Request{Name: "example"},
 	)
 	return err
 }

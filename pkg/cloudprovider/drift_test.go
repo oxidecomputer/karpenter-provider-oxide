@@ -13,7 +13,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/sshkey"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/subnet"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -45,16 +44,14 @@ func testDrifters() []providers.Drifter {
 
 func launched(hash string) *karpv1.NodeClaim {
 	return &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-1",
-			Annotations: map[string]string{
-				v1alpha1.AnnotationOxideNodeClassHash:        hash,
-				v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
-				v1alpha1.AnnotationSubnet:                    subnetID,
-				v1alpha1.AnnotationSSHKeys:                   sshKeyID,
-				v1alpha1.AnnotationEphemeralIPs:              "v4=192.0.2.10@" + ipPoolID,
-				v1alpha1.AnnotationAffinityGroups:            "aa:" + groupID,
-			},
+		Name: "node-1",
+		Annotations: map[string]string{
+			v1alpha1.AnnotationOxideNodeClassHash:        hash,
+			v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
+			v1alpha1.AnnotationSubnet:                    subnetID,
+			v1alpha1.AnnotationSSHKeys:                   sshKeyID,
+			v1alpha1.AnnotationEphemeralIPs:              "v4=192.0.2.10@" + ipPoolID,
+			v1alpha1.AnnotationAffinityGroups:            "aa:" + groupID,
 		},
 		Spec: karpv1.NodeClaimSpec{
 			NodeClassRef: &karpv1.NodeClassReference{
@@ -72,12 +69,10 @@ func launched(hash string) *karpv1.NodeClaim {
 
 func resolved(hash string) *v1alpha1.OxideNodeClass {
 	return &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "default",
-			Annotations: map[string]string{
-				v1alpha1.AnnotationOxideNodeClassHash:        hash,
-				v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
-			},
+		Name: "default",
+		Annotations: map[string]string{
+			v1alpha1.AnnotationOxideNodeClassHash:        hash,
+			v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
 		},
 		Status: v1alpha1.OxideNodeClassStatus{
 			Images:  []v1alpha1.OxideImage{{ID: imageID}},

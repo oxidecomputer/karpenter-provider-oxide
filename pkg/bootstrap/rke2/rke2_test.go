@@ -11,7 +11,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -21,8 +20,8 @@ import (
 func tokenSecret(t *testing.T) *corev1.Secret {
 	t.Helper()
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "rancher-agent-token", Namespace: "karpenter"},
-		Data:       map[string][]byte{"token": []byte("secret-join-token")},
+		Name: "rancher-agent-token", Namespace: "karpenter",
+		Data: map[string][]byte{"token": []byte("secret-join-token")},
 	}
 }
 
@@ -34,7 +33,7 @@ func readerFor(t *testing.T, objects ...client.Object) client.Reader {
 func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 	t.Helper()
 	return &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Name: "default",
 		Spec: v1alpha1.OxideNodeClassSpec{
 			Bootstrap: &v1alpha1.Bootstrap{
 				RKE2: &v1alpha1.RKE2Bootstrap{
@@ -62,7 +61,7 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 	t.Helper()
 	nc := nodeClass(t, sets...)
 	req := bootstrap.Request{
-		NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
 		Hostname:  "karpenter-default-x7k2p",
 	}
 	if len(sets) > 0 {
@@ -116,7 +115,7 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeAgentStart(t *testing.T
 		context.Background(),
 		nc,
 		bootstrap.Request{
-			NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
 			Hostname:  "karpenter-default-x7k2p",
 		},
 	)
@@ -191,17 +190,16 @@ func TestDetect(t *testing.T) {
 		{
 			name: "every node RKE2 manages carries its node-args annotation",
 			objects: []client.Object{
-				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "plain"}},
-				&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				&corev1.Node{Name: "plain"},
+				&corev1.Node{
 					Name:        "agent",
-					Annotations: map[string]string{nodeArgsAnnotation: "agent"},
-				}},
+					Annotations: map[string]string{nodeArgsAnnotation: "agent"}},
 			},
 			want: true,
 		},
 		{
 			name:    "and a cluster of nodes without it is not RKE2",
-			objects: []client.Object{&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}},
+			objects: []client.Object{&corev1.Node{Name: "plain"}},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

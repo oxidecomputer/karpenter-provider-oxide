@@ -53,7 +53,7 @@ func (c *Controller) Setup(mgr ctrl.Manager, concurrency int) error {
 			}
 			for _, ref := range obj.GetOwnerReferences() {
 				if ref.Kind == claimKind && ref.APIVersion == claimAPIVersion {
-					return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: ref.Name}}}
+					return []ctrl.Request{{Name: ref.Name}}
 				}
 			}
 			return nil

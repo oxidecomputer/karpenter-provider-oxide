@@ -1,6 +1,6 @@
 module github.com/oxidecomputer/karpenter-provider-oxide
 
-go 1.26.10
+go 1.27.3
 
 // Development tools live in tools/go.mod so their (very large) dependency
 // graph never reaches the controller's own module graph. See the GO_TOOL

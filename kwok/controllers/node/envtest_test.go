@@ -168,7 +168,7 @@ func checkKWOK(t *testing.T, cfg *rest.Config, k client.Client) {
 	for _, name := range []string{"kube-node-lease", "default"} {
 		if err := k.Create(
 			ctx,
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}},
+			&corev1.Namespace{Name: name},
 		); err != nil &&
 			!apierrors.IsAlreadyExists(err) {
 			t.Fatal(err)
@@ -219,13 +219,13 @@ func checkKWOK(t *testing.T, cfg *rest.Config, k client.Client) {
 		if name == "one-label" {
 			labels["kwok.x-k8s.io/node"] = "fake"
 		}
-		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+		n := &corev1.Node{Name: name, Labels: labels}
 		if err := k.Create(ctx, n); err != nil {
 			t.Fatal(err)
 		}
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "simulated", Namespace: "default"},
+		Name: "simulated", Namespace: "default",
 		Spec: corev1.PodSpec{
 			NodeName:   "karpenter-example",
 			Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}},
@@ -310,7 +310,7 @@ func renderedKWOKConfig(t *testing.T, ctx context.Context, k client.Client) stri
 	for _, name := range []string{"kube-system", "kube-public", "kube-node-lease"} {
 		if err := k.Create(
 			ctx,
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}},
+			&corev1.Namespace{Name: name},
 		); err != nil &&
 			!apierrors.IsAlreadyExists(err) {
 			t.Fatal(err)

@@ -21,7 +21,6 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -334,7 +333,7 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 					return nil
 				}
 				return []reconcile.Request{
-					{NamespacedName: types.NamespacedName{Name: nodeClaim.Spec.NodeClassRef.Name}},
+					{Name: nodeClaim.Spec.NodeClassRef.Name},
 				}
 			}),
 			// Only deletions matter: they're what lets a terminating nodeclass finish finalizing.

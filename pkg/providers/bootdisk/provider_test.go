@@ -23,7 +23,7 @@ import (
 
 func TestAcquireIsSingleUse(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", UID: types.UID("class-uid")},
+		Name: "default", UID: types.UID("class-uid"),
 		Spec: v1alpha1.OxideNodeClassSpec{
 			Storage: v1alpha1.Storage{
 				Boot: v1alpha1.BootDisk{Size: resource.MustParse("20Gi")},
@@ -38,7 +38,7 @@ func TestAcquireIsSingleUse(t *testing.T) {
 		t.Fatal("ConfigFor() did not resolve")
 	}
 	record := NewRecord(config, &v1alpha1.OxideBootDiskPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", UID: types.UID("pool-uid")},
+		Name: "default", UID: types.UID("pool-uid"),
 	})
 	record.UID = types.UID("record-uid")
 	record.ResourceVersion = "1"
@@ -141,11 +141,9 @@ func TestUnclaimReturnsADetachedDiskToThePool(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record := &v1alpha1.OxideBootDisk{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "pool-record",
-					UID:             types.UID("record-uid"),
-					ResourceVersion: "1",
-				},
+				Name:            "pool-record",
+				UID:             types.UID("record-uid"),
+				ResourceVersion: "1",
 				Spec: v1alpha1.OxideBootDiskSpec{
 					DiskName: "pool-disk",
 					ClaimRef: &v1alpha1.BootDiskOwnerRef{
@@ -222,7 +220,7 @@ func TestUnclaimReturnsADetachedDiskToThePool(t *testing.T) {
 
 func TestUnclaimLeavesAForeignClaimAlone(t *testing.T) {
 	record := &v1alpha1.OxideBootDisk{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-record", ResourceVersion: "1"},
+		Name: "pool-record", ResourceVersion: "1",
 		Spec: v1alpha1.OxideBootDiskSpec{
 			DiskName: "pool-disk",
 			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "other", UID: types.UID("other-uid")},

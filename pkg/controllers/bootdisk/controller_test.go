@@ -41,7 +41,7 @@ func TestRetirementDoesNotOverrideAClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := &v1alpha1.OxideBootDisk{
-		ObjectMeta: metav1.ObjectMeta{Name: "disk"},
+		Name: "disk",
 		Spec: v1alpha1.OxideBootDiskSpec{
 			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "claim", UID: types.UID("claim-uid")},
 		},
@@ -70,14 +70,14 @@ func TestRetirementDoesNotOverrideAClaim(t *testing.T) {
 
 func TestClaimedRecordSurvivesAStaleNodeClaimCache(t *testing.T) {
 	record := &v1alpha1.OxideBootDisk{
-		ObjectMeta: metav1.ObjectMeta{Name: "disk"},
+		Name: "disk",
 		Spec: v1alpha1.OxideBootDiskSpec{
 			DiskName: "pool-disk",
 			ClaimRef: &v1alpha1.BootDiskOwnerRef{Name: "claim", UID: types.UID("claim-uid")},
 		},
 	}
 	claim := &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "claim", UID: types.UID("claim-uid")},
+		Name: "claim", UID: types.UID("claim-uid"),
 	}
 
 	for _, tc := range []struct {
@@ -118,7 +118,7 @@ func TestClaimedRecordSurvivesAStaleNodeClaimCache(t *testing.T) {
 
 func TestReadStateSizesEachPoolFromItsNodeClass(t *testing.T) {
 	ready := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "ready", UID: types.UID("ready-uid")},
+		Name: "ready", UID: types.UID("ready-uid"),
 		Spec: v1alpha1.OxideNodeClassSpec{Storage: v1alpha1.Storage{
 			Boot: v1alpha1.BootDisk{Size: resource.MustParse("20Gi")},
 		}},
@@ -128,7 +128,7 @@ func TestReadStateSizesEachPoolFromItsNodeClass(t *testing.T) {
 	unresolved.Name, unresolved.UID = "unresolved", types.UID("unresolved-uid")
 	unresolved.Status.Images = nil
 	nodePool := &karpv1.NodePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "workers"},
+		Name: "workers",
 		Spec: karpv1.NodePoolSpec{Template: karpv1.NodeClaimTemplate{
 			Spec: karpv1.NodeClaimTemplateSpec{NodeClassRef: &karpv1.NodeClassReference{
 				Group: "karpenter.oxide.computer", Kind: "OxideNodeClass", Name: ready.Name,
@@ -138,11 +138,9 @@ func TestReadStateSizesEachPoolFromItsNodeClass(t *testing.T) {
 	minReady := int32(5)
 	pool := func(name string, class string, age time.Duration) *v1alpha1.OxideBootDiskPool {
 		return &v1alpha1.OxideBootDiskPool{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              name,
-				UID:               types.UID(name + "-uid"),
-				CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
-			},
+			Name:              name,
+			UID:               types.UID(name + "-uid"),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-age)),
 			Spec: v1alpha1.OxideBootDiskPoolSpec{
 				NodeClassRef: v1alpha1.NodeClassReference{Name: class},
 				MinReady:     &minReady,

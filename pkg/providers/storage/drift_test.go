@@ -6,7 +6,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
@@ -37,7 +36,7 @@ func sourcedNodeClass(t *testing.T, resolvedImageID string) *v1alpha1.OxideNodeC
 
 func claimWith(t *testing.T, annotations map[string]string) *karpv1.NodeClaim {
 	t.Helper()
-	return &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Annotations: annotations}}
+	return &karpv1.NodeClaim{Annotations: annotations}
 }
 
 func TestDriftReason(t *testing.T) {

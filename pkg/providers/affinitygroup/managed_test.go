@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -101,10 +100,8 @@ func TestManagedGroupName(t *testing.T) {
 				uid = testUID
 			}
 			nodeClass := &v1alpha1.OxideNodeClass{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: tt.nodeClassName,
-					UID:  types.UID(uid),
-				},
+				Name: tt.nodeClassName,
+				UID:  types.UID(uid),
 				Spec: v1alpha1.OxideNodeClassSpec{
 					Affinity: &v1alpha1.Affinity{Managed: &tt.managed},
 				},
@@ -128,10 +125,8 @@ func TestManagedGroupName(t *testing.T) {
 
 func TestManagedGroupDescription(t *testing.T) {
 	nodeClass := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: defaultNodeClass,
-			UID:  testUID,
-		},
+		Name: defaultNodeClass,
+		UID:  testUID,
 	}
 	want := "karpenter.oxide.computer managed group for oxidenodeclass/default (444f4178-6bee-45f7-a654-c6ecafd4bb9e)"
 	if got := managedGroupDescription(nodeClass); got != want {

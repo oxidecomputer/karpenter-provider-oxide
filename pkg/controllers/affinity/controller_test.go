@@ -12,7 +12,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -72,7 +71,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 
 func nodeClaim(groups string) *karpv1.NodeClaim {
 	claim := &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Name: "node-1",
 		Spec: karpv1.NodeClaimSpec{
 			NodeClassRef: &karpv1.NodeClassReference{
 				Group: "karpenter.oxide.computer",
@@ -90,7 +89,7 @@ func nodeClaim(groups string) *karpv1.NodeClaim {
 
 func TestReconcileClearsTheAnnotationWhenNothingIsDesired(t *testing.T) {
 	api := &memberAPI{}
-	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodeClass := &v1alpha1.OxideNodeClass{Name: "default"}
 	claim := nodeClaim("aa:" + groupID)
 
 	kubeClient := clientFor(t, nodeClass, claim)
@@ -121,7 +120,7 @@ func TestReconcileClearsTheAnnotationWhenNothingIsDesired(t *testing.T) {
 
 func TestReconcileClearsTheAnnotationWhenTheGroupIsAlreadyGone(t *testing.T) {
 	api := &memberAPI{gone: true}
-	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodeClass := &v1alpha1.OxideNodeClass{Name: "default"}
 	claim := nodeClaim("aa:" + groupID)
 
 	kubeClient := clientFor(t, nodeClass, claim)
@@ -147,7 +146,7 @@ func TestReconcileClearsTheAnnotationWhenTheGroupIsAlreadyGone(t *testing.T) {
 func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Name: "default",
 		Status: v1alpha1.OxideNodeClassStatus{
 			AffinityGroups: []v1alpha1.OxideAffinityGroup{{
 				ID:      groupID,
@@ -184,8 +183,8 @@ func TestReconcileKeepsAMembershipStillDesired(t *testing.T) {
 
 func node(groups string) *corev1.Node {
 	n := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
-		Spec:       corev1.NodeSpec{ProviderID: "oxide://" + instanceID},
+		Name: "node-1",
+		Spec: corev1.NodeSpec{ProviderID: "oxide://" + instanceID},
 	}
 	if groups != "" {
 		n.Annotations = map[string]string{v1alpha1.AnnotationAffinityGroups: groups}
@@ -220,7 +219,7 @@ func nodeAnnotation(t *testing.T, kubeClient client.Client) (string, bool) {
 
 func TestReconcileClearsTheAnnotationFromTheNodeToo(t *testing.T) {
 	api := &memberAPI{}
-	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodeClass := &v1alpha1.OxideNodeClass{Name: "default"}
 	claim := nodeClaim("aa:" + groupID)
 
 	kubeClient := clientFor(t, nodeClass, claim, node("aa:"+groupID))
@@ -237,7 +236,7 @@ func TestReconcileClearsTheAnnotationFromTheNodeToo(t *testing.T) {
 
 func TestReconcileClearsAStaleNodeAnnotationWithNothingOnTheNodeClaim(t *testing.T) {
 	api := &memberAPI{}
-	nodeClass := &v1alpha1.OxideNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+	nodeClass := &v1alpha1.OxideNodeClass{Name: "default"}
 	claim := nodeClaim("")
 
 	kubeClient := clientFor(t, nodeClass, claim, node("aa:"+groupID))
@@ -261,7 +260,7 @@ func TestReconcileClearsAStaleNodeAnnotationWithNothingOnTheNodeClaim(t *testing
 func TestReconcileLeavesTheNodeAloneWhenTheMembershipIsStillDesired(t *testing.T) {
 	api := &memberAPI{}
 	nodeClass := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Name: "default",
 		Status: v1alpha1.OxideNodeClassStatus{
 			AffinityGroups: []v1alpha1.OxideAffinityGroup{{
 				ID:      groupID,

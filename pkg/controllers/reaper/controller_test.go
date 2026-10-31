@@ -13,7 +13,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,7 +168,7 @@ func ownedDisk(description string) oxide.Disk {
 
 func nodeClaim(name string, uid types.UID) *karpv1.NodeClaim {
 	return &karpv1.NodeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, UID: uid},
+		Name: name, UID: uid,
 	}
 }
 

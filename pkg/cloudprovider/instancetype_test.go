@@ -9,7 +9,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -18,7 +17,7 @@ import (
 
 func nodeClassWithBootDisk(name string, spec, status int64) *v1alpha1.OxideNodeClass {
 	nodeClass := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: v1alpha1.OxideNodeClassSpec{
 			Storage: v1alpha1.Storage{
 				Boot: v1alpha1.BootDisk{Size: *resource.NewQuantity(spec, resource.BinarySI)},
@@ -33,7 +32,7 @@ func nodeClassWithBootDisk(name string, spec, status int64) *v1alpha1.OxideNodeC
 
 func nodePoolFor(nodeClassName string) *karpv1.NodePool {
 	return &karpv1.NodePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Name: "default",
 		Spec: karpv1.NodePoolSpec{
 			Template: karpv1.NodeClaimTemplate{
 				Spec: karpv1.NodeClaimTemplateSpec{

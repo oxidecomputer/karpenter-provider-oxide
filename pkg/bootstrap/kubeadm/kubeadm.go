@@ -20,7 +20,6 @@ import (
 	"go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -272,12 +271,10 @@ func (b *Bootstrapper) createToken(
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      tokenSecretPrefix + tokenID,
-			Namespace: tokenNamespace,
-			Labels: map[string]string{
-				v1alpha1.LabelNodeClass: nodeClass.Name,
-			},
+		Name:      tokenSecretPrefix + tokenID,
+		Namespace: tokenNamespace,
+		Labels: map[string]string{
+			v1alpha1.LabelNodeClass: nodeClass.Name,
 		},
 		Type: tokenSecretType,
 		StringData: map[string]string{

@@ -461,8 +461,7 @@ func TestBuildValidatesStaticDiskSizes(t *testing.T) {
 				t.Fatalf("Build() error = %v, valid = %t", err, tt.valid)
 			}
 			if !tt.valid {
-				var sizeErr *v1alpha1.DiskSizeError
-				if !errors.As(err, &sizeErr) {
+				if _, ok := errors.AsType[*v1alpha1.DiskSizeError](err); !ok {
 					t.Fatalf("Build() error = %v, want a typed DiskSizeError", err)
 				}
 			}
@@ -569,8 +568,7 @@ func TestBuildRejectsUnknownSourceSizes(t *testing.T) {
 	}}}
 
 	_, err := Build("karpenter-default-x7k2p", testToken, nc)
-	var sizeErr *v1alpha1.DiskSizeError
-	if !errors.As(err, &sizeErr) {
+	if _, ok := errors.AsType[*v1alpha1.DiskSizeError](err); !ok {
 		t.Fatalf("Build() error = %v, want a typed DiskSizeError", err)
 	}
 

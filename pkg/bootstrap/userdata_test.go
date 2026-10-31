@@ -7,7 +7,6 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -68,8 +67,8 @@ func TestMergeUserDataOrdersEnvironmentUserAndSystemSections(t *testing.T) {
 
 func TestMergeUserDataResolvesSecretEnvironmentValues(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "bootstrap-env", Namespace: "karpenter"},
-		Data:       map[string][]byte{"token": []byte("secret\nvalue")},
+		Name: "bootstrap-env", Namespace: "karpenter",
+		Data: map[string][]byte{"token": []byte("secret\nvalue")},
 	}
 	nodeClass := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
@@ -136,7 +135,7 @@ func TestMergeUserDataRejectsInvalidEnvironment(t *testing.T) {
 
 func TestMergeUserDataReportsMissingSecretKey(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "bootstrap-env", Namespace: "karpenter"},
+		Name: "bootstrap-env", Namespace: "karpenter",
 	}
 	nodeClass := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{

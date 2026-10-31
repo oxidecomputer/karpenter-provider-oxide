@@ -15,7 +15,7 @@ MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 TOOLS_MOD := $(MAKEFILE_PATH)/tools/go.mod
 GO_TOOL := go tool -modfile=$(TOOLS_MOD)
 KARPENTER_NAMESPACE ?= kube-system
-HELM_VERSION ?= v4.2.4
+HELM_VERSION ?= v4.3.1
 
 LDFLAGS ?= -ldflags=-X=sigs.k8s.io/karpenter/pkg/operator.Version=$(VERSION)
 GOFLAGS += $(LDFLAGS)

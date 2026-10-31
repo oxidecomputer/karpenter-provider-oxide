@@ -166,8 +166,7 @@ func TestAdoptWaitsForACreatingInstanceToSettle(t *testing.T) {
 
 	_, err := p.Create(context.Background(), launchParams(), testOptions())
 
-	var stuck *StuckLaunchResourceError
-	if !errors.As(err, &stuck) {
+	if _, ok := errors.AsType[*StuckLaunchResourceError](err); !ok {
 		t.Fatalf("Create() error = %v, want the adoption to report a stuck instance", err)
 	}
 	if api.starts != 0 {

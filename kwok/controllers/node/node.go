@@ -80,21 +80,19 @@ func Project(claim *karpv1.NodeClaim, cluster types.UID, instanceID, version str
 		}
 	}
 	return &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: labels,
-			Annotations: map[string]string{
-				Cluster:    string(cluster),
-				ClaimUID:   string(claim.UID),
-				InstanceID: instanceID,
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: claimAPIVersion,
-					Kind:       claimKind,
-					Name:       claim.Name,
-					UID:        claim.UID,
-				},
+		Name:   name,
+		Labels: labels,
+		Annotations: map[string]string{
+			Cluster:    string(cluster),
+			ClaimUID:   string(claim.UID),
+			InstanceID: instanceID,
+		},
+		OwnerReferences: []metav1.OwnerReference{
+			{
+				APIVersion: claimAPIVersion,
+				Kind:       claimKind,
+				Name:       claim.Name,
+				UID:        claim.UID,
 			},
 		},
 		Spec: corev1.NodeSpec{ProviderID: claim.Status.ProviderID, Taints: taints},

@@ -12,7 +12,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -22,7 +21,7 @@ import (
 func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass {
 	t.Helper()
 	return &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Name: "default",
 		Spec: v1alpha1.OxideNodeClassSpec{
 			Bootstrap: &v1alpha1.Bootstrap{Kubeadm: &v1alpha1.KubeadmBootstrap{}},
 			Storage: v1alpha1.Storage{
@@ -53,7 +52,7 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 
 	req := bootstrap.Request{
-		NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
 		Hostname:  "karpenter-default-x7k2p",
 	}
 	if len(sets) > 0 {
@@ -105,7 +104,7 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
 		context.Background(),
 		nc,
 		bootstrap.Request{
-			NodeClaim: &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
 			Hostname:  "karpenter-default-x7k2p",
 		},
 	)
@@ -183,7 +182,7 @@ func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
 		kubeClient,
 		kubeClient,
 	).UserData(context.Background(), nc, bootstrap.Request{
-		NodeClaim:    &karpv1.NodeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		NodeClaim:    &karpv1.NodeClaim{Name: "node-1"},
 		Hostname:     "karpenter-default-x7k2p",
 		InstanceType: instancetype.Specs{Ncpus: 9, MemInGiB: 5},
 	})
@@ -219,10 +218,9 @@ func TestDetect(t *testing.T) {
 	}{
 		{
 			name: "a kubeadm cluster keeps its cluster configuration in kube-system",
-			objects: []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			objects: []client.Object{&corev1.ConfigMap{
 				Namespace: clusterConfigNamespace,
-				Name:      clusterConfigName,
-			}}},
+				Name:      clusterConfigName}},
 			want: true,
 		},
 		{name: "and nothing else does"},

@@ -14,7 +14,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project/projecttest"
 	"github.com/oxidecomputer/oxide.go/oxide"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
@@ -126,8 +125,8 @@ func fakeGroups() []oxide.AntiAffinityGroup {
 
 func selecting(names ...string) *v1alpha1.OxideNodeClass {
 	class := &v1alpha1.OxideNodeClass{
-		ObjectMeta: metav1.ObjectMeta{Name: defaultNodeClass},
-		Spec:       v1alpha1.OxideNodeClassSpec{Affinity: &v1alpha1.Affinity{}},
+		Name: defaultNodeClass,
+		Spec: v1alpha1.OxideNodeClassSpec{Affinity: &v1alpha1.Affinity{}},
 	}
 	for _, name := range names {
 		class.Spec.Affinity.AntiAffinityGroupSelector = append(
@@ -326,7 +325,7 @@ func TestDriftReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nodeClaim := &karpv1.NodeClaim{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+				Annotations: map[string]string{},
 			}
 			if tt.recorded != nil {
 				refs := make([]v1alpha1.AffinityGroupRef, 0, len(tt.recorded))

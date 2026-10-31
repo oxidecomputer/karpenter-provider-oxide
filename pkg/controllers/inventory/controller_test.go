@@ -206,7 +206,7 @@ func conditionOn(t *testing.T, kubeClient client.Client, name string) corev1.Nod
 }
 
 func TestApplyConditionMarksUnhealthySled(t *testing.T) {
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	node := &corev1.Node{Name: "node-1"}
 	c, kubeClient := newNodeController(t, node)
 
 	p := placement()
@@ -230,7 +230,7 @@ func TestApplyConditionMarksUnhealthySled(t *testing.T) {
 
 func TestApplyConditionClearsWhenSledReturnsToService(t *testing.T) {
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Name: "node-1",
 		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
 			Type:               v1alpha1.ConditionTypeSledUnhealthy,
 			Status:             corev1.ConditionTrue,
@@ -256,7 +256,7 @@ func TestApplyConditionClearsWhenSledReturnsToService(t *testing.T) {
 func TestApplyConditionDoesNotResetTransitionTime(t *testing.T) {
 	transitioned := metav1.NewTime(observedAt)
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Name: "node-1",
 		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
 			Type:               v1alpha1.ConditionTypeSledUnhealthy,
 			Status:             corev1.ConditionTrue,

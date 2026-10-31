@@ -30,7 +30,6 @@ import (
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -488,8 +487,7 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 	probe *availability.Probe,
 ) error {
 
-	var stuck *instance.StuckLaunchResourceError
-	if errors.As(err, &stuck) {
+	if stuck, ok := errors.AsType[*instance.StuckLaunchResourceError](err); ok {
 		metrics.StuckLaunchResources.WithLabelValues(stuck.Kind, stuck.State).Inc()
 		log.FromContext(ctx).Error(
 			err,
@@ -822,7 +820,7 @@ func (c *OxideCloudProvider) Get(
 		return nil, cloudprovider.NewNodeClaimNotFoundError(verifyErr)
 	}
 	nodeClaim, err := c.InstanceToNodeClaim(oxideInstance, nil, &karpcorev1.NodeClaim{
-		ObjectMeta: v1.ObjectMeta{Name: marker.NodeClaimName},
+		Name: marker.NodeClaimName,
 	})
 	if err != nil {
 		return nil, err
@@ -837,9 +835,7 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 ) (*karpcorev1.NodeClaim, error) {
 	if nodeClaim == nil {
 		nodeClaim = &karpcorev1.NodeClaim{
-			ObjectMeta: v1.ObjectMeta{
-				Name: strings.TrimPrefix(oxideInstance.Hostname, InstanceNamePrefix),
-			},
+			Name: strings.TrimPrefix(oxideInstance.Hostname, InstanceNamePrefix),
 		}
 	}
 	nodeClaim.Status.ProviderID = fmt.Sprintf("oxide://%s", oxideInstance.Id)
@@ -929,7 +925,7 @@ func (c *OxideCloudProvider) List(ctx context.Context) ([]*karpcorev1.NodeClaim,
 			continue
 		}
 		nodeClaim, err := c.InstanceToNodeClaim(&oxideInstance, nil, &karpcorev1.NodeClaim{
-			ObjectMeta: v1.ObjectMeta{Name: marker.NodeClaimName},
+			Name: marker.NodeClaimName,
 		})
 		if err != nil {
 			return nil, err
