@@ -13,7 +13,7 @@ RequiresMountsFor=/var/lib/karpenter
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/var/lib/karpenter/disk-setup.sh
+ExecStart=/usr/local/libexec/karpenter/disk-setup.sh
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=600

@@ -23,10 +23,13 @@ type Options struct {
 
 // Paths this package owns.
 const (
-	// InstallDir holds the script and the data it reads.
+	// InstallDir holds the data the script reads.
 	InstallDir = "/var/lib/karpenter"
+	// ScriptDir holds the node-side body. It lives under /usr/local/libexec rather than
+	// InstallDir because SELinux labels /var/lib as var_lib_t, which init_t cannot execute.
+	ScriptDir = "/usr/local/libexec/karpenter"
 	// ScriptPath is where the node-side body is installed.
-	ScriptPath = InstallDir + "/disk-setup.sh"
+	ScriptPath = ScriptDir + "/disk-setup.sh"
 	// ConfigPath is the table of disks the body reads.
 	ConfigPath = InstallDir + "/disks.conf"
 	// FstabBlockPath holds the lines the install step splices into /etc/fstab.
@@ -67,6 +70,7 @@ func Script(plan *storage.Plan, opts Options) (string, error) {
 	var out strings.Builder
 	out.WriteString("### BEGIN karpenter disk setup (generated; edit the OxideNodeClass instead)\n")
 	fmt.Fprintf(&out, "install -d -m 0755 %s\n", shellQuote(InstallDir))
+	fmt.Fprintf(&out, "install -d -m 0755 %s\n", shellQuote(ScriptDir))
 
 	files := []struct{ path, mode, content string }{
 		{ScriptPath, "0755", setupScript},

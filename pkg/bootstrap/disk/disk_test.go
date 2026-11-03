@@ -143,6 +143,7 @@ func TestInstallerWritesEverything(t *testing.T) {
 		t.Fatalf("Script: %v", err)
 	}
 	for _, want := range []string{
+		"install -d -m 0755 '" + ScriptDir + "'",
 		"cat <<'" + heredocMarker + "' > '" + ScriptPath + "'",
 		"cat <<'" + heredocMarker + "' > '" + ConfigPath + "'",
 		"cat <<'" + heredocMarker + "' > '" + FstabBlockPath + "'",
