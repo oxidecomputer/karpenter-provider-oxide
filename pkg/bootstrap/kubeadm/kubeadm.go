@@ -45,13 +45,17 @@ const (
 
 // Bootstrapper implements bootstrap.Bootstrapper for kubeadm.
 type Bootstrapper struct {
-	reader client.Reader
-
-	writer client.Writer
+	reader   client.Reader
+	writer   client.Writer
+	renderer bootstrap.Renderer
 }
 
-func NewBootstrapper(reader client.Reader, writer client.Writer) *Bootstrapper {
-	return &Bootstrapper{reader: reader, writer: writer}
+func NewBootstrapper(
+	reader client.Reader,
+	writer client.Writer,
+	renderer bootstrap.Renderer,
+) *Bootstrapper {
+	return &Bootstrapper{reader: reader, writer: writer, renderer: renderer}
 }
 
 func (b *Bootstrapper) Name() string {
@@ -144,7 +148,7 @@ func (b *Bootstrapper) UserData(
 		return "", err
 	}
 
-	return bootstrap.Assemble(ctx, b.reader, nodeClass, bootstrap.Spec{
+	return b.renderer.Render(ctx, nodeClass, bootstrap.Spec{
 		Storage:      req.Storage,
 		ConsumerUnit: consumerUnit,
 		ConfigPath:   configPath,

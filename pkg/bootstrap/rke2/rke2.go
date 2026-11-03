@@ -52,8 +52,9 @@ func (n nodeTaints) MarshalYAML() (any, error) {
 
 // Bootstrapper implements bootstrap.Bootstrapper for RKE2.
 type Bootstrapper struct {
-	reader client.Reader
-	writer client.Writer
+	reader   client.Reader
+	writer   client.Writer
+	renderer bootstrap.Renderer
 
 	// caHash pins the cluster CA in every token so agents verify the supervisor before presenting credentials.
 	caHash string
@@ -65,12 +66,13 @@ func NewBootstrapper(
 	reader client.Reader,
 	writer client.Writer,
 	caBundle []byte,
+	renderer bootstrap.Renderer,
 ) (*Bootstrapper, error) {
 	hash, err := hashCA(caBundle)
 	if err != nil {
 		return nil, fmt.Errorf("unable to hash the cluster CA for RKE2 join tokens: %w", err)
 	}
-	return &Bootstrapper{reader: reader, writer: writer, caHash: hash}, nil
+	return &Bootstrapper{reader: reader, writer: writer, renderer: renderer, caHash: hash}, nil
 }
 
 func (b *Bootstrapper) Name() string {
@@ -140,7 +142,7 @@ func (b *Bootstrapper) UserData(
 		return "", fmt.Errorf("unable to marshal RKE2 config to YAML: %w", err)
 	}
 
-	return bootstrap.Assemble(ctx, b.reader, nodeClass, bootstrap.Spec{
+	return b.renderer.Render(ctx, nodeClass, bootstrap.Spec{
 		Storage:      req.Storage,
 		ConsumerUnit: consumerUnit,
 		ConfigPath:   configPath,

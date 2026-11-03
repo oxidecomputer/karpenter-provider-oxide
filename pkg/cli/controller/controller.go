@@ -10,6 +10,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/cloudinit"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/kubeadm"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/rke2"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cli/config"
@@ -116,17 +117,19 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	renderer := cloudinit.New(karpcore.GetAPIReader())
 	rke2Bootstrapper, err := rke2.NewBootstrapper(
 		karpcore.GetAPIReader(),
 		karpcore.GetClient(),
 		caBundle,
+		renderer,
 	)
 	if err != nil {
 		return err
 	}
 	bootstrappers := bootstrap.New(
 		rke2Bootstrapper,
-		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient()),
+		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient(), renderer),
 	)
 
 	inventoryCfg := inventoryConfigFromEnv()

@@ -7,7 +7,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/cloudinit"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
@@ -61,7 +61,11 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 		}
 		req.Storage = &plan
 	}
-	out, err := NewBootstrapper(kubeClient, kubeClient).UserData(context.Background(), nc, req)
+	out, err := NewBootstrapper(
+		kubeClient,
+		kubeClient,
+		cloudinit.New(kubeClient),
+	).UserData(context.Background(), nc, req)
 	if err != nil {
 		t.Fatalf("UserData() returned an unexpected error: %v", err)
 	}
@@ -88,8 +92,8 @@ func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
 	if !strings.HasSuffix(out, "kubeadm join --config /etc/kubernetes/karpenter-join.yaml\n") {
 		t.Errorf("user-data does not end with the join:\n%s", out)
 	}
-	if strings.Contains(out, "karpenter disk setup") {
-		t.Error("user-data contains a disk setup block for a nodeclass with no diskSets")
+	if strings.Contains(out, "#cloud-config") {
+		t.Error("user-data contains a cloud-config part for a nodeclass with no diskSets")
 	}
 }
 
@@ -99,7 +103,7 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
 	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 
-	out, err := NewBootstrapper(kubeClient, kubeClient).UserData(
+	out, err := NewBootstrapper(kubeClient, kubeClient, cloudinit.New(kubeClient)).UserData(
 		context.Background(),
 		nc,
 		bootstrap.Request{
@@ -128,22 +132,24 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 
-	setup := strings.Index(out, "### BEGIN karpenter disk setup")
-	runUnit := strings.Index(out, "'"+disk.ScriptPath+"' install")
+	disks := strings.Index(out, "fs_setup:")
+	script := strings.Index(out, "text/x-shellscript")
+	check := strings.Index(out, "mountpoint -q")
 	config := strings.Index(out, "/etc/kubernetes/karpenter-join.yaml")
 	join := strings.Index(out, "kubeadm join --config")
 
 	for name, index := range map[string]int{
-		"disk setup": setup, "disk install": runUnit, "config write": config, "join": join,
+		"disk setup": disks, "shell part": script, "mount check": check,
+		"config write": config, "join": join,
 	} {
 		if index < 0 {
 			t.Fatalf("user-data does not contain the %s step:\n%s", name, out)
 		}
 	}
-	if setup >= runUnit || runUnit >= config || config >= join {
+	if disks >= script || script >= check || check >= config || config >= join {
 		t.Errorf(
-			"user-data steps are out of order: setup=%d unit=%d config=%d join=%d",
-			setup, runUnit, config, join,
+			"user-data steps are out of order: disks=%d script=%d check=%d config=%d join=%d",
+			disks, script, check, config, join,
 		)
 	}
 }
@@ -180,6 +186,7 @@ func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
 	out, err := NewBootstrapper(
 		kubeClient,
 		kubeClient,
+		cloudinit.New(kubeClient),
 	).UserData(context.Background(), nc, bootstrap.Request{
 		NodeClaim:    &karpv1.NodeClaim{Name: "node-1"},
 		Hostname:     "karpenter-default-x7k2p",
@@ -230,7 +237,11 @@ func TestDetect(t *testing.T) {
 				WithObjects(test.objects...).
 				Build()
 
-			got, err := NewBootstrapper(kubeClient, kubeClient).Detect(context.Background())
+			got, err := NewBootstrapper(
+				kubeClient,
+				kubeClient,
+				cloudinit.New(kubeClient),
+			).Detect(context.Background())
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

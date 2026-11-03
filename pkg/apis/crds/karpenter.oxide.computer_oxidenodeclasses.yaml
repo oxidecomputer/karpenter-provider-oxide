@@ -461,14 +461,16 @@ spec:
                           - Individual
                           type: string
                         mountDir:
-                          description: MountDir is the parent directory the set's
-                            disks are placed beneath.
+                          description: |-
+                            MountDir is the parent directory the set's disks are placed beneath.
+                            Anything the image ships beneath a disk's mount point is hidden once it is mounted.
                           maxLength: 253
                           pattern: ^/[^/]+(/[^/]+)*$
                           type: string
                         mountPath:
-                          description: MountPath is the single mount point for a set
-                            of one disk.
+                          description: |-
+                            MountPath is the single mount point for a set of one disk.
+                            Anything the image ships beneath it is hidden once the disk is mounted.
                           maxLength: 253
                           pattern: ^/[^/]+(/[^/]+)*$
                           type: string
@@ -605,8 +607,9 @@ spec:
                 minItems: 1
                 type: array
               userData:
-                description: UserData is a bash fragment that runs before the provider-generated
-                  node bootstrap steps.
+                description: |-
+                  UserData is a bash fragment that runs after the data disks are mounted and before the
+                  provider-generated node bootstrap steps.
                 type: string
             required:
             - storage

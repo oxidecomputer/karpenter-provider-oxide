@@ -17,7 +17,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/cloudinit"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -52,7 +52,7 @@ func selfSignedCA(t *testing.T) []byte {
 
 func bootstrapperFor(t *testing.T, kubeClient client.Client) *Bootstrapper {
 	t.Helper()
-	b, err := NewBootstrapper(kubeClient, kubeClient, selfSignedCA(t))
+	b, err := NewBootstrapper(kubeClient, kubeClient, selfSignedCA(t), cloudinit.New(kubeClient))
 	if err != nil {
 		t.Fatalf("NewBootstrapper() returned an unexpected error: %v", err)
 	}
@@ -114,18 +114,18 @@ func localPVSet(t *testing.T) v1alpha1.DiskSet {
 	}
 }
 
-func TestUserDataWithoutStorageIsUnchanged(t *testing.T) {
+func TestUserDataWithoutStorageIsAPlainScript(t *testing.T) {
 	out := userDataFor(t)
 	if !strings.HasPrefix(
 		out,
 		"#!/usr/bin/env bash\nset -euo pipefail\ninstall -d -m 0755 '/etc/rancher/rke2'\n",
 	) {
-		t.Errorf("user-data does not begin with the original preamble:\n%s", out)
+		t.Errorf("user-data does not begin with the preamble and the config install:\n%s", out)
 	}
 	if !strings.HasSuffix(out, "systemctl start rke2-agent.service\n") {
 		t.Errorf("user-data does not end by starting the agent:\n%s", out)
 	}
-	for _, unwanted := range []string{"karpenter disk setup", "karpenter-disks.service"} {
+	for _, unwanted := range []string{"multipart/mixed", "#cloud-config", "mountpoint -q"} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("user-data mentions %q for a nodeclass with no diskSets", unwanted)
 		}
@@ -166,22 +166,24 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeAgentStart(t *testing.T
 func TestUserDataSetsUpDisksBeforeJoining(t *testing.T) {
 	out := userDataFor(t, localPVSet(t))
 
-	setup := strings.Index(out, "### BEGIN karpenter disk setup")
-	runUnit := strings.Index(out, "'"+disk.ScriptPath+"' install")
+	disks := strings.Index(out, "fs_setup:")
+	script := strings.Index(out, "text/x-shellscript")
+	check := strings.Index(out, "mountpoint -q")
 	config := strings.Index(out, "/etc/rancher/rke2/config.yaml")
 	join := strings.Index(out, "systemctl start rke2-agent.service")
 
 	for name, index := range map[string]int{
-		"disk setup": setup, "disk install": runUnit, "config write": config, "agent start": join,
+		"disk setup": disks, "shell part": script, "mount check": check,
+		"config write": config, "agent start": join,
 	} {
 		if index < 0 {
 			t.Fatalf("user-data does not contain the %s step:\n%s", name, out)
 		}
 	}
-	if setup >= runUnit || runUnit >= config || config >= join {
+	if disks >= script || script >= check || check >= config || config >= join {
 		t.Errorf(
-			"user-data steps are out of order: setup=%d unit=%d config=%d join=%d",
-			setup, runUnit, config, join,
+			"user-data steps are out of order: disks=%d script=%d check=%d config=%d join=%d",
+			disks, script, check, config, join,
 		)
 	}
 }
@@ -206,7 +208,7 @@ func TestUserDataWritesTheConfigThroughTheGuardedHeredoc(t *testing.T) {
 func TestUserDataJoinsWithAPinnedBootstrapToken(t *testing.T) {
 	kubeClient := kubeClientFor(t)
 	ca := selfSignedCA(t)
-	b, err := NewBootstrapper(kubeClient, kubeClient, ca)
+	b, err := NewBootstrapper(kubeClient, kubeClient, ca, cloudinit.New(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +297,12 @@ func TestResolveTargetsTheSupervisorPort(t *testing.T) {
 
 func TestNewBootstrapperRejectsAnEmptyCA(t *testing.T) {
 	kubeClient := kubeClientFor(t)
-	if _, err := NewBootstrapper(kubeClient, kubeClient, nil); err == nil {
+	if _, err := NewBootstrapper(
+		kubeClient,
+		kubeClient,
+		nil,
+		cloudinit.New(kubeClient),
+	); err == nil {
 		t.Fatal("expected an error without a CA to pin")
 	}
 }

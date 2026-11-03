@@ -14,7 +14,8 @@ import (
 
 // OxideNodeClassSpec is the top level specification for the Oxide Karpenter Provider.
 type OxideNodeClassSpec struct {
-	// UserData is a bash fragment that runs before the provider-generated node bootstrap steps.
+	// UserData is a bash fragment that runs after the data disks are mounted and before the
+	// provider-generated node bootstrap steps.
 	// +optional
 	UserData string `json:"userData,omitempty"`
 	// Env contains environment variables exported before userData and the provider-generated
@@ -246,12 +247,14 @@ type DiskSet struct {
 	Filesystem string `json:"filesystem,omitempty"`
 
 	// MountPath is the single mount point for a set of one disk.
+	// Anything the image ships beneath it is hidden once the disk is mounted.
 	// +kubebuilder:validation:Pattern=`^/[^/]+(/[^/]+)*$`
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
 
 	// MountDir is the parent directory the set's disks are placed beneath.
+	// Anything the image ships beneath a disk's mount point is hidden once it is mounted.
 	// +kubebuilder:validation:Pattern=`^/[^/]+(/[^/]+)*$`
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
