@@ -2,8 +2,18 @@ package rke2
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
@@ -17,15 +27,39 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-func tokenSecret(t *testing.T) *corev1.Secret {
+// selfSignedCA returns a PEM CA bundle holding one self-signed certificate, as RKE2's server-ca.crt does.
+func selfSignedCA(t *testing.T) []byte {
 	t.Helper()
-	return &corev1.Secret{
-		Name: "rancher-agent-token", Namespace: "karpenter",
-		Data: map[string][]byte{"token": []byte("secret-join-token")},
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "rke2-server-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-func readerFor(t *testing.T, objects ...client.Object) client.Reader {
+func bootstrapperFor(t *testing.T, kubeClient client.Client) *Bootstrapper {
+	t.Helper()
+	b, err := NewBootstrapper(kubeClient, kubeClient, selfSignedCA(t))
+	if err != nil {
+		t.Fatalf("NewBootstrapper() returned an unexpected error: %v", err)
+	}
+	return b
+}
+
+func kubeClientFor(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).Build()
 }
@@ -35,13 +69,6 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 	return &v1alpha1.OxideNodeClass{
 		Name: "default",
 		Spec: v1alpha1.OxideNodeClassSpec{
-			Bootstrap: &v1alpha1.Bootstrap{
-				RKE2: &v1alpha1.RKE2Bootstrap{
-					TokenRefSecret: v1alpha1.SecretRef{
-						Name: "rancher-agent-token", Namespace: "karpenter", Key: "token",
-					},
-				},
-			},
 			Storage: v1alpha1.Storage{
 				Boot:     v1alpha1.BootDisk{Size: resource.MustParse("20Gi")},
 				DiskSets: sets,
@@ -71,8 +98,7 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 		}
 		req.Storage = &plan
 	}
-	out, err := NewBootstrapper(readerFor(t, tokenSecret(t))).
-		UserData(context.Background(), nc, req)
+	out, err := bootstrapperFor(t, kubeClientFor(t)).UserData(context.Background(), nc, req)
 	if err != nil {
 		t.Fatalf("UserData() returned an unexpected error: %v", err)
 	}
@@ -111,7 +137,7 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeAgentStart(t *testing.T
 	nc.Spec.UserData = "echo custom-$NODE_ROLE\n"
 	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
 
-	out, err := NewBootstrapper(readerFor(t, tokenSecret(t))).UserData(
+	out, err := bootstrapperFor(t, kubeClientFor(t)).UserData(
 		context.Background(),
 		nc,
 		bootstrap.Request{
@@ -175,9 +201,150 @@ func TestUserDataWritesTheConfigThroughTheGuardedHeredoc(t *testing.T) {
 	if !strings.Contains(out, "cat <<'KARPENTER_INSTALL_EOF' > '"+configPath+"'") {
 		t.Errorf("the config is not written through the guarded heredoc:\n%s", out)
 	}
+}
 
-	if !strings.Contains(out, "secret-join-token") {
-		t.Error("the join token is missing from the rendered user-data")
+func TestUserDataJoinsWithAPinnedBootstrapToken(t *testing.T) {
+	kubeClient := kubeClientFor(t)
+	ca := selfSignedCA(t)
+	b, err := NewBootstrapper(kubeClient, kubeClient, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc := nodeClass(t)
+	out, err := b.UserData(context.Background(), nc, bootstrap.Request{
+		NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
+		Hostname:  "karpenter-default-x7k2p",
+	})
+	if err != nil {
+		t.Fatalf("UserData() returned an unexpected error: %v", err)
+	}
+
+	secrets := &corev1.SecretList{}
+	if err := kubeClient.List(
+		context.Background(), secrets, client.InNamespace("kube-system"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets.Items) != 1 {
+		t.Fatalf("got %d bootstrap token secrets, want 1", len(secrets.Items))
+	}
+	secret := secrets.Items[0]
+	if secret.Type != corev1.SecretTypeBootstrapToken {
+		t.Fatalf("secret type %q is not a bootstrap token", secret.Type)
+	}
+	if secret.Labels[v1alpha1.LabelNodeClass] != nc.Name {
+		t.Error("the token secret is not labeled with its nodeclass")
+	}
+	if secret.StringData["usage-bootstrap-authentication"] != "true" {
+		t.Error("the supervisor only accepts tokens with authentication usage")
+	}
+	if _, ok := secret.StringData["auth-extra-groups"]; ok {
+		t.Error("RKE2 agents need no group beyond system:bootstrappers")
+	}
+
+	sum := sha256.Sum256(ca)
+	want := "token: K10" + hex.EncodeToString(sum[:]) + "::" +
+		secret.StringData["token-id"] + "." + secret.StringData["token-secret"]
+	if !strings.Contains(out, want) {
+		t.Errorf("config.yaml does not carry the pinned token %q:\n%s", want, out)
+	}
+}
+
+func TestUserDataRequiresAResolvedServer(t *testing.T) {
+	nc := nodeClass(t)
+	nc.Status.Server = ""
+	_, err := bootstrapperFor(t, kubeClientFor(t)).UserData(
+		context.Background(),
+		nc,
+		bootstrap.Request{NodeClaim: &karpv1.NodeClaim{Name: "node-1"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "no supervisor endpoint") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestResolveTargetsTheSupervisorPort(t *testing.T) {
+	b := bootstrapperFor(t, kubeClientFor(t))
+	for _, test := range []struct {
+		name    string
+		cluster bootstrap.Cluster
+		want    string
+	}{
+		{
+			name:    "the API server host joins through the supervisor",
+			cluster: bootstrap.Cluster{Host: "10.0.0.1", Port: 6443},
+			want:    "https://10.0.0.1:9345",
+		},
+		{
+			name:    "an override is used verbatim",
+			cluster: bootstrap.Cluster{ServerOverride: "https://rke2.example:9345"},
+			want:    "https://rke2.example:9345",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			nc := nodeClass(t)
+			if err := b.Resolve(context.Background(), nc, test.cluster); err != nil {
+				t.Fatal(err)
+			}
+			if nc.Status.Server != test.want {
+				t.Fatalf("got %q, want %q", nc.Status.Server, test.want)
+			}
+		})
+	}
+}
+
+func TestNewBootstrapperRejectsAnEmptyCA(t *testing.T) {
+	kubeClient := kubeClientFor(t)
+	if _, err := NewBootstrapper(kubeClient, kubeClient, nil); err == nil {
+		t.Fatal("expected an error without a CA to pin")
+	}
+}
+
+func TestHashCAOfABundleIsTheRootDER(t *testing.T) {
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
+		SubjectKeyId: []byte{1},
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, root, root, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCert, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "server-ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, rootCert, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bundle := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})...,
+	)
+	got, err := hashCA(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(rootDER)
+	if want := hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("got %s, want the root DER hash %s", got, want)
 	}
 }
 
@@ -203,12 +370,8 @@ func TestDetect(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(scheme.Scheme).
-				WithObjects(test.objects...).
-				Build()
-
-			got, err := NewBootstrapper(kubeClient).Detect(context.Background())
+			b := bootstrapperFor(t, kubeClientFor(t, test.objects...))
+			got, err := b.Detect(context.Background())
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

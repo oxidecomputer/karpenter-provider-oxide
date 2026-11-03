@@ -23,7 +23,6 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 	return &v1alpha1.OxideNodeClass{
 		Name: "default",
 		Spec: v1alpha1.OxideNodeClassSpec{
-			Bootstrap: &v1alpha1.Bootstrap{Kubeadm: &v1alpha1.KubeadmBootstrap{}},
 			Storage: v1alpha1.Storage{
 				Boot:     v1alpha1.BootDisk{Size: resource.MustParse("20Gi")},
 				DiskSets: sets,

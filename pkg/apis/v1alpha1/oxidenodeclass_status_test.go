@@ -12,9 +12,9 @@ func TestReadyIsDerivedFromImagesAndSubnetsResolved(t *testing.T) {
 		nodeClass *OxideNodeClass
 	}{
 
-		{"no bootstrap", &OxideNodeClass{}},
-		{"rke2 without a token ref", &OxideNodeClass{Spec: OxideNodeClassSpec{
-			Bootstrap: &Bootstrap{RKE2: &RKE2Bootstrap{}},
+		{"before detection", &OxideNodeClass{}},
+		{"rke2", &OxideNodeClass{Status: OxideNodeClassStatus{
+			Bootstrap: &BootstrapStatus{Kind: BootstrapKindRKE2},
 		}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,8 +49,8 @@ func TestReadyRemainsFalseWithoutResolvedSubnets(t *testing.T) {
 }
 
 func TestReadyIsFalseWhenABootstrapConditionIsFalse(t *testing.T) {
-	nodeClass := &OxideNodeClass{Spec: OxideNodeClassSpec{
-		Bootstrap: &Bootstrap{Kubeadm: &KubeadmBootstrap{}},
+	nodeClass := &OxideNodeClass{Status: OxideNodeClassStatus{
+		Bootstrap: &BootstrapStatus{Kind: BootstrapKindKubeadm},
 	}}
 
 	nodeClass.StatusConditions().SetTrue(ConditionTypeImagesResolved)
@@ -63,33 +63,22 @@ func TestReadyIsFalseWhenABootstrapConditionIsFalse(t *testing.T) {
 	}
 }
 
-func TestBootstrapKindFallsBackToTheDetectedProvider(t *testing.T) {
-	nodeClass := &OxideNodeClass{
-		Status: OxideNodeClassStatus{Bootstrap: &BootstrapStatus{Kind: BootstrapKindKubeadm}},
+func TestBootstrapKindReadsTheDetectedProvider(t *testing.T) {
+	nodeClass := &OxideNodeClass{}
+	if got := nodeClass.BootstrapKind(); got != "" {
+		t.Fatalf("got %q before detection", got)
 	}
+	nodeClass.Status.Bootstrap = &BootstrapStatus{Kind: BootstrapKindKubeadm}
 	if got := nodeClass.BootstrapKind(); got != BootstrapKindKubeadm {
-		t.Fatalf("got %q", got)
-	}
-
-	// A nodeclass that names a provider owns the answer even if detection said otherwise.
-	nodeClass.Spec.Bootstrap = &Bootstrap{RKE2: &RKE2Bootstrap{}}
-	if got := nodeClass.BootstrapKind(); got != BootstrapKindRKE2 {
 		t.Fatalf("got %q", got)
 	}
 }
 
-func TestBootstrapConfigAccessorsTolerateAnUnsetSpec(t *testing.T) {
+func TestOnlyKubeadmWaitsOnClusterInfo(t *testing.T) {
 	nodeClass := &OxideNodeClass{
 		Status: OxideNodeClassStatus{Bootstrap: &BootstrapStatus{Kind: BootstrapKindRKE2}},
 	}
-	// The detected path leaves spec.bootstrap nil, and the conditions still resolve.
-	if nodeClass.Spec.Bootstrap.RKE2Config().TokenRefSecret.Name != "" {
-		t.Fatal("expected a zero-valued RKE2 configuration")
-	}
-	if nodeClass.Spec.Bootstrap.KubeadmConfig().TokenTTL != nil {
-		t.Fatal("expected a zero-valued kubeadm configuration")
-	}
-	if nodeClass.StatusConditions().Root() == nil {
-		t.Fatal("expected a condition set")
+	if cond := nodeClass.StatusConditions().Get(ConditionTypeClusterInfoAvailable); cond != nil {
+		t.Fatal("an RKE2 nodeclass must not wait on kube-public/cluster-info")
 	}
 }

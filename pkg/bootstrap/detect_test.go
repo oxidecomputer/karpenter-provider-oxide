@@ -59,28 +59,6 @@ func TestForDetectsTheClusterWhenTheSpecNamesNoProvider(t *testing.T) {
 	}
 }
 
-func TestForPrefersTheConfiguredProviderOverDetection(t *testing.T) {
-	rke2 := &fake{name: v1alpha1.BootstrapKindRKE2}
-	kubeadm := &fake{name: v1alpha1.BootstrapKindKubeadm, present: true}
-	registry := bootstrap.New(rke2, kubeadm)
-
-	nodeClass := &v1alpha1.OxideNodeClass{
-		Spec: v1alpha1.OxideNodeClassSpec{
-			Bootstrap: &v1alpha1.Bootstrap{RKE2: &v1alpha1.RKE2Bootstrap{}},
-		},
-	}
-	got, err := registry.For(context.Background(), nodeClass)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.Name() != v1alpha1.BootstrapKindRKE2 {
-		t.Fatalf("got %q", got.Name())
-	}
-	if kubeadm.calls != 0 {
-		t.Fatalf("detection ran for a nodeclass that named its provider")
-	}
-}
-
 func TestForReusesTheDetectedProviderRecordedInStatus(t *testing.T) {
 	rke2 := &fake{name: v1alpha1.BootstrapKindRKE2}
 	registry := bootstrap.New(rke2)
@@ -104,7 +82,7 @@ func TestForReportsAnUndetectableCluster(t *testing.T) {
 		&fake{name: v1alpha1.BootstrapKindKubeadm},
 	)
 	_, err := registry.For(context.Background(), &v1alpha1.OxideNodeClass{})
-	if err == nil || !strings.Contains(err.Error(), "set spec.bootstrap") {
+	if err == nil || !strings.Contains(err.Error(), "unable to detect") {
 		t.Fatalf("got %v", err)
 	}
 }

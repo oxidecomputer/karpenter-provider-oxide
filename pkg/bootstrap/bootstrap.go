@@ -105,9 +105,8 @@ func New(bootstrappers ...Bootstrapper) *Bootstrappers {
 	return registry
 }
 
-// For returns the Bootstrapper for the nodeclass: the provider it configured, the
-// one already detected for it, or, failing both, whichever provider recognizes
-// the cluster this controller runs in.
+// For returns the Bootstrapper for the nodeclass: the one already detected for it,
+// or, failing that, whichever provider recognizes the cluster this controller runs in.
 func (b *Bootstrappers) For(
 	ctx context.Context,
 	nodeClass *v1alpha1.OxideNodeClass,
@@ -161,14 +160,12 @@ func (b *Bootstrappers) detect(ctx context.Context) (string, error) {
 		return b.detected, nil
 	case 0:
 		return "", fmt.Errorf(
-			"unable to detect the cluster's bootstrap provider, "+
-				"set spec.bootstrap on the OxideNodeClass to name one of %s",
+			"unable to detect the cluster's bootstrap provider, expected one of %s",
 			strings.Join(b.kinds(), ", "),
 		)
 	default:
 		return "", fmt.Errorf(
-			"the cluster looks like it was bootstrapped by more than one provider (%s), "+
-				"set spec.bootstrap on the OxideNodeClass to name one",
+			"the cluster looks like it was bootstrapped by more than one provider (%s)",
 			strings.Join(matched, ", "),
 		)
 	}

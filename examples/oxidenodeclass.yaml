@@ -6,12 +6,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-  bootstrap:
-    rke2:
-      tokenRef:
-        key: token
-        name: rancher-agent-token
-        namespace: karpenter
   imageSelector:
     - name: rke2-ubuntu-1780929039
       os: ubuntu

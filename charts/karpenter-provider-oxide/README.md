@@ -38,12 +38,9 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | additionalClusterRoleRules | list | `[]` | Specifies additional rules for the core ClusterRole. |
 | additionalLabels | object | `{}` | Additional labels to add into metadata. |
 | affinity | object | `{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"karpenter.sh/nodepool","operator":"DoesNotExist"}]}]}},"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"topologyKey":"kubernetes.io/hostname"}]}}` | Affinity rules for scheduling the pod. |
-| bootstrap | object | `{"kubeadm":{"enabled":false},"rke2":{"enabled":true,"tokenSecret":{"name":"rancher-agent-token","namespace":""}}}` | Bootstrap provider configuration. Which bootstrap providers this install may operate. The provider itself is detected from the cluster unless an OxideNodeClass names one; these only gate its RBAC. |
+| bootstrap | object | `{"kubeadm":{"enabled":false},"rke2":{"enabled":true}}` | Bootstrap provider configuration. Which bootstrap providers this install may operate. The provider itself is detected from the cluster; these only gate its RBAC. |
 | bootstrap.kubeadm.enabled | bool | `false` | Enable RBAC for the kubeadm bootstrap provider. |
 | bootstrap.rke2.enabled | bool | `true` | Enable RBAC for the RKE2 bootstrap provider. |
-| bootstrap.rke2.tokenSecret | object | `{"name":"rancher-agent-token","namespace":""}` | The Secret holding the RKE2 agent join token. |
-| bootstrap.rke2.tokenSecret.name | string | `"rancher-agent-token"` | Name of the token Secret. |
-| bootstrap.rke2.tokenSecret.namespace | string | `""` | Namespace of the token Secret. |
 | controller.env | list | `[]` | Additional environment variables for the controller pod. |
 | controller.envFrom | list | `[]` |  |
 | controller.extraVolumeMounts | list | `[]` | Additional volumeMounts for the controller pod. |

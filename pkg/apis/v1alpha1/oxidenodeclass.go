@@ -27,10 +27,6 @@ type OxideNodeClassSpec struct {
 	// Kubelet configures the kubelet on launched nodes.
 	// +optional
 	Kubelet *KubeletConfiguration `json:"kubelet,omitempty"`
-	// Bootstrap selects and configures the mechanism nodes use to join the cluster.
-	// Leave it unset to have the provider detected from the cluster it runs in.
-	// +optional
-	Bootstrap *Bootstrap `json:"bootstrap,omitempty"`
 	// ImageSelector is used to select an image to launch nodes with.
 	ImageSelector []ImageSelector `json:"imageSelector,omitempty" hash:"ignore"`
 	// Storage is the disks every instance launched from this nodeclass is created with.
@@ -423,48 +419,6 @@ const (
 	BootstrapKindKubeadm = "kubeadm"
 )
 
-// Bootstrap holds provider-specific bootstrap configuration.
-// +kubebuilder:validation:XValidation:rule="[has(self.rke2), has(self.kubeadm)].exists_one(x, x)",message="exactly one bootstrap provider must be set"
-type Bootstrap struct {
-	// +optional
-	RKE2 *RKE2Bootstrap `json:"rke2,omitempty"`
-	// +optional
-	Kubeadm *KubeadmBootstrap `json:"kubeadm,omitempty"`
-}
-
-// RKE2Config returns the RKE2 configuration, zero-valued when the nodeclass left it out.
-func (in *Bootstrap) RKE2Config() RKE2Bootstrap {
-	if in == nil || in.RKE2 == nil {
-		return RKE2Bootstrap{}
-	}
-	return *in.RKE2
-}
-
-// KubeadmConfig returns the kubeadm configuration, zero-valued when the nodeclass left it out.
-// The provider supplies its own defaults for the zero fields, since CRD defaulting only
-// reaches a kubeadm block that was actually written.
-func (in *Bootstrap) KubeadmConfig() KubeadmBootstrap {
-	if in == nil || in.Kubeadm == nil {
-		return KubeadmBootstrap{}
-	}
-	return *in.Kubeadm
-}
-
-// Kind returns the bootstrap provider configured on the nodeclass, or an empty string if none is.
-func (in *Bootstrap) Kind() string {
-	if in == nil {
-		return ""
-	}
-	switch {
-	case in.RKE2 != nil:
-		return BootstrapKindRKE2
-	case in.Kubeadm != nil:
-		return BootstrapKindKubeadm
-	default:
-		return ""
-	}
-}
-
 type EnvVar struct {
 	// Name is the shell environment variable name.
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_]*$`
@@ -480,25 +434,6 @@ type EnvVar struct {
 type ValueFrom struct {
 	// SecretKeyRef selects a key of a Secret.
 	SecretKeyRef SecretRef `json:"secretKeyRef,omitempty"`
-}
-
-type RKE2Bootstrap struct {
-	// TokenRefSecret references the Secret holding the long-lived RKE2 agent join token.
-	// +optional
-	TokenRefSecret SecretRef `json:"tokenRef,omitzero"`
-}
-
-// KubeadmBootstrap configures joining nodes with kubeadm.
-type KubeadmBootstrap struct {
-	// TokenTTL is how long the per-node bootstrap token remains valid.
-	// +kubebuilder:default="15m"
-	// +optional
-	TokenTTL *metav1.Duration `json:"tokenTTL,omitempty"`
-	// ConfigVersion is the kubeadm configuration API version used to render the JoinConfiguration.
-	// +kubebuilder:validation:Enum=kubeadm.k8s.io/v1beta3;kubeadm.k8s.io/v1beta4
-	// +kubebuilder:default="kubeadm.k8s.io/v1beta4"
-	// +optional
-	ConfigVersion string `json:"configVersion,omitempty"`
 }
 
 type SecretRef struct {

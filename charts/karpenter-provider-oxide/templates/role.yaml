@@ -110,11 +110,13 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["cluster-info"]
     verbs: ["get"]
+{{- end }}
+{{- if or .Values.bootstrap.kubeadm.enabled .Values.bootstrap.rke2.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "karpenter.fullname" . }}-kubeadm-token
+  name: {{ include "karpenter.fullname" . }}-bootstrap-token
   namespace: kube-system
   labels:
     {{- include "karpenter.labels" . | nindent 4 }}
@@ -123,26 +125,8 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
+  # Every node joins with its own short-lived bootstrap token.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
-{{- end }}
-{{- if .Values.bootstrap.rke2.enabled }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ include "karpenter.fullname" . }}-rke2-token
-  namespace: {{ default .Release.Namespace .Values.bootstrap.rke2.tokenSecret.namespace }}
-  labels:
-    {{- include "karpenter.labels" . | nindent 4 }}
-  {{- with .Values.additionalAnnotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: [{{ required "bootstrap.rke2.tokenSecret.name is required when the rke2 bootstrap provider is enabled" .Values.bootstrap.rke2.tokenSecret.name | quote }}]
-    verbs: ["get"]
 {{- end }}

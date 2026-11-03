@@ -42,6 +42,7 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/rest"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
@@ -111,8 +112,20 @@ func Run() error {
 		return err
 	}
 
+	caBundle, err := clusterCA(karpcore.GetConfig())
+	if err != nil {
+		return err
+	}
+	rke2Bootstrapper, err := rke2.NewBootstrapper(
+		karpcore.GetAPIReader(),
+		karpcore.GetClient(),
+		caBundle,
+	)
+	if err != nil {
+		return err
+	}
 	bootstrappers := bootstrap.New(
-		rke2.NewBootstrapper(karpcore.GetAPIReader()),
+		rke2Bootstrapper,
 		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient()),
 	)
 
@@ -313,4 +326,20 @@ func repairPolicies() []karpcloudprovider.RepairPolicy {
 		TolerationDuration: inventoryRepairTolerationDuration,
 		Action:             karpcloudprovider.ReplaceNode,
 	}}
+}
+
+// clusterCA is the CA the controller itself trusts the API server with, which is
+// the bundle RKE2 agents must pin.
+func clusterCA(restConfig *rest.Config) ([]byte, error) {
+	if len(restConfig.CAData) > 0 {
+		return restConfig.CAData, nil
+	}
+	if restConfig.CAFile == "" {
+		return nil, fmt.Errorf("the controller's rest config carries no cluster CA")
+	}
+	data, err := os.ReadFile(restConfig.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read the cluster CA: %w", err)
+	}
+	return data, nil
 }

@@ -339,22 +339,6 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 			},
 		},
 		{
-			name: "the bootstrap provider",
-			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
-				spec.Bootstrap = &v1alpha1.Bootstrap{Kubeadm: &v1alpha1.KubeadmBootstrap{}}
-			},
-		},
-		{
-			name: "bootstrap configuration",
-			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
-				spec.Bootstrap = &v1alpha1.Bootstrap{
-					Kubeadm: &v1alpha1.KubeadmBootstrap{
-						ConfigVersion: "kubeadm.k8s.io/v1beta3",
-					},
-				}
-			},
-		},
-		{
 			name: "the boot disk size",
 			mutate: func(spec *v1alpha1.OxideNodeClassSpec) {
 				spec.Storage.Boot.Size = *resourceQuantity("100Gi")
@@ -433,7 +417,6 @@ func TestHashCoversLaunchTimeSpecFields(t *testing.T) {
 
 	base := &v1alpha1.OxideNodeClass{
 		Spec: v1alpha1.OxideNodeClassSpec{
-			Bootstrap: &v1alpha1.Bootstrap{RKE2: &v1alpha1.RKE2Bootstrap{}},
 			Storage: v1alpha1.Storage{
 				Boot: v1alpha1.BootDisk{Size: *resourceQuantity("50Gi")},
 				DiskSets: []v1alpha1.DiskSet{

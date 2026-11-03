@@ -21,17 +21,11 @@ serviceAccount:
 additionalClusterRoleRules: []
 # -- Bootstrap provider configuration.
 # Which bootstrap providers this install may operate. The provider itself is detected from
-# the cluster unless an OxideNodeClass names one; these only gate its RBAC.
+# the cluster; these only gate its RBAC.
 bootstrap:
   rke2:
     # -- Enable RBAC for the RKE2 bootstrap provider.
     enabled: true
-    # -- The Secret holding the RKE2 agent join token.
-    tokenSecret:
-      # -- Namespace of the token Secret.
-      namespace: ""
-      # -- Name of the token Secret.
-      name: rancher-agent-token
   kubeadm:
     # -- Enable RBAC for the kubeadm bootstrap provider.
     enabled: false

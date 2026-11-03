@@ -115,10 +115,10 @@ export CHART=/absolute/path/to/karpenter-provider-oxide-kwok-1.2.3.tgz
 ```
 
 The example assumes kubeadm `cluster-info` and `kubeadm-config` ConfigMaps. For
-RKE2, configure the **existing production chart**'s `provider.bootstrap.rke2`,
-disable `provider.bootstrap.kubeadm`, and use an ordinary RKE2 NodeClass instead
-of the kubeadm fixture. The preflight script currently targets kubeadm; install
-with `helm upgrade --install` directly for an intentionally different bootstrap.
+RKE2, enable `provider.bootstrap.rke2` and disable `provider.bootstrap.kubeadm`
+on the **existing production chart**. The preflight script currently targets
+kubeadm; install with `helm upgrade --install` directly for an intentionally
+different bootstrap.
 
 Use a dedicated test cluster/project and one stack per cluster. Do not install a
 second Karpenter or KWOK alongside an existing installation. All stack Pods have

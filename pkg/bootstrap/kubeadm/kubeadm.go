@@ -3,7 +3,6 @@ package kubeadm
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -13,7 +12,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap"
@@ -30,25 +28,12 @@ const (
 
 	clusterInfoKubeconfigKey = "kubeconfig"
 
-	tokenNamespace = "kube-system"
-
-	tokenSecretPrefix = "bootstrap-token-"
-
-	tokenSecretType = corev1.SecretTypeBootstrapToken
-
+	// nodeBootstrapGroup is the group kubeadm's default RBAC lets submit kubelet CSRs.
 	nodeBootstrapGroup = "system:bootstrappers:kubeadm:default-node-token"
-
-	defaultTokenTTL = 15 * time.Minute
 
 	defaultAPIServerPort = 6443
 
-	tokenIDLength     = 6
-	tokenSecretLength = 16
-
-	tokenAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-	configVersionV1beta3 = "kubeadm.k8s.io/v1beta3"
-	configVersionV1beta4 = "kubeadm.k8s.io/v1beta4"
+	configVersion = "kubeadm.k8s.io/v1beta4"
 
 	configPath = "/etc/kubernetes/karpenter-join.yaml"
 
@@ -149,7 +134,7 @@ func (b *Bootstrapper) UserData(
 		)
 	}
 
-	token, err := b.createToken(ctx, nodeClass, req)
+	token, err := bootstrap.MintToken(ctx, b.writer, nodeClass, req.NodeClaim, nodeBootstrapGroup)
 	if err != nil {
 		return "", err
 	}
@@ -251,73 +236,11 @@ func caCertHashes(caCertData []byte) ([]string, error) {
 	return hashes, nil
 }
 
-func (b *Bootstrapper) createToken(
-	ctx context.Context,
-	nodeClass *v1alpha1.OxideNodeClass,
-	req bootstrap.Request,
-) (string, error) {
-	tokenID, err := randomString(tokenIDLength)
-	if err != nil {
-		return "", err
-	}
-	tokenSecret, err := randomString(tokenSecretLength)
-	if err != nil {
-		return "", err
-	}
-
-	ttl := defaultTokenTTL
-	if tokenTTL := nodeClass.Spec.Bootstrap.KubeadmConfig().TokenTTL; tokenTTL != nil {
-		ttl = tokenTTL.Duration
-	}
-
-	secret := &corev1.Secret{
-		Name:      tokenSecretPrefix + tokenID,
-		Namespace: tokenNamespace,
-		Labels: map[string]string{
-			v1alpha1.LabelNodeClass: nodeClass.Name,
-		},
-		Type: tokenSecretType,
-		StringData: map[string]string{
-			"description": fmt.Sprintf(
-				"Karpenter bootstrap token for NodeClaim %s",
-				req.NodeClaim.Name,
-			),
-			"token-id":                       tokenID,
-			"token-secret":                   tokenSecret,
-			"expiration":                     time.Now().Add(ttl).UTC().Format(time.RFC3339),
-			"usage-bootstrap-authentication": "true",
-			"usage-bootstrap-signing":        "true",
-			"auth-extra-groups":              nodeBootstrapGroup,
-		},
-	}
-	if err := b.writer.Create(ctx, secret); err != nil {
-		return "", fmt.Errorf("unable to create the bootstrap token secret: %w", err)
-	}
-	return fmt.Sprintf("%s.%s", tokenID, tokenSecret), nil
-}
-
-func randomString(length int) (string, error) {
-	out := make([]byte, length)
-	if _, err := rand.Read(out); err != nil {
-		return "", fmt.Errorf("unable to generate a random bootstrap token: %w", err)
-	}
-
-	for i, b := range out {
-		out[i] = tokenAlphabet[int(b)%len(tokenAlphabet)]
-	}
-	return string(out), nil
-}
-
 func (b *Bootstrapper) joinConfiguration(
 	nodeClass *v1alpha1.OxideNodeClass,
 	req bootstrap.Request,
 	token string,
 ) (string, error) {
-	configVersion := nodeClass.Spec.Bootstrap.KubeadmConfig().ConfigVersion
-	if configVersion == "" {
-		configVersion = configVersionV1beta4
-	}
-
 	nodeRegistration := map[string]any{
 		"taints": nodeTaints(req.NodeTaints),
 	}
@@ -326,7 +249,6 @@ func (b *Bootstrapper) joinConfiguration(
 	}
 	if kubeletArgs := kubeletExtraArgs(
 		bootstrap.KubeletArgs(req.InstanceType, req.Kubelet, nodeClass.Status.KubeletArgs),
-		configVersion,
 	); kubeletArgs != nil {
 		nodeRegistration["kubeletExtraArgs"] = kubeletArgs
 	}
@@ -363,17 +285,9 @@ func nodeTaints(taints []corev1.Taint) []map[string]string {
 	return out
 }
 
-func kubeletExtraArgs(args []string, configVersion string) any {
+func kubeletExtraArgs(args []string) []map[string]string {
 	if len(args) == 0 {
 		return nil
-	}
-	if configVersion == configVersionV1beta3 {
-		out := map[string]string{}
-		for _, arg := range args {
-			name, value, _ := strings.Cut(arg, "=")
-			out[name] = value
-		}
-		return out
 	}
 	out := make([]map[string]string, 0, len(args))
 	for _, arg := range args {

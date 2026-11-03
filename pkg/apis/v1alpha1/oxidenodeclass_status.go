@@ -22,8 +22,6 @@ const ConditionReasonProjectMismatch = "ProjectMismatch"
 
 // Condition types owned by the bootstrap providers.
 const (
-	// ConditionTypeTokenRefSecretAccessible reports whether the RKE2 agent token Secret can be read.
-	ConditionTypeTokenRefSecretAccessible = "TokenRefSecretAccessible"
 	// ConditionTypeClusterInfoAvailable reports whether kube-public/cluster-info could be read.
 	ConditionTypeClusterInfoAvailable = "ClusterInfoAvailable"
 )
@@ -245,12 +243,8 @@ type OxideIPPool struct {
 	Name string `json:"name"`
 }
 
-// BootstrapKind is the provider in effect: the one the spec names, or the one detection
-// resolved and recorded in status.
+// BootstrapKind is the provider detection resolved and recorded in status, or empty before that.
 func (in *OxideNodeClass) BootstrapKind() string {
-	if kind := in.Spec.Bootstrap.Kind(); kind != "" {
-		return kind
-	}
 	if in.Status.Bootstrap != nil {
 		return in.Status.Bootstrap.Kind
 	}
@@ -265,12 +259,7 @@ func (in *OxideNodeClass) StatusConditions(opts ...status.ForOption) status.Cond
 		ConditionTypeSubnetsResolved,
 		ConditionTypeStorageResolved,
 	}
-	switch in.BootstrapKind() {
-	case BootstrapKindRKE2:
-		if in.Spec.Bootstrap.RKE2Config().TokenRefSecret.Name != "" {
-			conds = append(conds, ConditionTypeTokenRefSecretAccessible)
-		}
-	case BootstrapKindKubeadm:
+	if in.BootstrapKind() == BootstrapKindKubeadm {
 		conds = append(conds, ConditionTypeClusterInfoAvailable)
 	}
 	if len(in.Spec.EphemeralIPs) > 0 {
