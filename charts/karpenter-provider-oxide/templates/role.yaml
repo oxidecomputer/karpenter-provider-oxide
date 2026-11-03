@@ -87,7 +87,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 rules:
-  # Reading kubeadm-config is how a nodeclass that names no bootstrap provider gets one.
+  # Reading kubeadm-config is how the bootstrap provider is detected.
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kubeadm-config"]

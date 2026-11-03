@@ -331,3 +331,25 @@ func TestKubeletValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestDiskSetMountValidation(t *testing.T) {
+	props, schema := nodeClassSchema(t)
+	spec := map[string]any{
+		"storage": map[string]any{
+			"boot": map[string]any{"size": "50Gi"},
+			// Defaults are not applied here, so the fields the server would fill in are explicit.
+			"diskSets": []any{map[string]any{
+				"name": "data", "type": "Distributed", "count": int64(1), "size": "10Gi",
+			}},
+		},
+		"subnetSelector": []any{map[string]any{"vpcName": "prod"}},
+	}
+	got := validate(t, props, schema, spec)
+	if len(got) != 1 {
+		t.Fatalf(
+			"a diskSet with neither mountPath nor mountDir was refused with %v, "+
+				"want exactly the one-of message",
+			got,
+		)
+	}
+}

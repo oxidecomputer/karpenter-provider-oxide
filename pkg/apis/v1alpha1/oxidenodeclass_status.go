@@ -116,7 +116,7 @@ type OxideNodeClassStatus struct {
 
 // BootstrapStatus holds resolved state that is meaningful to exactly one bootstrap provider.
 type BootstrapStatus struct {
-	// Kind is the bootstrap provider in effect, whether the spec named it or it was detected.
+	// Kind is the bootstrap provider detected from the cluster.
 	// +optional
 	Kind string `json:"kind,omitempty"`
 	// +optional

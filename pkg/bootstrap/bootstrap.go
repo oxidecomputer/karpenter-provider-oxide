@@ -82,8 +82,7 @@ type Bootstrapper interface {
 	Resolve(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, cluster Cluster) error
 	// UserData renders the user-data used to join a single node to the cluster.
 	UserData(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, req Request) (string, error)
-	// Detect reports whether the cluster the controller runs in was bootstrapped by this
-	// provider, which is what lets a nodeclass leave spec.bootstrap unset.
+	// Detect reports whether the cluster the controller runs in was bootstrapped by this provider.
 	Detect(ctx context.Context) (bool, error)
 }
 

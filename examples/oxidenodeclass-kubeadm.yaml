@@ -6,11 +6,6 @@ spec:
   storage:
     boot:
       size: 20Gi
-  # Optional: the provider is detected from the cluster when this is left out.
-  bootstrap:
-    kubeadm:
-      tokenTTL: 15m
-      configVersion: kubeadm.k8s.io/v1beta4
   imageSelector:
     - id: 444f4178-6bee-45f7-a654-c6ecafd4bb9e
   subnetSelector:

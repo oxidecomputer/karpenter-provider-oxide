@@ -570,8 +570,9 @@ spec:
                     y.name == x.name))'
                 - message: each diskSet must have a distinct mountPath or mountDir
                   rule: '!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y,
-                    (has(y.mountPath) ? y.mountPath : y.mountDir) == (has(x.mountPath)
-                    ? x.mountPath : x.mountDir)))'
+                    (has(y.mountPath) ? y.mountPath : (has(y.mountDir) ? y.mountDir
+                    : "")) == (has(x.mountPath) ? x.mountPath : (has(x.mountDir) ?
+                    x.mountDir : ""))))'
               subnetSelector:
                 description: SubnetSelector is used to select subnets to launch nodes
                   into.
@@ -654,8 +655,8 @@ spec:
                   a single bootstrap provider.
                 properties:
                   kind:
-                    description: Kind is the bootstrap provider in effect, whether
-                      the spec named it or it was detected.
+                    description: Kind is the bootstrap provider detected from the
+                      cluster.
                     type: string
                   kubeadm:
                     description: KubeadmStatus is the kubeadm discovery information

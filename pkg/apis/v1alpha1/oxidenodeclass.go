@@ -175,7 +175,7 @@ const (
 // Storage is the whole disk layout of a launched instance.
 // +kubebuilder:validation:XValidation:rule="!has(self.diskSets) || self.diskSets.map(s, s.count).sum() <= 7",message="an instance can attach at most 8 disks and the boot disk is one of them, so the diskSets' counts must sum to 7 or fewer"
 // +kubebuilder:validation:XValidation:rule="!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y, y.name == x.name))",message="each diskSet must have a distinct name"
-// +kubebuilder:validation:XValidation:rule="!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y, (has(y.mountPath) ? y.mountPath : y.mountDir) == (has(x.mountPath) ? x.mountPath : x.mountDir)))",message="each diskSet must have a distinct mountPath or mountDir"
+// +kubebuilder:validation:XValidation:rule=`!has(self.diskSets) || self.diskSets.all(x, self.diskSets.exists_one(y, (has(y.mountPath) ? y.mountPath : (has(y.mountDir) ? y.mountDir : "")) == (has(x.mountPath) ? x.mountPath : (has(x.mountDir) ? x.mountDir : ""))))`,message="each diskSet must have a distinct mountPath or mountDir"
 type Storage struct {
 	// Boot is the disk the instance boots from.
 	// +kubebuilder:validation:Required
