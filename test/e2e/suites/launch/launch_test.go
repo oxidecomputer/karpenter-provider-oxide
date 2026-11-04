@@ -1,12 +1,13 @@
 //go:build e2e
 
-package e2e
+package launch
 
 import (
 	"testing"
 
 	"github.com/onsi/gomega"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/framework"
 	corev1 "k8s.io/api/core/v1"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
@@ -14,7 +15,7 @@ import (
 // TestLaunch boots a node from a boot-disk-only nodeclass and checks what the APIs
 // report about it, without touching the host.
 func TestLaunch(t *testing.T) {
-	e := setup(t)
+	e := framework.Setup(t)
 	g := gomega.NewWithT(t)
 	ctx := t.Context()
 

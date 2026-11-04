@@ -1,5 +1,3 @@
-//go:build e2e
-
 // Package host exposes typed facts about one node to the e2e suite. Facts come
 // from the Kubernetes and Oxide APIs where they can; anything that only exists
 // inside the guest goes through a privileged probe pod, created lazily and

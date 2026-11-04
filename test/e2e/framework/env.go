@@ -1,14 +1,14 @@
-//go:build e2e
-
-// Package e2e holds the live-cluster tests. Build with the e2e tag; see E2E_PLAN.md.
-package e2e
+// Package framework is the harness behind the e2e suites. A suite imports this package
+// and framework/host, asserts with gomega, and reaches into pkg/... only for API types
+// and constants. Everything that talks to the cluster or the rack lives here; a suite
+// never holds a client of its own.
+package framework
 
 import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +21,6 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"golang.org/x/crypto/ssh"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -37,8 +36,6 @@ const LabelRun = "e2e.karpenter.oxide.computer/run"
 
 // LabelPool is put on a workload pod so a wait can find the pod meant for a nodepool.
 const LabelPool = "e2e.karpenter.oxide.computer/pool"
-
-const sshKeyPrefix = "karpenter-e2e-"
 
 // Env is everything a test needs: clients, the resolved defaults, and the run's identity.
 type Env struct {
@@ -83,8 +80,8 @@ func (e *Env) Name(test string) string {
 	return "e2e-" + strings.ToLower(test) + "-" + e.Run
 }
 
-// resolve builds the Env from explicit env vars, then discovery, then hard defaults.
-func resolve(ctx context.Context) (*Env, error) {
+// Load builds the Env from explicit env vars, then discovery, then hard defaults.
+func Load(ctx context.Context) (*Env, error) {
 	runID := make([]byte, 3)
 	if _, err := rand.Read(runID); err != nil {
 		return nil, err
@@ -271,152 +268,6 @@ func (e *Env) resolveSubnets(ctx context.Context) error {
 	e.Subnets = []v1alpha1.SubnetSelector{{
 		ID: selection.IDSelector(subnets[0].Id), Project: e.Project,
 	}}
-	return nil
-}
-
-func (e *Env) generateKey() error {
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
-	}
-	signer, err := ssh.NewSignerFromKey(private)
-	if err != nil {
-		return err
-	}
-	e.privateKey, e.signer = private, signer
-	return nil
-}
-
-// registerKey uploads the run's public key so every nodeclass can select it by name.
-func (e *Env) registerKey(ctx context.Context) error {
-	public := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(e.signer.PublicKey())))
-	_, err := e.Oxide.CurrentUserSshKeyCreate(ctx, oxide.CurrentUserSshKeyCreateParams{
-		Body: &oxide.SshKeyCreate{
-			Name:        oxide.Name(e.SSHKeyName),
-			Description: "karpenter e2e run " + e.Run,
-			PublicKey:   public,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("registering ssh key %s: %w", e.SSHKeyName, err)
-	}
-	if !e.Keep {
-		return nil
-	}
-	path, err := e.writePrivateKey()
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "e2e: private key kept at %s (E2E_KEEP=true)\n", path)
-	return nil
-}
-
-func (e *Env) writePrivateKey() (string, error) {
-	block, err := ssh.MarshalPrivateKey(e.privateKey, "karpenter e2e "+e.Run)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(e.Artifacts, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(e.Artifacts, "id_ed25519")
-	return path, os.WriteFile(path, pem.EncodeToMemory(block), 0o600)
-}
-
-func (e *Env) deleteKey(ctx context.Context) error {
-	err := e.Oxide.CurrentUserSshKeyDelete(ctx, oxide.CurrentUserSshKeyDeleteParams{
-		SshKey: oxide.NameOrId(e.SSHKeyName),
-	})
-	if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
-		return fmt.Errorf("deleting ssh key %s: %w", e.SSHKeyName, err)
-	}
-	return nil
-}
-
-// sweep deletes what earlier runs left behind: labeled pods, nodepools and nodeclasses,
-// then ssh keys with the suite's prefix. Instances follow their nodepool through Karpenter.
-func (e *Env) sweep(ctx context.Context) error {
-	selector := client.HasLabels{LabelRun}
-	var pods corev1.PodList
-	if err := e.Kube.List(ctx, &pods, selector); err != nil {
-		return err
-	}
-	for i := range pods.Items {
-		if err := e.deleteNow(ctx, &pods.Items[i]); err != nil {
-			return err
-		}
-	}
-	var pools karpv1.NodePoolList
-	if err := e.Kube.List(ctx, &pools, selector); err != nil {
-		return err
-	}
-	for i := range pools.Items {
-		if err := e.deleteNow(ctx, &pools.Items[i]); err != nil {
-			return err
-		}
-	}
-	var classes v1alpha1.OxideNodeClassList
-	if err := e.Kube.List(ctx, &classes, selector); err != nil {
-		return err
-	}
-	for i := range classes.Items {
-		if err := e.deleteNow(ctx, &classes.Items[i]); err != nil {
-			return err
-		}
-	}
-	if n := len(pods.Items) + len(pools.Items) + len(classes.Items); n > 0 {
-		fmt.Fprintf(os.Stderr, "e2e: sweeping %d leftover objects from earlier runs\n", n)
-		if err := e.waitGone(ctx, &classes); err != nil {
-			return err
-		}
-	}
-
-	keys, err := e.Oxide.CurrentUserSshKeyListAllPages(ctx, oxide.CurrentUserSshKeyListParams{})
-	if err != nil {
-		return fmt.Errorf("listing ssh keys: %w", err)
-	}
-	for _, key := range keys {
-		if !strings.HasPrefix(string(key.Name), sshKeyPrefix) {
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "e2e: deleting stale ssh key %s\n", key.Name)
-		if err := e.Oxide.CurrentUserSshKeyDelete(ctx, oxide.CurrentUserSshKeyDeleteParams{
-			SshKey: oxide.NameOrId(key.Id),
-		}); err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
-			return fmt.Errorf("deleting ssh key %s: %w", key.Name, err)
-		}
-	}
-	return nil
-}
-
-func (e *Env) deleteNow(ctx context.Context, obj client.Object) error {
-	fmt.Fprintf(os.Stderr, "e2e: deleting leftover %T %s\n", obj, client.ObjectKeyFromObject(obj))
-	err := e.Kube.Delete(ctx, obj, client.GracePeriodSeconds(0))
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-// waitGone blocks until the nodeclasses, whose finalizers hold until their nodeclaims
-// are terminated, are deleted.
-func (e *Env) waitGone(ctx context.Context, classes *v1alpha1.OxideNodeClassList) error {
-	deadline := time.Now().Add(e.DeleteTimeout)
-	for _, nc := range classes.Items {
-		for {
-			err := e.Kube.Get(ctx, client.ObjectKeyFromObject(&nc), &v1alpha1.OxideNodeClass{})
-			if apierrors.IsNotFound(err) {
-				break
-			}
-			if err != nil {
-				return err
-			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("leftover OxideNodeClass %s is still deleting", nc.Name)
-			}
-			time.Sleep(e.Poll)
-		}
-	}
 	return nil
 }
 

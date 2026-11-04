@@ -97,15 +97,15 @@ E2E_RUN ?=
 GOTESTSUM ?= $(GO_TOOL) gotestsum
 
 .PHONY: e2e
-e2e: ## Run the live-cluster e2e suite against the current kube context and Oxide profile. E2E_RUN filters tests.
+e2e: e2e-clean ## Run the live-cluster e2e suites against the current kube context and Oxide profile. E2E_RUN filters tests.
 	mkdir -p $(ARTIFACTS)/e2e
 	ARTIFACTS=$(ARTIFACTS) $(GOTESTSUM) --format testdox \
 		--junitfile $(ARTIFACTS)/e2e/junit.xml --jsonfile $(ARTIFACTS)/e2e/go-test.json \
-		-- -tags e2e -count=1 -timeout 45m $(if $(E2E_RUN),-run '$(E2E_RUN)') ./test/e2e/...
+		-- -tags e2e -count=1 -timeout 45m $(if $(E2E_RUN),-run '$(E2E_RUN)') ./test/e2e/suites/...
 
 .PHONY: e2e-clean
 e2e-clean: ## Delete e2e leftovers from any run, including stale ssh keys
-	go test -tags e2e -count=1 -run '^$$' ./test/e2e/ -args -sweep
+	go run ./test/e2e/sweep
 
 .PHONY: vulncheck
 vulncheck: ## Verify code vulnerabilities

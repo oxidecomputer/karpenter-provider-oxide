@@ -1,6 +1,6 @@
 //go:build e2e
 
-package e2e
+package disks
 
 import (
 	"fmt"
@@ -12,7 +12,8 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/bootstrap/disk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
-	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/host"
+	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/framework"
+	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/framework/host"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -20,7 +21,7 @@ import (
 // the guest's view: mounts, stable device names, the raw link, the kubelet unit's
 // mount dependency and a clean cloud-init.
 func TestDiskSets(t *testing.T) {
-	e := setup(t)
+	e := framework.Setup(t)
 	g := gomega.NewWithT(t)
 	ctx := t.Context()
 

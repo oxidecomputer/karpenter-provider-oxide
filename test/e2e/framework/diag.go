@@ -1,6 +1,4 @@
-//go:build e2e
-
-package e2e
+package framework
 
 import (
 	"bufio"
@@ -14,7 +12,7 @@ import (
 	"time"
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
-	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/host"
+	"github.com/oxidecomputer/karpenter-provider-oxide/test/e2e/framework/host"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
