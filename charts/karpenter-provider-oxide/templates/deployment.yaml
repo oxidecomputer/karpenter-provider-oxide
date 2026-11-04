@@ -97,7 +97,7 @@ spec:
                   divisor: 1m
                   resource: requests.cpu
             - name: FEATURE_GATES
-              value: "StaticCapacity={{ .Values.settings.featureGates.staticCapacity }},SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }},NodeRepair={{ .Values.settings.featureGates.nodeRepair }},NodeOverlay={{ .Values.settings.featureGates.nodeOverlay }}"
+              value: "StaticCapacity={{ .Values.settings.featureGates.staticCapacity }},SpotToSpotConsolidation={{ .Values.settings.featureGates.spotToSpotConsolidation }},NodeRepair={{ .Values.settings.featureGates.nodeRepair }},TerminateFirstRepair={{ .Values.settings.featureGates.terminateFirstRepair }},NodeOverlay={{ .Values.settings.featureGates.nodeOverlay }}"
           {{- with .Values.settings.batchMaxDuration }}
             - name: BATCH_MAX_DURATION
               value: "{{ . }}"

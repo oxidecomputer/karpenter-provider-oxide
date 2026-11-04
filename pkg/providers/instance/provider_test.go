@@ -44,8 +44,10 @@ type fakeAPI struct {
 	attached []oxide.Disk
 
 	deleteStatus int
+	rebootStatus int
 
 	stops       int
+	reboots     int
 	deletes     int
 	diskDeletes []string
 }
@@ -61,6 +63,15 @@ func (f *fakeAPI) server(t *testing.T) *oxide.Client {
 			if f.stopped != nil {
 				f.instance = f.stopped
 			}
+			writeJSON(t, w, http.StatusAccepted, f.instance)
+
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/reboot"):
+			f.reboots++
+			if f.rebootStatus != 0 {
+				writeJSON(t, w, f.rebootStatus, map[string]string{"error_code": "InvalidRequest"})
+				return
+			}
+			f.instance.RunState = oxide.InstanceStateRebooting
 			writeJSON(t, w, http.StatusAccepted, f.instance)
 
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/disks"):
@@ -1035,5 +1046,70 @@ func TestDeleteDoesNotTrustAPrefixWhenTheInstanceIsGone(t *testing.T) {
 	}
 	if len(api.diskDeletes) != 0 {
 		t.Errorf("prefix-matching foreign disk was deleted: %v", api.diskDeletes)
+	}
+}
+
+func TestRebootIssuesARebootForARunningInstance(t *testing.T) {
+	api := &fakeAPI{instance: runningInstance()}
+	p := NewProvider(api.server(t), "project", nil)
+
+	if err := p.Reboot(context.Background(), "karpenter-node"); err != nil {
+		t.Fatalf("reboot failed: %v", err)
+	}
+	if api.reboots != 1 {
+		t.Errorf("the instance was rebooted %d times, want 1", api.reboots)
+	}
+}
+
+func TestRebootTreatsAnInFlightRebootAsAccepted(t *testing.T) {
+	for _, state := range []oxide.InstanceState{oxide.InstanceStateRebooting, oxide.InstanceStateStarting} {
+		inst := runningInstance()
+		inst.RunState = state
+		api := &fakeAPI{instance: inst}
+		p := NewProvider(api.server(t), "project", nil)
+
+		if err := p.Reboot(context.Background(), "karpenter-node"); err != nil {
+			t.Fatalf("reboot of a %s instance failed: %v", state, err)
+		}
+		if api.reboots != 0 {
+			t.Errorf("a %s instance was rebooted %d times, want 0", state, api.reboots)
+		}
+	}
+}
+
+func TestRebootRejectsAStateTheRackCannotRebootFrom(t *testing.T) {
+	for _, state := range []oxide.InstanceState{oxide.InstanceStateFailed, oxide.InstanceStateStopped} {
+		inst := runningInstance()
+		inst.RunState = state
+		api := &fakeAPI{instance: inst}
+		p := NewProvider(api.server(t), "project", nil)
+
+		err := p.Reboot(context.Background(), "karpenter-node")
+		if !errors.Is(err, ErrRebootRejected) {
+			t.Fatalf("reboot of a %s instance returned %v, want %v", state, err, ErrRebootRejected)
+		}
+		if api.reboots != 0 {
+			t.Errorf("a %s instance was rebooted %d times, want 0", state, api.reboots)
+		}
+	}
+}
+
+func TestRebootMapsARackRefusalToRejected(t *testing.T) {
+	api := &fakeAPI{instance: runningInstance(), rebootStatus: http.StatusBadRequest}
+	p := NewProvider(api.server(t), "project", nil)
+
+	err := p.Reboot(context.Background(), "karpenter-node")
+	if !errors.Is(err, ErrRebootRejected) {
+		t.Fatalf("reboot returned %v, want %v", err, ErrRebootRejected)
+	}
+}
+
+func TestRebootReportsAnInstanceAlreadyGone(t *testing.T) {
+	api := &fakeAPI{}
+	p := NewProvider(api.server(t), "project", nil)
+
+	err := p.Reboot(context.Background(), "karpenter-node")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("reboot returned %v, want %v", err, ErrNotFound)
 	}
 }

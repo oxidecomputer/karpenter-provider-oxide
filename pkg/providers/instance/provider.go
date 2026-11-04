@@ -29,6 +29,9 @@ var (
 
 	// ErrInsufficientStorage reports that the boot disk could not be provisioned for want of room.
 	ErrInsufficientStorage = errors.New("insufficient storage capacity")
+
+	// ErrRebootRejected reports that the rack refused to reboot the instance, and retrying will not help.
+	ErrRebootRejected = errors.New("reboot rejected")
 )
 
 // Options is the per-launch configuration a create cannot carry in the Oxide API's own create shape.
@@ -191,6 +194,43 @@ func (p *Provider) Create(
 	}
 	log.FromContext(ctx).V(1).Info("instance started", "instance", params.Body.Name)
 	return started, nil
+}
+
+// Reboot asks the rack to restart an instance in place. A reboot already in
+// flight counts as accepted; any state the rack cannot reboot from is rejected.
+func (p *Provider) Reboot(ctx context.Context, ref string) error {
+	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
+		Instance: oxide.NameOrId(ref),
+		Project:  project.Scope(p.project, ref),
+	})
+	if err != nil {
+		if errors.Is(err, oxide.ErrObjectNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	switch instance.RunState {
+	case oxide.InstanceStateRebooting, oxide.InstanceStateStarting:
+		return nil
+	case oxide.InstanceStateRunning:
+	default:
+		return fmt.Errorf("%w: instance is %s", ErrRebootRejected, instance.RunState)
+	}
+
+	if _, err := p.ox.InstanceReboot(ctx, oxide.InstanceRebootParams{
+		Instance: oxide.NameOrId(ref),
+		Project:  project.Scope(p.project, ref),
+	}); err != nil {
+		switch {
+		case errors.Is(err, oxide.ErrObjectNotFound):
+			return ErrNotFound
+		case errors.Is(err, oxide.ErrInvalidRequest), errors.Is(err, oxide.ErrConflict):
+			return fmt.Errorf("%w: %w", ErrRebootRejected, err)
+		}
+		return err
+	}
+	log.FromContext(ctx).V(1).Info("instance reboot issued", "instance", instance.Name)
+	return nil
 }
 
 // Delete tears down an instance and every resource it owns that outlives it.

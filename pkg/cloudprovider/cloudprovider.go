@@ -1114,9 +1114,28 @@ func smallestSpecs(candidates []string) instancetype.Specs {
 	return smallest
 }
 
-// In-place reboot is not supported yet; no repair policy requests it.
-func (c *OxideCloudProvider) Reboot(context.Context, *karpcorev1.NodeClaim, string) error {
-	return cloudprovider.NewNodeRebootNotImplementedError()
+// Reboot restarts the instance in place. The operation ID is unused: Oxide has
+// no idempotency key, and a repeat reboot of a running instance is harmless.
+func (c *OxideCloudProvider) Reboot(
+	ctx context.Context,
+	nodeClaim *karpcorev1.NodeClaim,
+	_ string,
+) error {
+	instanceID, err := InstanceIDFromProviderID(nodeClaim.Status.ProviderID)
+	if err != nil {
+		return cloudprovider.NewNodeRebootFailedError(
+			fmt.Errorf("invalid provider id, must use the oxide ccm: %w", err))
+	}
+	if err := c.instanceProvider.Reboot(ctx, instanceID); err != nil {
+		switch {
+		case errors.Is(err, instance.ErrNotFound):
+			return cloudprovider.NewNodeClaimNotFoundError(err)
+		case errors.Is(err, instance.ErrRebootRejected):
+			return cloudprovider.NewNodeRebootFailedError(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // RepairPolicy is for CloudProviders to define a set Unhealthy condition for Karpenter to monitor on the node.

@@ -41,6 +41,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
@@ -68,6 +69,7 @@ const (
 	inventoryRefreshPeriod            = 5 * time.Minute
 	capacityPublishPeriod             = 15 * time.Second
 	inventoryRepairTolerationDuration = 30 * time.Minute
+	readyRepairTolerationDuration     = 30 * time.Minute
 	apiRequestTimeout                 = 60 * time.Second
 	reaperPeriod                      = time.Minute
 	reaperQuarantine                  = 5 * time.Minute
@@ -320,15 +322,39 @@ func inventoryConfigFromEnv() inventoryConfig {
 	return inventoryConfig{enabled: enabled}
 }
 
-// Defined even without inventory, which is what sets the condition: core
-// refuses to start NodeRepair against a provider with no policies.
+// A NotReady node is rebooted first; core replaces it when the reboot is
+// rejected, never recovers, or has already been tried twice in a day. The
+// zero grace period skips the drain, since a wedged kubelet cannot evict.
+// Defined even without inventory, which is what sets the sled condition:
+// core refuses to start NodeRepair against a provider with no policies.
 func repairPolicies() []karpcloudprovider.RepairPolicy {
-	return []karpcloudprovider.RepairPolicy{{
-		ConditionType:      v1alpha1.ConditionTypeSledUnhealthy,
-		ConditionStatus:    corev1.ConditionTrue,
-		TolerationDuration: inventoryRepairTolerationDuration,
-		Action:             karpcloudprovider.ReplaceNode,
-	}}
+	forceful := lo.ToPtr(time.Duration(0))
+	return []karpcloudprovider.RepairPolicy{
+		{
+			ConditionType:          corev1.NodeReady,
+			ConditionStatus:        corev1.ConditionFalse,
+			ReasonRegex:            ".*",
+			TolerationDuration:     readyRepairTolerationDuration,
+			TerminationGracePeriod: forceful,
+			Action:                 karpcloudprovider.RebootNode,
+		},
+		{
+			ConditionType:          corev1.NodeReady,
+			ConditionStatus:        corev1.ConditionUnknown,
+			ReasonRegex:            ".*",
+			TolerationDuration:     readyRepairTolerationDuration,
+			TerminationGracePeriod: forceful,
+			Action:                 karpcloudprovider.RebootNode,
+		},
+		{
+			// A sled leaving service takes the VM with it; a reboot gains nothing.
+			// Empty ReasonRegex: the set's required ReplaceNode fallback.
+			ConditionType:      v1alpha1.ConditionTypeSledUnhealthy,
+			ConditionStatus:    corev1.ConditionTrue,
+			TolerationDuration: inventoryRepairTolerationDuration,
+			Action:             karpcloudprovider.ReplaceNode,
+		},
+	}
 }
 
 // clusterCA is the CA the controller itself trusts the API server with, which is

@@ -148,6 +148,8 @@ settings:
     spotToSpotConsolidation: false
     # -- nodeRepair is ALPHA and is disabled by default.
     nodeRepair: false
+    # -- terminateFirstRepair launches the replacement before the broken node is deleted. Requires nodeRepair.
+    terminateFirstRepair: false
     # -- staticCapacity is ALPHA and is disabled by default.
     staticCapacity: false
     # -- nodeOverlay is ALPHA and is disabled by default.
