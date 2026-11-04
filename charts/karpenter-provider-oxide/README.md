@@ -74,14 +74,15 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
-| settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false}` | Feature gate configuration values. |
+| settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false}` | Feature gate configuration values. |
 | settings.featureGates.nodeOverlay | bool | `false` | nodeOverlay is ALPHA and is disabled by default. |
 | settings.featureGates.nodeRepair | bool | `false` | nodeRepair is ALPHA and is disabled by default. |
 | settings.featureGates.spotToSpotConsolidation | bool | `false` | spotToSpotConsolidation is ALPHA and is disabled by default. |
 | settings.featureGates.staticCapacity | bool | `false` | staticCapacity is ALPHA and is disabled by default. |
+| settings.featureGates.terminateFirstRepair | bool | `false` | terminateFirstRepair launches the replacement before the broken node is deleted. Requires nodeRepair. |
 | settings.instanceTypes | object | `{"incrementPercent":10}` | Instance type catalog generation. |
 | settings.instanceTypes.incrementPercent | int | `10` | Percentage increase between successive CPU and memory values in the generated catalog. |
 | settings.inventory | object | `{"enabled":false}` | Sled inventory configuration. |
