@@ -8,9 +8,11 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/selection"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -46,10 +48,12 @@ func (e *Env) NodeClass(
 
 // NodePool builds a pool for the nodeclass. Requirements and startup taints come from
 // the cluster's default pool so the node joins the same way the cluster's own nodes do.
-// Consolidation and expiry are off: the test decides when the node goes away. The pool
-// is tainted with the run so neither other workloads nor another pool's disruption
-// can land anything on it.
-func (e *Env) NodePool(nc *v1alpha1.OxideNodeClass) *karpv1.NodePool {
+// Consolidation and expiry are off unless a mutator turns them on: the test decides when
+// the node goes away. The pool is tainted with the run so neither other workloads nor
+// another pool's disruption can land anything on it.
+func (e *Env) NodePool(
+	nc *v1alpha1.OxideNodeClass, mutate ...func(*karpv1.NodePool),
+) *karpv1.NodePool {
 	requirements := []karpv1.NodeSelectorRequirementWithMinValues{
 		{
 			Key: corev1.LabelArchStable, Operator: corev1.NodeSelectorOpIn,
@@ -65,7 +69,7 @@ func (e *Env) NodePool(nc *v1alpha1.OxideNodeClass) *karpv1.NodePool {
 		requirements = e.defaultPool.Spec.Template.Spec.Requirements
 		startupTaints = e.defaultPool.Spec.Template.Spec.StartupTaints
 	}
-	return &karpv1.NodePool{
+	pool := &karpv1.NodePool{
 		Name: nc.Name, Labels: e.Labels(),
 		Spec: karpv1.NodePoolSpec{
 			Disruption: karpv1.Disruption{
@@ -85,10 +89,40 @@ func (e *Env) NodePool(nc *v1alpha1.OxideNodeClass) *karpv1.NodePool {
 			},
 		},
 	}
+	for _, m := range mutate {
+		m(pool)
+	}
+	return pool
 }
 
 // Pod builds a pause pod pinned to the pool. resources is "cpu=1,memory=256Mi".
 func (e *Env) Pod(pool *karpv1.NodePool, resources string) *corev1.Pod {
+	labels, spec := e.podTemplate(pool, resources)
+	return &corev1.Pod{Name: pool.Name, Namespace: e.Namespace, Labels: labels, Spec: spec}
+}
+
+// Deployment builds pause pods pinned to the pool that outlive the node they land on,
+// for a test that takes the node away and expects the workload to come back elsewhere.
+func (e *Env) Deployment(
+	pool *karpv1.NodePool, replicas int32, resources string,
+) *appsv1.Deployment {
+	labels, spec := e.podTemplate(pool, resources)
+	return &appsv1.Deployment{
+		Name: pool.Name, Namespace: e.Namespace, Labels: e.Labels(),
+		Spec: appsv1.DeploymentSpec{
+			Replicas: new(replicas),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{LabelPool: pool.Name}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec:       spec,
+			},
+		},
+	}
+}
+
+func (e *Env) podTemplate(
+	pool *karpv1.NodePool, resources string,
+) (map[string]string, corev1.PodSpec) {
 	requests := corev1.ResourceList{}
 	for kv := range strings.SplitSeq(resources, ",") {
 		key, value, ok := strings.Cut(strings.TrimSpace(kv), "=")
@@ -99,18 +133,15 @@ func (e *Env) Pod(pool *karpv1.NodePool, resources string) *corev1.Pod {
 	}
 	labels := e.Labels()
 	labels[LabelPool] = pool.Name
-	return &corev1.Pod{
-		Name: pool.Name, Namespace: e.Namespace, Labels: labels,
-		Spec: corev1.PodSpec{
-			NodeSelector:                  map[string]string{karpv1.NodePoolLabelKey: pool.Name},
-			Tolerations:                   []corev1.Toleration{e.toleration()},
-			TerminationGracePeriodSeconds: ptr.To[int64](0),
-			Containers: []corev1.Container{{
-				Name:      "pause",
-				Image:     pauseImage,
-				Resources: corev1.ResourceRequirements{Requests: requests},
-			}},
-		},
+	return labels, corev1.PodSpec{
+		NodeSelector:                  map[string]string{karpv1.NodePoolLabelKey: pool.Name},
+		Tolerations:                   []corev1.Toleration{e.toleration()},
+		TerminationGracePeriodSeconds: ptr.To[int64](0),
+		Containers: []corev1.Container{{
+			Name:      "pause",
+			Image:     pauseImage,
+			Resources: corev1.ResourceRequirements{Requests: requests},
+		}},
 	}
 }
 

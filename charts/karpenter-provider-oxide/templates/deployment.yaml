@@ -133,6 +133,14 @@ spec:
             - name: OXIDE_INVENTORY_ENABLED
               value: "true"
           {{- end }}
+          {{- with .Values.settings.nodeRepair.tolerationDuration }}
+            - name: OXIDE_REPAIR_TOLERATION
+              value: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.settings.reaper.quarantine }}
+            - name: OXIDE_REAPER_QUARANTINE
+              value: {{ . | quote }}
+          {{- end }}
           {{- with .Values.controller.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

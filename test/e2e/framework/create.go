@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,9 +13,10 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// Create creates the objects and registers the one cleanup that tears everything down:
-// workload, nodepool and nodeclass are deleted, then the nodeclaim, the Oxide instance and
-// its disks must go away. A leak fails the test. On failure, diagnostics are written first.
+// Create creates the objects in order and registers the one cleanup that tears everything
+// down: the objects are deleted in reverse, workload first, then the nodeclaims, the Oxide
+// instances and their disks must go away. A leak fails the test. On failure, diagnostics
+// are written first.
 func (e *Env) Create(t *testing.T, objs ...client.Object) {
 	t.Helper()
 	ctx := t.Context()
@@ -38,11 +40,11 @@ func (e *Env) Create(t *testing.T, objs ...client.Object) {
 				return
 			}
 		}
-		var launches []launch
+		var launches []Launch
 		if pool != nil {
 			launches = e.launches(ctx, t, pool)
 		}
-		for _, obj := range objs {
+		for _, obj := range slices.Backward(objs) {
 			if err := e.Kube.Delete(ctx, obj, client.GracePeriodSeconds(0)); err != nil &&
 				!apierrors.IsNotFound(err) {
 				t.Errorf("deleting %T %s: %v", obj, obj.GetName(), err)
@@ -57,29 +59,34 @@ func (e *Env) Create(t *testing.T, objs ...client.Object) {
 	}
 }
 
-// launch is what a cleanup has to see disappear from Oxide.
-type launch struct {
+// Launch is what a nodeclaim put on the rack, and what has to disappear from Oxide once
+// the nodeclaim is gone. Take it before a test removes the nodeclaim, since the cleanup
+// only sees the nodeclaims that still exist.
+type Launch struct {
 	NodeClaim  string
 	InstanceID string
 	DiskPrefix string
 }
 
-func (e *Env) launches(ctx context.Context, t *testing.T, pool *karpv1.NodePool) []launch {
+// LaunchOf reads the launch off a nodeclaim.
+func LaunchOf(claim *karpv1.NodeClaim) Launch {
+	return Launch{
+		NodeClaim:  claim.Name,
+		InstanceID: instanceID(claim.Status.ProviderID),
+		DiskPrefix: claim.Annotations[v1alpha1.AnnotationDiskPrefix],
+	}
+}
+
+func (e *Env) launches(ctx context.Context, t *testing.T, pool *karpv1.NodePool) []Launch {
 	t.Helper()
-	var claims karpv1.NodeClaimList
-	if err := e.Kube.List(ctx, &claims, client.MatchingLabels{
-		karpv1.NodePoolLabelKey: pool.Name,
-	}); err != nil {
+	claims, err := e.NodeClaims(ctx, pool)
+	if err != nil {
 		t.Errorf("listing nodeclaims of %s: %v", pool.Name, err)
 		return nil
 	}
-	out := make([]launch, 0, len(claims.Items))
-	for _, claim := range claims.Items {
-		out = append(out, launch{
-			NodeClaim:  claim.Name,
-			InstanceID: instanceID(claim.Status.ProviderID),
-			DiskPrefix: claim.Annotations[v1alpha1.AnnotationDiskPrefix],
-		})
+	out := make([]Launch, 0, len(claims))
+	for i := range claims {
+		out = append(out, LaunchOf(&claims[i]))
 	}
 	return out
 }

@@ -30,7 +30,7 @@ func repairMatcher(t *testing.T) *health.RepairPolicyMatcher {
 	})
 	matcher, err := health.NewRepairPolicyMatcher(
 		ctx,
-		policyOnlyCloudProvider{policies: repairPolicies()},
+		policyOnlyCloudProvider{policies: repairPolicies(readyRepairTolerationDuration)},
 	)
 	if err != nil {
 		t.Fatalf("core rejected the repair policies: %v", err)

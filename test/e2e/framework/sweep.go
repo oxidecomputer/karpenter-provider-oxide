@@ -10,13 +10,14 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// Sweep deletes what earlier runs left behind: labeled pods, nodepools and nodeclasses,
+// Sweep deletes what earlier runs left behind: labeled pods, deployments, nodepools and nodeclasses,
 // then ssh keys with the suite's prefix. Instances follow their nodepool through
 // Karpenter. It takes out every run's objects, so it must not overlap a live suite.
 func (e *Env) Sweep(ctx context.Context) error {
@@ -27,6 +28,15 @@ func (e *Env) Sweep(ctx context.Context) error {
 	}
 	for i := range pods.Items {
 		if err := e.deleteNow(ctx, &pods.Items[i]); err != nil {
+			return err
+		}
+	}
+	var deployments appsv1.DeploymentList
+	if err := e.Kube.List(ctx, &deployments, selector); err != nil {
+		return err
+	}
+	for i := range deployments.Items {
+		if err := e.deleteNow(ctx, &deployments.Items[i]); err != nil {
 			return err
 		}
 	}
@@ -48,7 +58,8 @@ func (e *Env) Sweep(ctx context.Context) error {
 			return err
 		}
 	}
-	if n := len(pods.Items) + len(pools.Items) + len(classes.Items); n > 0 {
+	n := len(pods.Items) + len(deployments.Items) + len(pools.Items) + len(classes.Items)
+	if n > 0 {
 		fmt.Fprintf(os.Stderr, "e2e: sweeping %d leftover objects from earlier runs\n", n)
 		if err := e.waitGone(ctx, &classes); err != nil {
 			return err

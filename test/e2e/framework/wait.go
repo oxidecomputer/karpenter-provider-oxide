@@ -11,81 +11,187 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// EventuallyNodeReady waits for the pool's nodeclaim to be Ready, then its node to be
-// Ready and the pool's pod to be Running, and returns the node. Waits assert on
-// conditions so a timeout prints the last reason and message.
+// EventuallyNodeReady is EventuallyNodesReady for a pool that should hold one node.
 func (e *Env) EventuallyNodeReady(g gomega.Gomega, pool *karpv1.NodePool) *corev1.Node {
+	return e.EventuallyNodesReady(g, pool, 1)[0]
+}
+
+// EventuallyNodesReady waits until the pool has exactly n nodeclaims that are not being
+// deleted, each Ready with a Ready node, and every pod of the pool Running on one of
+// those nodes, then returns the nodes. Everything is re-read on each poll, so a node
+// that is on its way out is never the one returned. More than n live nodeclaims is a
+// duplicate launch and fails at once.
+func (e *Env) EventuallyNodesReady(
+	g gomega.Gomega, pool *karpv1.NodePool, n int,
+) []*corev1.Node {
 	ctx := context.Background()
-	var claim karpv1.NodeClaim
+	var nodes []*corev1.Node
 	g.Eventually(func(g gomega.Gomega) {
-		found, err := e.NodeClaim(ctx, pool)
+		claims, err := e.liveNodeClaims(ctx, pool)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
-		g.Expect(found).NotTo(gomega.BeNil(), "no nodeclaim for nodepool %s yet", pool.Name)
-		claim = *found
-		g.Expect(conditionTrue(claim.StatusConditions().Root())).
-			To(gomega.BeTrue(), "nodeclaim %s: %s", claim.Name, describe(claim.StatusConditions()))
-	}).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+		if len(claims) > n {
+			gomega.StopTrying(fmt.Sprintf("nodepool %s has %d nodeclaims, want %d: %s",
+				pool.Name, len(claims), n, describeClaims(claims))).Now()
+		}
+		g.Expect(claims).To(gomega.HaveLen(n), "nodeclaims of nodepool %s: %s",
+			pool.Name, describeClaims(claims))
 
-	var node corev1.Node
-	g.Eventually(func(g gomega.Gomega) {
-		g.Expect(claim.Status.NodeName).
-			NotTo(gomega.BeEmpty(), "nodeclaim %s has no node", claim.Name)
-		g.Expect(e.Kube.Get(ctx, types.NamespacedName{Name: claim.Status.NodeName}, &node)).
-			To(gomega.Succeed())
-		g.Expect(nodeReady(&node)).
-			To(gomega.BeTrue(), "node %s: %s", node.Name, nodeConditions(&node))
-	}).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+		found := make([]*corev1.Node, 0, n)
+		byName := map[string]bool{}
+		for i := range claims {
+			claim := &claims[i]
+			g.Expect(conditionTrue(claim.StatusConditions().Root())).To(gomega.BeTrue(),
+				"nodeclaim %s: %s", claim.Name, describe(claim.StatusConditions()))
+			g.Expect(claim.Status.NodeName).
+				NotTo(gomega.BeEmpty(), "nodeclaim %s has no node", claim.Name)
+			node := &corev1.Node{}
+			g.Expect(e.Kube.Get(ctx, types.NamespacedName{Name: claim.Status.NodeName}, node)).
+				To(gomega.Succeed())
+			g.Expect(nodeReady(node)).
+				To(gomega.BeTrue(), "node %s: %s", node.Name, nodeConditions(node))
+			found = append(found, node)
+			byName[node.Name] = true
+		}
 
-	g.Eventually(func(g gomega.Gomega) {
 		var pods corev1.PodList
 		g.Expect(e.Kube.List(ctx, &pods, client.InNamespace(e.Namespace), client.MatchingLabels{
 			LabelPool: pool.Name,
 		})).To(gomega.Succeed())
 		for i := range pods.Items {
 			pod := &pods.Items[i]
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
 			g.Expect(pod.Status.Phase).To(gomega.Equal(corev1.PodRunning),
 				"pod %s is %s on %q: %s %s", pod.Name, pod.Status.Phase, pod.Spec.NodeName,
 				pod.Status.Reason, pod.Status.Message)
-			g.Expect(pod.Spec.NodeName).To(gomega.Equal(node.Name))
+			g.Expect(byName).To(gomega.HaveKey(pod.Spec.NodeName),
+				"pod %s runs on %s, not on a node of the pool", pod.Name, pod.Spec.NodeName)
 		}
+		nodes = found
 	}).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
-	return &node
+	return nodes
 }
 
-// NodeClaim is the pool's single nodeclaim, or nil before Karpenter created it.
-func (e *Env) NodeClaim(ctx context.Context, pool *karpv1.NodePool) (*karpv1.NodeClaim, error) {
+// NodeClaims lists every nodeclaim of the pool, deleting ones included.
+func (e *Env) NodeClaims(ctx context.Context, pool *karpv1.NodePool) ([]karpv1.NodeClaim, error) {
 	var claims karpv1.NodeClaimList
 	if err := e.Kube.List(ctx, &claims, client.MatchingLabels{
 		karpv1.NodePoolLabelKey: pool.Name,
 	}); err != nil {
 		return nil, err
 	}
-	switch len(claims.Items) {
+	return claims.Items, nil
+}
+
+func (e *Env) liveNodeClaims(
+	ctx context.Context, pool *karpv1.NodePool,
+) ([]karpv1.NodeClaim, error) {
+	claims, err := e.NodeClaims(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	live := claims[:0]
+	for _, c := range claims {
+		if c.DeletionTimestamp == nil {
+			live = append(live, c)
+		}
+	}
+	return live, nil
+}
+
+// NodeClaim is the pool's single nodeclaim that is not being deleted, or nil before
+// Karpenter created one.
+func (e *Env) NodeClaim(ctx context.Context, pool *karpv1.NodePool) (*karpv1.NodeClaim, error) {
+	claims, err := e.liveNodeClaims(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	switch len(claims) {
 	case 0:
 		return nil, nil
 	case 1:
-		return &claims.Items[0], nil
+		return &claims[0], nil
 	default:
-		names := make([]string, 0, len(claims.Items))
-		for _, c := range claims.Items {
+		names := make([]string, 0, len(claims))
+		for _, c := range claims {
 			names = append(names, c.Name)
 		}
 		return nil, fmt.Errorf("nodepool %s has %d nodeclaims: %s", pool.Name, len(names), names)
 	}
 }
 
-// EventuallyGone waits for the pool's nodeclaims, then each launch's Oxide instance and
-// disks, to disappear. Failures are reported but do not stop the remaining checks.
+// EventuallyNodeClaimDeleting waits until the nodeclaim is being deleted, or is gone.
+func (e *Env) EventuallyNodeClaimDeleting(g gomega.Gomega, name string) {
+	ctx := context.Background()
+	g.Eventually(func(g gomega.Gomega) {
+		var claim karpv1.NodeClaim
+		err := e.Kube.Get(ctx, types.NamespacedName{Name: name}, &claim)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(claim.DeletionTimestamp).NotTo(gomega.BeNil(),
+			"nodeclaim %s is not deleting: %s", name, describe(claim.StatusConditions()))
+	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+}
+
+// EventuallyNoNodeClaims waits until the pool has no nodeclaims at all.
+func (e *Env) EventuallyNoNodeClaims(g gomega.Gomega, pool *karpv1.NodePool) {
+	ctx := context.Background()
+	g.Eventually(func(g gomega.Gomega) {
+		claims, err := e.NodeClaims(ctx, pool)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(claims).To(gomega.BeEmpty(), "nodeclaims of %s still exist: %s",
+			pool.Name, describeClaims(claims))
+	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+}
+
+// EventuallyNodeGone waits until the node object is deleted.
+func (e *Env) EventuallyNodeGone(g gomega.Gomega, name string) {
+	ctx := context.Background()
+	g.Eventually(func() error {
+		return e.Kube.Get(ctx, types.NamespacedName{Name: name}, &corev1.Node{})
+	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).
+		Should(gomega.MatchError(apierrors.IsNotFound, "node not found"), "node %s", name)
+}
+
+// EventuallyLaunchGone waits until the launch's instance and disks are gone from Oxide.
+func (e *Env) EventuallyLaunchGone(g gomega.Gomega, l Launch) {
+	ctx := context.Background()
+	if l.InstanceID != "" {
+		g.Eventually(func(g gomega.Gomega) {
+			_, err := e.Oxide.InstanceView(ctx, oxide.InstanceViewParams{
+				Instance: oxide.NameOrId(l.InstanceID),
+			})
+			g.Expect(errors.Is(err, oxide.ErrObjectNotFound)).To(gomega.BeTrue(),
+				"instance %s of nodeclaim %s still exists (%v)", l.InstanceID, l.NodeClaim, err)
+		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+	}
+	if l.DiskPrefix != "" {
+		g.Eventually(func(g gomega.Gomega) {
+			disks, err := e.DisksWithPrefix(ctx, l.DiskPrefix)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(disks).To(gomega.BeEmpty(),
+				"disks of nodeclaim %s still exist: %s", l.NodeClaim, disks)
+		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+	}
+}
+
+// EventuallyGone is the cleanup's wait: the pool's nodeclaims, then each launch's Oxide
+// instance and disks, must disappear. Failures are reported but do not stop the
+// remaining checks.
 func (e *Env) EventuallyGone(
 	ctx context.Context,
 	t *testing.T,
 	pool *karpv1.NodePool,
-	launches []launch,
+	launches []Launch,
 ) {
 	t.Helper()
 	g := gomega.NewGomega(func(message string, _ ...int) {
@@ -94,40 +200,23 @@ func (e *Env) EventuallyGone(
 	})
 	if pool != nil {
 		g.Eventually(func(g gomega.Gomega) {
-			var claims karpv1.NodeClaimList
-			g.Expect(e.Kube.List(ctx, &claims, client.MatchingLabels{
-				karpv1.NodePoolLabelKey: pool.Name,
-			})).To(gomega.Succeed())
-			for _, c := range claims.Items {
+			claims, err := e.NodeClaims(ctx, pool)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			for _, c := range claims {
 				g.Expect(c.DeletionTimestamp).NotTo(gomega.BeNil(),
 					"nodeclaim %s of deleted nodepool %s is not deleting", c.Name, pool.Name)
 			}
-			g.Expect(claims.Items).To(gomega.BeEmpty(), "nodeclaims of %s still exist: %s",
-				pool.Name, describeClaims(claims.Items))
+			g.Expect(claims).To(gomega.BeEmpty(), "nodeclaims of %s still exist: %s",
+				pool.Name, describeClaims(claims))
 		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
 	}
 	for _, l := range launches {
-		if l.InstanceID != "" {
-			g.Eventually(func(g gomega.Gomega) {
-				_, err := e.Oxide.InstanceView(ctx, oxide.InstanceViewParams{
-					Instance: oxide.NameOrId(l.InstanceID),
-				})
-				g.Expect(errors.Is(err, oxide.ErrObjectNotFound)).To(gomega.BeTrue(),
-					"instance %s of nodeclaim %s still exists (%v)", l.InstanceID, l.NodeClaim, err)
-			}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
-		}
-		if l.DiskPrefix != "" {
-			g.Eventually(func(g gomega.Gomega) {
-				disks, err := e.disksWithPrefix(ctx, l.DiskPrefix)
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				g.Expect(disks).To(gomega.BeEmpty(),
-					"disks of nodeclaim %s still exist: %s", l.NodeClaim, disks)
-			}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
-		}
+		e.EventuallyLaunchGone(g, l)
 	}
 }
 
-func (e *Env) disksWithPrefix(ctx context.Context, prefix string) ([]string, error) {
+// DisksWithPrefix names the project's disks whose name starts with prefix.
+func (e *Env) DisksWithPrefix(ctx context.Context, prefix string) ([]string, error) {
 	disks, err := e.Oxide.DiskListAllPages(ctx, oxide.DiskListParams{
 		Project: oxide.NameOrId(e.Project),
 	})

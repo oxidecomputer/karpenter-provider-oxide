@@ -72,7 +72,7 @@ const (
 	readyRepairTolerationDuration     = 30 * time.Minute
 	apiRequestTimeout                 = 60 * time.Second
 	reaperPeriod                      = time.Minute
-	reaperQuarantine                  = 5 * time.Minute
+	defaultReaperQuarantine           = 5 * time.Minute
 )
 
 // NewCommand runs the controller-manager. Karpenter parses os.Args itself, so unknown
@@ -146,6 +146,18 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	reaperQuarantine, err := config.DurationFromEnv(
+		config.EnvReaperQuarantine, defaultReaperQuarantine,
+	)
+	if err != nil {
+		return err
+	}
+	repairToleration, err := config.DurationFromEnv(
+		config.EnvRepairToleration, readyRepairTolerationDuration,
+	)
+	if err != nil {
+		return err
+	}
 	availabilityManager := availability.New(inventoryProvider(sledProvider))
 	storageRefusals := storagerefusal.NewTracker()
 	instanceTypes, err := instancetype.NewProviderWithShapeConfig(
@@ -209,7 +221,7 @@ func Run() error {
 		availabilityManager,
 		storageRefusals,
 		bootstrappers,
-		repairPolicies(),
+		repairPolicies(repairToleration),
 
 		[]providers.Drifter{
 			images, storage.NewDrifter(), subnets, sshKeys, ipPools, affinityGroups,
@@ -327,14 +339,14 @@ func inventoryConfigFromEnv() inventoryConfig {
 // zero grace period skips the drain, since a wedged kubelet cannot evict.
 // Defined even without inventory, which is what sets the sled condition:
 // core refuses to start NodeRepair against a provider with no policies.
-func repairPolicies() []karpcloudprovider.RepairPolicy {
+func repairPolicies(readyToleration time.Duration) []karpcloudprovider.RepairPolicy {
 	forceful := lo.ToPtr(time.Duration(0))
 	return []karpcloudprovider.RepairPolicy{
 		{
 			ConditionType:          corev1.NodeReady,
 			ConditionStatus:        corev1.ConditionFalse,
 			ReasonRegex:            ".*",
-			TolerationDuration:     readyRepairTolerationDuration,
+			TolerationDuration:     readyToleration,
 			TerminationGracePeriod: forceful,
 			Action:                 karpcloudprovider.RebootNode,
 		},
@@ -342,7 +354,7 @@ func repairPolicies() []karpcloudprovider.RepairPolicy {
 			ConditionType:          corev1.NodeReady,
 			ConditionStatus:        corev1.ConditionUnknown,
 			ReasonRegex:            ".*",
-			TolerationDuration:     readyRepairTolerationDuration,
+			TolerationDuration:     readyToleration,
 			TerminationGracePeriod: forceful,
 			Action:                 karpcloudprovider.RebootNode,
 		},

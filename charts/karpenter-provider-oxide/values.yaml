@@ -134,6 +134,14 @@ settings:
   inventory:
     # -- Enable the sled inventory controllers.
     enabled: false
+  # -- Node repair configuration.
+  nodeRepair:
+    # -- How long a node may stay NotReady before it is rebooted. Defaults to 30m.
+    tolerationDuration: ""
+  # -- Reaper configuration.
+  reaper:
+    # -- How long an unowned Oxide resource is left alone before it is deleted. Defaults to 5m.
+    quarantine: ""
   # -- The maximum length of a batch window.
   batchMaxDuration: 10s
   # -- The maximum amount of time with no new pending pods that if exceeded ends the current batching window.

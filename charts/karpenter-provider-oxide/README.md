@@ -74,7 +74,7 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect"}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","nodeRepair":{"tolerationDuration":""},"oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","reaper":{"quarantine":""}}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
 | settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false}` | Feature gate configuration values. |
@@ -88,12 +88,16 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | settings.inventory | object | `{"enabled":false}` | Sled inventory configuration. |
 | settings.inventory.enabled | bool | `false` | Enable the sled inventory controllers. |
 | settings.minValuesPolicy | string | `"Strict"` | How the Karpenter scheduler treats min values. |
+| settings.nodeRepair | object | `{"tolerationDuration":""}` | Node repair configuration. |
+| settings.nodeRepair.tolerationDuration | string | `""` | How long a node may stay NotReady before it is rebooted. Defaults to 30m. |
 | settings.oxide | object | `{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |
 | settings.oxide.clusterID | string | `""` | Identity this cluster records on every Oxide resource it creates. |
 | settings.oxide.host | string | `""` | URL of the Oxide API, for example https://oxide.sys.example.com. |
 | settings.oxide.project | string | `""` | Oxide project that Karpenter provisions instances into. |
 | settings.oxide.tokenSecret | object | `{"key":"token","name":"oxide-api-token"}` | Secret in the release namespace holding the Oxide API token. |
 | settings.preferencePolicy | string | `"Respect"` | How the Karpenter scheduler should treat preferences. |
+| settings.reaper | object | `{"quarantine":""}` | Reaper configuration. |
+| settings.reaper.quarantine | string | `""` | How long an unowned Oxide resource is left alone before it is deleted. Defaults to 5m. |
 | strategy | object | `{"rollingUpdate":{"maxUnavailable":1}}` | Strategy for updating the pod. |
 | terminationGracePeriodSeconds | string | `nil` | Override the default termination grace period for the pod. |
 | tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"}]` | Tolerations to allow the pod to be scheduled to nodes with taints. |
