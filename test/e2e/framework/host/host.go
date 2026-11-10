@@ -28,7 +28,7 @@ type Env struct {
 	ProbeName string
 }
 
-// Host is one node. Accessors never reveal how a fact was fetched.
+// Host provides access to a node's Kubernetes, Oxide, and guest state.
 type Host struct {
 	t    *testing.T
 	env  Env

@@ -113,7 +113,7 @@ var (
 			"Zero when there are none.",
 	})
 
-	// ReaperDeleteAttempts and ReaperDeleteFailures are the reaper's work and how much of it is not working.
+	// ReaperDeleteAttempts and ReaperDeleteFailures count orphan deletion attempts and failures.
 	ReaperDeleteAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: reaperSubsystem,

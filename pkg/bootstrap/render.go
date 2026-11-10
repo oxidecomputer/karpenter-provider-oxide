@@ -12,9 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Spec is what a bootstrap flavor hands a Renderer: the disks the node was
-// launched with, one config document and the command that consumes it. It says
-// nothing about how the node's init system receives any of it.
+// Spec supplies the disk layout, config, and start command to a Renderer.
 type Spec struct {
 	// Storage is the resolved disk layout, or nil when the nodeclass declares no disks.
 	Storage *storage.Plan
@@ -29,8 +27,6 @@ type Spec struct {
 }
 
 // Renderer turns a Spec into the user-data an image's init system consumes.
-// cloud-init is the only implementation today; an image family that boots
-// differently, such as Flatcar or NixOS, gets its own.
 type Renderer interface {
 	Render(ctx context.Context, nodeClass *v1alpha1.OxideNodeClass, spec Spec) (string, error)
 }

@@ -13,10 +13,9 @@ import (
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
-// Create creates the objects in order and registers the one cleanup that tears everything
-// down: the objects are deleted in reverse, workload first, then the nodeclaims, the Oxide
-// instances and their disks must go away. A leak fails the test. On failure, diagnostics
-// are written first.
+// Create creates objects in order and registers cleanup in reverse order.
+// Cleanup checks for leaked NodeClaims, instances, and disks.
+// Failed tests collect diagnostics before cleanup.
 func (e *Env) Create(t *testing.T, objs ...client.Object) {
 	t.Helper()
 	ctx := t.Context()
@@ -59,9 +58,8 @@ func (e *Env) Create(t *testing.T, objs ...client.Object) {
 	}
 }
 
-// Launch is what a nodeclaim put on the rack, and what has to disappear from Oxide once
-// the nodeclaim is gone. Take it before a test removes the nodeclaim, since the cleanup
-// only sees the nodeclaims that still exist.
+// Launch identifies a NodeClaim's instance and disks for cleanup checks.
+// Capture it before deleting the NodeClaim.
 type Launch struct {
 	NodeClaim  string
 	InstanceID string

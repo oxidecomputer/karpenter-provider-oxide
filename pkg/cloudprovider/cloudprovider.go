@@ -972,9 +972,8 @@ func (c *OxideCloudProvider) rejectOwnership(
 	)
 }
 
-// GetInstanceTypes returns instance types supported by the cloudprovider. The
-// nodepool's nodeclass fixes the boot disk, and with it the ephemeral storage
-// the shapes advertise, and the kubelet reservations, and with them the overhead.
+// GetInstanceTypes returns the catalog with ephemeral storage and kubelet overhead
+// determined by the NodePool's NodeClass.
 func (c *OxideCloudProvider) GetInstanceTypes(
 	ctx context.Context,
 	nodePool *karpcorev1.NodePool,

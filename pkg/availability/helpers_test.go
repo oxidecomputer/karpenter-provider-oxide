@@ -2,10 +2,6 @@ package availability
 
 import "sync"
 
-// The manager's public surface is request-oriented, so these narrow it back
-// down to the single question each test is asking. The probe registry stands in
-// for the caller that would otherwise be holding one across a launch.
-
 func unavailableFor(c *Manager, shape Shape) (bool, Reason) {
 	decision := c.Check(Request{Shape: shape})
 	return !decision.Available, decision.Reason
@@ -31,6 +27,7 @@ func releasePlacement(shape Shape) {
 	releaseHeld(Request{Shape: shape, Placement: testPlacement})
 }
 
+// held keeps probes alive between test acquire and release calls.
 var held = struct {
 	sync.Mutex
 	probes map[Request]*Probe

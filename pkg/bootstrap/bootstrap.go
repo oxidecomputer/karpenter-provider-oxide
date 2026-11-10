@@ -41,12 +41,8 @@ type Request struct {
 	Kubelet instancetype.Reserved
 }
 
-// KubeletArgs returns the kubelet arguments for a node of this shape: the
-// reservations the instance type provider modeled, then the nodeclass's own
-// arguments. A flag set twice takes its last value.
-//
-// Without this the provider models reservations kubelet never applies, and the
-// scheduler's idea of allocatable drifts from the node's.
+// KubeletArgs renders the shape's modeled reservations, then merges extra arguments.
+// The last value for each flag wins.
 func KubeletArgs(specs instancetype.Specs, kubelet instancetype.Reserved, extra []string) []string {
 	reserved := kubelet
 	if specs.Ncpus > 0 && specs.MemInGiB > 0 {

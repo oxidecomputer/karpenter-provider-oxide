@@ -15,10 +15,9 @@ import (
 
 const resources = "cpu=1,memory=256Mi"
 
-// TestScaleDownWhenEmpty lets consolidation, not the teardown, take the node away: once
-// the pod is gone Karpenter has to notice the empty node, drain it and delete the
-// instance and its disks on its own, leaving the nodepool and nodeclass as they were.
-// No probe pod is created here, since a bare pod on the node would keep it from being empty.
+// TestScaleDownWhenEmpty checks that consolidation removes an empty node and its
+// cloud resources while retaining the NodePool and NodeClass.
+// A probe pod would prevent the node from being empty.
 func TestScaleDownWhenEmpty(t *testing.T) {
 	e := framework.Setup(t)
 	g := gomega.NewWithT(t)
@@ -50,9 +49,8 @@ func TestScaleDownWhenEmpty(t *testing.T) {
 	g.Expect(currentClass.DeletionTimestamp).To(gomega.BeNil())
 }
 
-// TestNodeClaimDeletionReplacesNode deletes the nodeclaim the way an operator replaces a
-// node. The Deployment's pod has to come back on a new node from a new launch while the
-// old instance and its disks disappear, with no second replacement along the way.
+// TestNodeClaimDeletionReplacesNode checks that deletion produces exactly one
+// replacement and cleans up the old instance and disks.
 func TestNodeClaimDeletionReplacesNode(t *testing.T) {
 	e := framework.Setup(t)
 	g := gomega.NewWithT(t)
@@ -85,10 +83,8 @@ func TestNodeClaimDeletionReplacesNode(t *testing.T) {
 	g.Expect(claims).To(gomega.HaveLen(1))
 }
 
-// TestInstanceDeletedOutOfBand takes the instance away through the Oxide API, as a
-// console user or a lost sled would. Karpenter has to notice on its own: the nodeclaim
-// and node go, the pod comes back on a replacement, and the disks Nexus left behind,
-// boot and data, are cleaned up by the provider's teardown or the reaper.
+// TestInstanceDeletedOutOfBand checks that deleting an instance through the Oxide
+// API triggers replacement and cleanup of its detached boot and data disks.
 func TestInstanceDeletedOutOfBand(t *testing.T) {
 	e := framework.Setup(t)
 	g := gomega.NewWithT(t)
@@ -109,7 +105,7 @@ func TestInstanceDeletedOutOfBand(t *testing.T) {
 	launch := framework.LaunchOf(oldClaim)
 
 	g.Expect(e.DeleteInstance(ctx, launch.InstanceID)).To(gomega.Succeed())
-	// Nexus keeps the disks, which is what makes the cleanup worth checking.
+	// Nexus leaves the disks behind.
 	disks, err := e.DisksWithPrefix(ctx, launch.DiskPrefix)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(disks).To(gomega.HaveLen(2), "disks left behind by instance %s", launch.InstanceID)

@@ -1,6 +1,4 @@
-// Package describe turns the instance type catalog into human and machine
-// readable documents, in the spirit of the instance type reference pages the
-// AWS provider publishes.
+// Package describe renders the instance type catalog.
 package describe
 
 import (
@@ -156,9 +154,7 @@ func resourceOrder(maps ...map[string]string) []string {
 	return append(ordered, extra...)
 }
 
-// human renders a quantity for a table. Anything at least a MiB is a byte count
-// and rounds down to the nearest MiB, or to GiB when whole, since the exact
-// figures are long and only matter to the scheduler.
+// human formats quantities of at least 1 MiB as exact GiB or rounded-down MiB.
 func human(raw string) string {
 	if raw == "" {
 		return none

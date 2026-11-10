@@ -71,10 +71,7 @@ func (t Threshold) Of(capacity int64) int64 {
 
 func (t Threshold) String() string { return t.raw }
 
-// Reserved is what kubelet must be told to hold back so that a node's real
-// allocatable matches the allocatable the scheduler was promised. Bootstrap
-// renders these into kubelet flags; anything that changes here changes the
-// instance type overhead in lockstep.
+// Reserved holds the reservations used for both kubelet flags and instance type overhead.
 type Reserved struct {
 	// KubeReserved is kube-reserved: cpu in milliCPU, memory and ephemeral-storage in bytes.
 	KubeReserved corev1.ResourceList

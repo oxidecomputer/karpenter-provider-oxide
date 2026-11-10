@@ -57,12 +57,9 @@ type OxideNodeClassSpec struct {
 // +kubebuilder:validation:MaxLength=64
 type KubeletValue string
 
-// KubeletConfiguration is the subset of kubelet configuration the provider lets a
-// nodeclass set, named after the upstream kubelet types. Fields that change what a
-// node can hold (reservations, eviction thresholds, pod limits) are modeled into
-// instance type capacity and overhead in lockstep with the flags rendered to
-// kubelet, so the scheduler plans against what the node reports. There is no
-// passthrough for other flags; add a typed field instead.
+// KubeletConfiguration contains the supported kubelet settings.
+// Reservations, eviction thresholds, and pod limits also determine instance type
+// capacity and overhead.
 // +kubebuilder:validation:XValidation:rule="!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent) || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent",message="imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent"
 // +kubebuilder:validation:XValidation:rule="!has(self.evictionSoft) || self.evictionSoft.all(e, has(self.evictionSoftGracePeriod) && e in self.evictionSoftGracePeriod)",message="every evictionSoft signal needs a matching evictionSoftGracePeriod, or kubelet refuses to start"
 // +kubebuilder:validation:XValidation:rule="!has(self.evictionSoftGracePeriod) || self.evictionSoftGracePeriod.all(e, has(self.evictionSoft) && e in self.evictionSoft)",message="every evictionSoftGracePeriod signal needs a matching evictionSoft"

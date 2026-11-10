@@ -46,11 +46,9 @@ func (e *Env) NodeClass(
 	return nc
 }
 
-// NodePool builds a pool for the nodeclass. Requirements and startup taints come from
-// the cluster's default pool so the node joins the same way the cluster's own nodes do.
-// Consolidation and expiry are off unless a mutator turns them on: the test decides when
-// the node goes away. The pool is tainted with the run so neither other workloads nor
-// another pool's disruption can land anything on it.
+// NodePool inherits requirements and startup taints from the cluster's default pool.
+// Consolidation and expiry are disabled unless overridden by a mutator.
+// A run-specific taint isolates the pool's workloads.
 func (e *Env) NodePool(
 	nc *v1alpha1.OxideNodeClass, mutate ...func(*karpv1.NodePool),
 ) *karpv1.NodePool {

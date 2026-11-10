@@ -592,12 +592,9 @@ type EphemeralStorage struct {
 	Capacity int64
 }
 
-// EphemeralStorageFor returns the ephemeral storage a node booting off a disk
-// of this size has, and whether the disk is big enough to advertise any once
-// the reservations and eviction threshold come off. kubelet is the nodeclass's
-// reservations; the ephemeral-storage defaults do not vary by shape, so they
-// are applied here. A diskSet mounted over the kubelet root makes this an
-// under-estimate, which is the safe direction.
+// EphemeralStorageFor estimates boot-disk capacity and reports whether it exceeds
+// reservations and eviction thresholds. Storage defaults are shape-independent.
+// A diskSet mounted over the kubelet root may provide more capacity than this estimate.
 func EphemeralStorageFor(bootSizeBytes int64, kubelet Reserved) (EphemeralStorage, bool) {
 	usable := bootSizeBytes - rootFSFixedBytes
 	if usable <= 0 {

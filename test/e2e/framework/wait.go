@@ -22,11 +22,9 @@ func (e *Env) EventuallyNodeReady(g gomega.Gomega, pool *karpv1.NodePool) *corev
 	return e.EventuallyNodesReady(g, pool, 1)[0]
 }
 
-// EventuallyNodesReady waits until the pool has exactly n nodeclaims that are not being
-// deleted, each Ready with a Ready node, and every pod of the pool Running on one of
-// those nodes, then returns the nodes. Everything is re-read on each poll, so a node
-// that is on its way out is never the one returned. More than n live nodeclaims is a
-// duplicate launch and fails at once.
+// EventuallyNodesReady returns n ready nodes with ready, non-deleting NodeClaims
+// once all non-deleting pool pods are running on them.
+// More than n non-deleting NodeClaims fails immediately.
 func (e *Env) EventuallyNodesReady(
 	g gomega.Gomega, pool *karpv1.NodePool, n int,
 ) []*corev1.Node {

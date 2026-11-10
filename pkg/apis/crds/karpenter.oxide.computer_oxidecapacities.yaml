@@ -142,8 +142,7 @@ spec:
                           type: string
                         refusedInstanceType:
                           description: RefusedInstanceType is the shape whose launch
-                            was actually refused, which is the evidence the range
-                            rests on.
+                            was refused.
                           type: string
                         retryAfter:
                           description: RetryAfter is when the shape will be offered
@@ -161,8 +160,8 @@ spec:
                     type: array
                 type: object
               inventory:
-                description: Inventory is what the rack was last read to have room
-                  for, and how much that reading is worth.
+                description: Inventory is the latest rack capacity snapshot and its
+                  inventory state.
                 properties:
                   largestFeasibleInstanceType:
                     description: LargestFeasibleInstanceType is the largest shape

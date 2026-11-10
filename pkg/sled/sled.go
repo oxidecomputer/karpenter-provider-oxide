@@ -67,7 +67,7 @@ const (
 	ReasonNonProvisionable UnhealthyReason = "NonProvisionable"
 )
 
-// Unhealthy reports whether the sled is being taken out of service, why, and in words.
+// Unhealthy reports whether the sled is leaving service, with a reason and message.
 func (p Placement) Unhealthy() (bool, UnhealthyReason, string) {
 	switch {
 	case p.Policy == policyExpunged:

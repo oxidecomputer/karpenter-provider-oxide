@@ -13,8 +13,6 @@ func placementManagerAt(now *time.Time) *Manager {
 	return c
 }
 
-// The placement scope under test; the helpers below share it so their
-// signatures stay about the shape being asked for.
 const testPlacement = Placement("Affinity:a")
 
 func gatedPlacement(

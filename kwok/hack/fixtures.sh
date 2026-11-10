@@ -4,7 +4,6 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 : "${OXIDE_IMAGE_ID:?Set an existing test image UUID}"
 : "${OXIDE_SUBNET_ID:?Set an existing test subnet UUID}"
-# No image upload or cloud fixture ownership is guessed. Both resources are user-supplied.
 for id in "$OXIDE_IMAGE_ID" "$OXIDE_SUBNET_ID"; do
   [[ "$id" =~ ^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$ ]] || { echo "Expected a UUID" >&2; exit 1; }
 done

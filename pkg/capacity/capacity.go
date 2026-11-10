@@ -17,7 +17,7 @@ package capacity
 
 import "time"
 
-// Resources is an amount of the two things a sled places instances against.
+// Resources holds CPU and memory quantities.
 type Resources struct {
 	CPUs   int
 	Memory uint64

@@ -1,7 +1,4 @@
-// Package framework is the harness behind the e2e suites. A suite imports this package
-// and framework/host, asserts with gomega, and reaches into pkg/... only for API types
-// and constants. Everything that talks to the cluster or the rack lives here; a suite
-// never holds a client of its own.
+// Package framework provides shared clients, fixtures, and cleanup for e2e tests.
 package framework
 
 import (

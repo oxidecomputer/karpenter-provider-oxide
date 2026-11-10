@@ -47,7 +47,7 @@ const (
 const (
 	// ShapeStateBackoff is a shape whose last launch was refused and whose wait has not elapsed.
 	ShapeStateBackoff = "Backoff"
-	// ShapeStateHalfOpen is a shape whose wait has elapsed, or that something has made newly plausible.
+	// ShapeStateHalfOpen marks a shape eligible for a trial launch.
 	ShapeStateHalfOpen = "HalfOpen"
 )
 
@@ -79,7 +79,7 @@ type OxideCapacityStatus struct {
 	// InstanceTypes is what the scheduler is and is not being offered, and why.
 	// +optional
 	InstanceTypes InstanceTypeAvailability `json:"instanceTypes,omitempty"`
-	// Inventory is what the rack was last read to have room for, and how much that reading is worth.
+	// Inventory is the latest rack capacity snapshot and its inventory state.
 	// +optional
 	Inventory InventoryStatus `json:"inventory,omitempty"`
 	// Quota is the silo's remaining entitlement.
@@ -134,7 +134,7 @@ type UnavailableRange struct {
 	MaxNcpus int `json:"maxNcpus,omitempty"`
 	// +optional
 	MaxMemoryGiB int `json:"maxMemoryGiB,omitempty"`
-	// RefusedInstanceType is the shape whose launch was actually refused, which is the evidence the range rests on.
+	// RefusedInstanceType is the shape whose launch was refused.
 	// +optional
 	RefusedInstanceType string `json:"refusedInstanceType,omitempty"`
 	// CPUPlatform is the platform the refusal was under; a range with none is out for every platform.
@@ -159,7 +159,7 @@ type UnavailableRange struct {
 	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
 }
 
-// InventoryStatus is what the rack had room for when it was last read, and how much that reading is worth.
+// InventoryStatus contains the latest rack capacity snapshot and its inventory state.
 type InventoryStatus struct {
 	// State is what the reading is contributing: Disabled, Unknown, Stale or Fresh.
 	// +optional

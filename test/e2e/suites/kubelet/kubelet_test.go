@@ -12,8 +12,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// TestKubeletConfiguration shows a nodeclass kubelet field is verifiable entirely
-// through the API: the live kubelet config and the node's reported capacity.
+// TestKubeletConfiguration checks applied kubelet settings and advertised pod capacity.
 func TestKubeletConfiguration(t *testing.T) {
 	e := framework.Setup(t)
 	g := gomega.NewWithT(t)

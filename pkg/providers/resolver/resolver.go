@@ -19,7 +19,7 @@ const entryTTLIdle = time.Hour
 type Entry[T any] struct {
 	Value   T
 	TakenAt time.Time
-	// Stale is set when this reading was served because the resolution that should have replaced it failed.
+	// Stale marks a cached value served after a failed refresh.
 	Stale bool
 }
 
@@ -229,10 +229,8 @@ func Fingerprint(v any) string {
 	)
 }
 
-// Resolution is the envelope every provider returns, so that all six read the same at the call site.
-//
-// A provider that fell short sets Reason and Message together, and Unmatched when it can name the
-// selectors that missed. Callers ask Complete() and never re-derive the message from the spec.
+// Resolution contains matched resources and any selector failures.
+// Check Complete before publishing Resolved; use Reason and Message for failures.
 type Resolution[T any, S any] struct {
 	// Resolved is what to publish to status.
 	Resolved []T

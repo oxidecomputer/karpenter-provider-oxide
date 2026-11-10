@@ -7,7 +7,7 @@ import (
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 )
 
-// Drifter decides whether a node's data disks were created from sources the nodeclass would no longer create them from.
+// Drifter detects changes to a node's data-disk sources.
 type Drifter struct{}
 
 // NewDrifter returns the disk set source drifter.

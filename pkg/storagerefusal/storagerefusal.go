@@ -1,6 +1,5 @@
-// Package storagerefusal remembers the last launch refused for want of boot
-// disk storage. It is diagnostic history: no shape is taken out of
-// consideration by it, so it is kept apart from shape availability.
+// Package storagerefusal tracks boot-disk storage refusals for diagnostics
+// without affecting shape availability.
 package storagerefusal
 
 import (

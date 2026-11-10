@@ -34,7 +34,7 @@ var (
 	ErrRebootRejected = errors.New("reboot rejected")
 )
 
-// Options is the per-launch configuration a create cannot carry in the Oxide API's own create shape.
+// Options holds launch settings outside the Oxide instance-create request.
 type Options struct {
 	// Owner is the expected owner of the instance and every NodeClaim-owned launch resource.
 	Owner ownership.Marker
