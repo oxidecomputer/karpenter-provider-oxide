@@ -33,34 +33,26 @@ const (
 	InventoryFresh = "Fresh"
 )
 
-// Reasons an UnavailableRange can be out.
 const (
-	// RangeReasonInsufficientCapacity is a launch the rack refused for want of room.
-	RangeReasonInsufficientCapacity = "InsufficientCapacity"
-	// RangeReasonQuotaExceeded is a launch the silo was not entitled to make.
-	RangeReasonQuotaExceeded = "QuotaExceeded"
-	// RangeReasonNoSledWithRoom is what no sled currently has room for.
-	RangeReasonNoSledWithRoom = "NoSledWithRoom"
+	CapacityScopeGlobal    = "Global"
+	CapacityScopePlacement = "Placement"
+
+	BackoffWaiting       = "Backoff"
+	BackoffProbeEligible = "ProbeEligible"
+	BackoffProbing       = "Probing"
+
+	QuotaUnknown = "Unknown"
+	QuotaFresh   = "Fresh"
+	QuotaStale   = "Stale"
 )
 
-// States a shape can be in while it is out of consideration.
-const (
-	// ShapeStateBackoff is a shape whose last launch was refused and whose wait has not elapsed.
-	ShapeStateBackoff = "Backoff"
-	// ShapeStateHalfOpen marks a shape eligible for a trial launch.
-	ShapeStateHalfOpen = "HalfOpen"
-)
-
-// OxideCapacity reports which instance shapes the provider will not currently launch, and why.
 // +kubebuilder:object:root=true
-// +kubebuilder:printcolumn:name="Unavailable",type="integer",JSONPath=".status.instanceTypes.unavailableCount",description="Instance types the scheduler is not currently offered"
-// +kubebuilder:printcolumn:name="Total",type="integer",JSONPath=".status.instanceTypes.count",priority=1,description="Instance types the provider offers in total"
-// +kubebuilder:printcolumn:name="Ranges",type="integer",JSONPath=".status.instanceTypes.unavailableRangeCount",priority=1,description="Regions of the catalog that are out, each covering many instance types"
-// +kubebuilder:printcolumn:name="Largest",type="string",JSONPath=".status.inventory.largestFeasibleInstanceType",description="Largest shape the rack can currently place"
-// +kubebuilder:printcolumn:name="Inventory",type="string",JSONPath=".status.inventory.state",description=""
-// +kubebuilder:printcolumn:name="Storage",type="string",JSONPath=".status.storage.reason",description="Why the last boot disk could not be provisioned, if one could not"
-// +kubebuilder:printcolumn:name="Updated",type="date",JSONPath=".status.observedAt",description=""
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",priority=1,description=""
+// +kubebuilder:printcolumn:name="GlobalUnavailable",type="integer",JSONPath=".status.globalInstanceTypes.unavailableCount"
+// +kubebuilder:printcolumn:name="GlobalTotal",type="integer",JSONPath=".status.globalInstanceTypes.count",priority=1
+// +kubebuilder:printcolumn:name="Inventory",type="string",JSONPath=".status.inventory.state"
+// +kubebuilder:printcolumn:name="Quota",type="string",JSONPath=".status.quota.state"
+// +kubebuilder:printcolumn:name="LastStorageFailure",type="string",JSONPath=".status.history.storage.reason",priority=1
+// +kubebuilder:printcolumn:name="Updated",type="date",JSONPath=".status.observedAt"
 // +kubebuilder:resource:path=oxidecapacities,scope=Cluster,categories=karpenter,shortName={oxcap,oxcaps}
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
@@ -76,36 +68,111 @@ type OxideCapacityStatus struct {
 	// ObservedAt is when this view was last published.
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
-	// InstanceTypes is what the scheduler is and is not being offered, and why.
 	// +optional
-	InstanceTypes InstanceTypeAvailability `json:"instanceTypes,omitempty"`
+	GlobalInstanceTypes GlobalInstanceTypeSummary `json:"globalInstanceTypes,omitempty"`
 	// Inventory is the latest rack capacity snapshot and its inventory state.
 	// +optional
 	Inventory InventoryStatus `json:"inventory,omitempty"`
 	// Quota is the silo's remaining entitlement.
 	// +optional
-	Quota *QuotaHeadroom `json:"quota,omitempty"`
-	// Storage is the last launch refused because its boot disk could not be provisioned.
+	Quota QuotaStatus `json:"quota,omitempty"`
+	// +optional
+	// +listType=atomic
+	LaunchBackoffs []LaunchBackoff `json:"launchBackoffs,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	OmittedLaunchBackoffCount int `json:"omittedLaunchBackoffCount,omitempty"`
+	// +optional
+	History *CapacityHistory `json:"history,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.unavailableCount <= self.count"
+type GlobalInstanceTypeSummary struct {
+	// +kubebuilder:validation:Minimum=0
+	Count int `json:"count"`
+	// +kubebuilder:validation:Minimum=0
+	UnavailableCount int `json:"unavailableCount"`
+}
+
+type CapacityShape struct {
+	// +kubebuilder:validation:Minimum=1
+	CPUs int `json:"cpus"`
+	// +kubebuilder:validation:Minimum=1
+	MemoryGiB int `json:"memoryGiB"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.type == 'Placement' ? has(self.placement) && size(self.placement) > 0 && !has(self.cpuPlatforms) : !has(self.placement)"
+type CapacityScope struct {
+	// +kubebuilder:validation:Enum=Global;Placement
+	Type string `json:"type"`
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	CPUPlatforms []string `json:"cpuPlatforms,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +listMapKey=id
+	Placement []CapacityPlacementConstraint `json:"placement,omitempty"`
+}
+
+type CapacityPlacementConstraint struct {
+	// +kubebuilder:validation:Enum=Affinity;AntiAffinity
+	Type string `json:"type"`
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+}
+
+// +kubebuilder:validation:XValidation:rule="(self.state == 'Backoff') == has(self.retryAfter)"
+type LaunchBackoff struct {
+	Scope            CapacityScope `json:"scope"`
+	MinimumShape     CapacityShape `json:"minimumShape"`
+	LastRefusedShape CapacityShape `json:"lastRefusedShape"`
+	// +optional
+	KnownLaunchableShape *CapacityShape `json:"knownLaunchableShape,omitempty"`
+	// +kubebuilder:validation:Enum=Backoff;ProbeEligible;Probing
+	State string `json:"state"`
+	// +kubebuilder:validation:MinLength=1
+	Reason string `json:"reason"`
+	// +kubebuilder:validation:Minimum=1
+	ConsecutiveRefusals int `json:"consecutiveRefusals"`
+	// +optional
+	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
+	// +optional
+	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
+	// +optional
+	MessageTruncated bool `json:"messageTruncated,omitempty"`
+}
+
+type CapacityHistory struct {
 	// +optional
 	Storage *StorageRefusal `json:"storage,omitempty"`
 	// +optional
-	PlacementRefusals []PlacementRefusal `json:"placementRefusals,omitempty"`
+	// +listType=atomic
+	Placement []PlacementFailure `json:"placement,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	OmittedPlacementCount int `json:"omittedPlacementCount,omitempty"`
 }
 
-// InstanceTypeAvailability is how much of the catalog the scheduler is being offered.
-type InstanceTypeAvailability struct {
-	// Count is how many instance types the provider offers in total, which is the denominator for UnavailableCount.
+type PlacementFailure struct {
+	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=type
+	// +listMapKey=id
+	Placement []CapacityPlacementConstraint `json:"placement"`
+	Shape     CapacityShape                 `json:"shape"`
 	// +optional
-	Count int `json:"count"`
-	// UnavailableCount is how many instance types the scheduler is currently not being offered, out of Count.
+	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
 	// +optional
-	UnavailableCount int `json:"unavailableCount"`
-	// UnavailableRangeCount is how many entries UnavailableRanges holds.
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
 	// +optional
-	UnavailableRangeCount int `json:"unavailableRangeCount"`
-	// UnavailableRanges is every region of the catalog the provider is not currently offering.
-	// +optional
-	UnavailableRanges []UnavailableRange `json:"unavailableRanges,omitempty"`
+	MessageTruncated bool `json:"messageTruncated,omitempty"`
 }
 
 // StorageRefusal is the most recent launch refused for want of boot disk storage.
@@ -114,51 +181,15 @@ type StorageRefusal struct {
 	Reason string `json:"reason"`
 	// Message is the diagnosis as it was reported on the NodeClaim that was refused.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	Message string `json:"message,omitempty"`
+	// +optional
+	MessageTruncated bool `json:"messageTruncated,omitempty"`
 	// ConsecutiveRefusals is how many launches in a row have been refused this way.
 	ConsecutiveRefusals int `json:"consecutiveRefusals"`
 	// LastRefusal is when the most recent one happened.
 	// +optional
 	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
-}
-
-// UnavailableRange is a region of the instance type catalog the provider will not currently launch from.
-type UnavailableRange struct {
-	// Range is what is out, in the form an operator reads: ">=11 vCPUs and >=22 GiB" for a refusal.
-	Range string `json:"range"`
-	// FromNcpus and FromMemoryGiB are the lower corner of a refusal range.
-	// +optional
-	FromNcpus int `json:"fromNcpus,omitempty"`
-	// +optional
-	FromMemoryGiB int `json:"fromMemoryGiB,omitempty"`
-	// MaxNcpus and MaxMemoryGiB are the headroom of an inventory range.
-	// +optional
-	MaxNcpus int `json:"maxNcpus,omitempty"`
-	// +optional
-	MaxMemoryGiB int `json:"maxMemoryGiB,omitempty"`
-	// RefusedInstanceType is the shape whose launch was refused.
-	// +optional
-	RefusedInstanceType string `json:"refusedInstanceType,omitempty"`
-	// CPUPlatform is the platform the refusal was under; a range with none is out for every platform.
-	// +optional
-	CPUPlatform string `json:"cpuPlatform,omitempty"`
-	// LargestLaunchable is the largest shape known to work within this range.
-	// +optional
-	LargestLaunchable string `json:"largestLaunchable,omitempty"`
-	// Reason is what put the range out: InsufficientCapacity for a launch the rack refused for want of room.
-	Reason string `json:"reason"`
-	// State is Backoff while the range is out of consideration entirely.
-	// +optional
-	State string `json:"state,omitempty"`
-	// ConsecutiveRefusals is how many times in a row a launch in this range has been refused.
-	// +optional
-	ConsecutiveRefusals int `json:"consecutiveRefusals,omitempty"`
-	// LastRefusal is when a launch in this range was most recently refused.
-	// +optional
-	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
-	// RetryAfter is when the shape will be offered again for a trial launch.
-	// +optional
-	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
 }
 
 // InventoryStatus contains the latest rack capacity snapshot and its inventory state.
@@ -175,6 +206,9 @@ type InventoryStatus struct {
 	// Sleds is the per-sled headroom the reading is made of.
 	// +optional
 	Sleds []SledCapacity `json:"sleds,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	OmittedSledCount int `json:"omittedSledCount,omitempty"`
 }
 
 // SledCapacity is one sled's remaining headroom.
@@ -191,12 +225,18 @@ type SledCapacity struct {
 	LargestFeasibleInstanceType string `json:"largestFeasibleInstanceType,omitempty"`
 }
 
-// QuotaHeadroom is what the silo is still entitled to launch.
-type QuotaHeadroom struct {
+// +kubebuilder:validation:XValidation:rule="self.state == 'Unknown' ? !has(self.remaining) && !has(self.observedAt) : has(self.remaining) && has(self.observedAt)"
+type QuotaStatus struct {
+	// +kubebuilder:validation:Enum=Unknown;Fresh;Stale
+	State string `json:"state"`
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 	// +optional
-	Stale bool `json:"stale,omitempty"`
+	Remaining *QuotaHeadroom `json:"remaining,omitempty"`
+}
+
+// QuotaHeadroom is what the silo is still entitled to launch.
+type QuotaHeadroom struct {
 	// CPUs, MemoryGiB and StorageGiB are the quota's capacity less what the silo has provisioned.
 	CPUs       int64 `json:"cpus"`
 	MemoryGiB  int64 `json:"memoryGiB"`
@@ -209,18 +249,4 @@ type OxideCapacityList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []OxideCapacity `json:"items"`
-}
-
-type PlacementRefusal struct {
-	Placement           string `json:"placement"`
-	FromNcpus           int    `json:"fromNcpus"`
-	FromMemoryGiB       int    `json:"fromMemoryGiB"`
-	ConsecutiveRefusals int    `json:"consecutiveRefusals"`
-	Gated               bool   `json:"gated"`
-	// +optional
-	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
-	// +optional
-	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
-	// +optional
-	Message string `json:"message,omitempty"`
 }

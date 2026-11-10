@@ -368,7 +368,8 @@ func (c *Manager) Snapshot() Snapshot {
 		placements = append(placements, PlacementRefusal{
 			Placement: entry.Placement, Shape: entry.Shape, Consecutive: entry.Consecutive,
 			LastRefusal: entry.LastRefusal, RetryAfter: entry.RetryAfter, Message: entry.Message,
-			Gated: entry.Consecutive >= placementGateAfter && now.Before(entry.RetryAfter),
+			Gated:         entry.Consecutive >= placementGateAfter && now.Before(entry.RetryAfter),
+			ProbeInFlight: entry.probeInFlight,
 		})
 	}
 	return Snapshot{entries: entries, rack: c.rack, inventory: c.inventoryState(),

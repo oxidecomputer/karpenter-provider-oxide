@@ -94,3 +94,43 @@ func TestPlacementObservationSeparatesHistoryFromGating(t *testing.T) {
 		t.Fatal("an elapsed placement backoff did not permit a probe")
 	}
 }
+
+func TestPlacementSnapshotDistinguishesHistoryBackoffAndAReservedProbe(t *testing.T) {
+	now := time.Now()
+	m := newTestManager(&now)
+	request := Request{
+		Shape:     Shape{Ncpus: 8, MemInGiB: 16},
+		Placement: NewPlacement(Constraint{Kind: "AntiAffinity", ID: "group"}),
+	}
+	m.RecordPlacementRefusal(t.Context(), request.Placement, request.Shape, "denied")
+	first := m.Snapshot().Placements()[0]
+	if first.HasBackoff() {
+		t.Fatal("the first refusal was classified as a backoff")
+	}
+	now = first.RetryAfter.Add(time.Second)
+	m.RecordPlacementRefusal(t.Context(), request.Placement, request.Shape, "denied again")
+	backoff := m.Snapshot().Placements()[0]
+	if !backoff.HasBackoff() || !backoff.Gated {
+		t.Fatal("the second refusal was not a backoff")
+	}
+	now = backoff.RetryAfter.Add(time.Second)
+	eligible := m.Snapshot().Placements()[0]
+	if !eligible.HasBackoff() || eligible.Gated || eligible.ProbeInFlight {
+		t.Fatal("expired backoff was not probe eligible")
+	}
+	probe, ok := m.Acquire(request)
+	if !ok {
+		t.Fatal("probe was not admitted")
+	}
+	defer probe.Release()
+	if !m.Snapshot().Placements()[0].ProbeInFlight {
+		t.Fatal("snapshot hid the reserved probe")
+	}
+	if eligible.ProbeInFlight {
+		t.Fatal("probe acquisition mutated a previous observation")
+	}
+	probe.Release()
+	if m.Snapshot().Placements()[0].ProbeInFlight {
+		t.Fatal("released probe remains in flight")
+	}
+}

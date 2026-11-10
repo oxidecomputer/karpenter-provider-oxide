@@ -8,14 +8,19 @@ import (
 )
 
 type PlacementRefusal struct {
-	Placement   Placement
-	Shape       Shape
-	Consecutive int
-	LastRefusal time.Time
-	RetryAfter  time.Time
-	Message     string
-	Gated       bool
+	Placement     Placement
+	Shape         Shape
+	Consecutive   int
+	LastRefusal   time.Time
+	RetryAfter    time.Time
+	Message       string
+	Gated         bool
+	ProbeInFlight bool
 }
+
+func (p PlacementRefusal) HasBackoff() bool { return p.Consecutive >= placementGateAfter }
+
+func (e Entry) ProbeInFlight() bool { return e.probeInFlight }
 
 func (s Snapshot) WithQuota(quota utilization.Snapshot) Snapshot {
 	s.quota = quota

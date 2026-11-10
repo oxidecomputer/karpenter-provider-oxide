@@ -15,17 +15,51 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+func TestReconcileReplacesThePreviousStatusSchema(t *testing.T) {
+	c, kubeClient, _ := newController(t, nil)
+	previous := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.GroupVersion.String(), "kind": "OxideCapacity",
+		"metadata": map[string]any{"name": v1alpha1.OxideCapacityName},
+		"status": map[string]any{
+			"observedAt": time.Now().UTC().Format(time.RFC3339),
+			"instanceTypes": map[string]any{
+				"count":                 int64(1),
+				"unavailableRangeCount": int64(1),
+			},
+			"storage":           map[string]any{"reason": "old failure"},
+			"placementRefusals": []any{},
+		},
+	}}
+	if err := kubeClient.Create(t.Context(), previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	current := published(t, kubeClient)
+	if current.Status.GlobalInstanceTypes.Count == 0 ||
+		current.Status.Quota.State != v1alpha1.QuotaUnknown {
+		t.Fatalf("previous status was not replaced: %+v", current.Status)
+	}
+	if current.Status.History != nil {
+		t.Fatal("stale persisted failures were treated as current observations")
+	}
+}
+
 func TestRenderIncludesPlacementHistoryAndQuotaFreshness(t *testing.T) {
 	c, _, manager := newController(t, nil)
 	manager.RecordPlacementRefusal(
 		t.Context(),
-		"aa:group",
+		availability.NewPlacement(
+			availability.Constraint{Kind: v1alpha1.AffinityGroupTypeAntiAffinity, ID: "group"},
+		),
 		availability.Shape{Ncpus: 8, MemInGiB: 16},
 		"placement denied",
 	)
@@ -35,11 +69,11 @@ func TestRenderIncludesPlacementHistoryAndQuotaFreshness(t *testing.T) {
 		utilization.Snapshot{Known: true, TakenAt: observed, Stale: true},
 	)
 	status := c.render(view)
-	if len(status.PlacementRefusals) != 1 || status.PlacementRefusals[0].Gated ||
-		status.PlacementRefusals[0].Message != "placement denied" {
-		t.Fatalf("placement history was not rendered: %+v", status.PlacementRefusals)
+	if status.History == nil || len(status.History.Placement) != 1 ||
+		status.History.Placement[0].Message != "placement denied" {
+		t.Fatalf("placement history was not rendered: %+v", status.History)
 	}
-	if status.Quota == nil || !status.Quota.Stale ||
+	if status.Quota.State != v1alpha1.QuotaStale || status.Quota.Remaining == nil ||
 		!status.Quota.ObservedAt.Equal(timestamp(observed)) {
 		t.Fatalf("quota freshness was not rendered: %+v", status.Quota)
 	}
@@ -96,6 +130,7 @@ func published(t *testing.T, kubeClient client.Reader) *v1alpha1.OxideCapacity {
 	if err := kubeClient.Get(t.Context(), key, object); err != nil {
 		t.Fatalf("unable to read the published view: %v", err)
 	}
+	assertValidStatus(t, object.Status)
 	return object
 }
 
@@ -122,9 +157,9 @@ func TestReconcileCreatesTheViewIfItIsMissing(t *testing.T) {
 		t.Errorf("inventory = %q, want %q with no inventory provider",
 			view.Status.Inventory.State, v1alpha1.InventoryDisabled)
 	}
-	if view.Status.InstanceTypes.UnavailableRangeCount != 0 {
+	if len(view.Status.LaunchBackoffs) != 0 {
 		t.Errorf("unavailable shapes = %d, want none before anything is refused",
-			view.Status.InstanceTypes.UnavailableRangeCount)
+			len(view.Status.LaunchBackoffs))
 	}
 }
 
@@ -141,19 +176,19 @@ func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
 	}
 
 	view := published(t, kubeClient)
-	if got := view.Status.InstanceTypes.UnavailableRangeCount; got != 1 {
+	if got := len(view.Status.LaunchBackoffs); got != 1 {
 		t.Errorf("unavailable shapes = %d, want the one boundary", got)
 	}
-	if view.Status.InstanceTypes.Count == 0 {
+	if view.Status.GlobalInstanceTypes.Count == 0 {
 		t.Fatal("the total instance type count is zero, so the view has no denominator")
 	}
 
-	if got := view.Status.InstanceTypes.UnavailableCount; got <= 1 {
+	if got := view.Status.GlobalInstanceTypes.UnavailableCount; got <= 1 {
 		t.Errorf("unavailable instance types = %d, want every shape the boundary covers", got)
 	}
-	if view.Status.InstanceTypes.UnavailableCount > view.Status.InstanceTypes.Count {
+	if view.Status.GlobalInstanceTypes.UnavailableCount > view.Status.GlobalInstanceTypes.Count {
 		t.Errorf("unavailable instance types = %d exceeds the total of %d",
-			view.Status.InstanceTypes.UnavailableCount, view.Status.InstanceTypes.Count)
+			view.Status.GlobalInstanceTypes.UnavailableCount, view.Status.GlobalInstanceTypes.Count)
 	}
 }
 
@@ -176,38 +211,25 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 	}
 
 	view := published(t, kubeClient)
-	if got := view.Status.InstanceTypes.UnavailableRangeCount; got != 2 {
+	if got := len(view.Status.LaunchBackoffs); got != 2 {
 		t.Fatalf("unavailable shapes = %d, want 2", got)
 	}
-	if got := len(
-		view.Status.InstanceTypes.UnavailableRanges,
-	); got != view.Status.InstanceTypes.UnavailableRangeCount {
-		t.Fatalf(
-			"the count says %d and the list holds %d",
-			view.Status.InstanceTypes.UnavailableRangeCount,
-			got,
-		)
+	smallest := view.Status.LaunchBackoffs[0]
+	if smallest.LastRefusedShape != (v1alpha1.CapacityShape{CPUs: 8, MemoryGiB: 16}) {
+		t.Errorf("first entry refused %+v, want the smallest refused shape 8-16",
+			smallest.LastRefusedShape)
 	}
 
-	smallest := view.Status.InstanceTypes.UnavailableRanges[0]
-	if smallest.RefusedInstanceType != "8-16" {
-		t.Errorf("first entry refused %q, want the smallest refused shape 8-16",
-			smallest.RefusedInstanceType)
-	}
-
-	if smallest.FromNcpus != 8 || smallest.FromMemoryGiB != 16 {
+	if smallest.MinimumShape.CPUs != 8 || smallest.MinimumShape.MemoryGiB != 16 {
 		t.Errorf("range starts at %d cpus and %d GiB, want 8 and 16",
-			smallest.FromNcpus, smallest.FromMemoryGiB)
+			smallest.MinimumShape.CPUs, smallest.MinimumShape.MemoryGiB)
 	}
 
-	if smallest.Range != ">=8 vCPUs and >=16 GiB" {
-		t.Errorf("range reads %q, want it to spell out both bounds", smallest.Range)
-	}
 	if smallest.Reason != string(availability.ReasonCapacity) {
 		t.Errorf("reason = %q, want %q", smallest.Reason, availability.ReasonCapacity)
 	}
-	if smallest.State != v1alpha1.ShapeStateBackoff {
-		t.Errorf("state = %q, want %q", smallest.State, v1alpha1.ShapeStateBackoff)
+	if smallest.State != v1alpha1.BackoffWaiting {
+		t.Errorf("state = %q, want %q", smallest.State, v1alpha1.BackoffWaiting)
 	}
 	if smallest.ConsecutiveRefusals != 1 {
 		t.Errorf("consecutive refusals = %d, want 1", smallest.ConsecutiveRefusals)
@@ -218,7 +240,7 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 	if smallest.LastRefusal == nil {
 		t.Error("no refusal time was published")
 	}
-	if quota := view.Status.InstanceTypes.UnavailableRanges[1]; quota.Reason != string(
+	if quota := view.Status.LaunchBackoffs[1]; quota.Reason != string(
 		availability.ReasonQuota,
 	) {
 		t.Errorf("the quota-refused shape reports reason %q, want %q",
@@ -239,23 +261,23 @@ func TestReconcilePublishesAStorageRefusal(t *testing.T) {
 	}
 
 	view := published(t, kubeClient)
-	if view.Status.Storage == nil {
+	if view.Status.History == nil || view.Status.History.Storage == nil {
 		t.Fatal("no storage refusal was published")
 	}
-	if got := view.Status.Storage.Reason; got != string(availability.ReasonCapacity) {
+	if got := view.Status.History.Storage.Reason; got != string(availability.ReasonCapacity) {
 		t.Errorf("reason = %q, want %q", got, availability.ReasonCapacity)
 	}
-	if got := view.Status.Storage.ConsecutiveRefusals; got != 1 {
+	if got := view.Status.History.Storage.ConsecutiveRefusals; got != 1 {
 		t.Errorf("consecutive refusals = %d, want 1", got)
 	}
-	if view.Status.Storage.Message == "" {
+	if view.Status.History.Storage.Message == "" {
 		t.Error("no diagnosis was published, so the view names the limit without explaining it")
 	}
-	if view.Status.Storage.LastRefusal == nil {
+	if view.Status.History.Storage.LastRefusal == nil {
 		t.Error("no refusal time was published")
 	}
 
-	if got := view.Status.InstanceTypes.UnavailableRangeCount; got != 0 {
+	if got := len(view.Status.LaunchBackoffs); got != 0 {
 		t.Errorf("%d shapes were taken out of consideration by a storage refusal, want 0", got)
 	}
 }
@@ -267,7 +289,7 @@ func TestAClearedStorageRefusalIsUnpublished(t *testing.T) {
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
-	if published(t, kubeClient).Status.Storage == nil {
+	if published(t, kubeClient).Status.History == nil {
 		t.Fatal("the refusal was never published, so the test proves nothing")
 	}
 
@@ -275,7 +297,7 @@ func TestAClearedStorageRefusalIsUnpublished(t *testing.T) {
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
-	if got := published(t, kubeClient).Status.Storage; got != nil {
+	if got := published(t, kubeClient).Status.History; got != nil {
 		t.Errorf(
 			"storage refusal %+v is still published after it was cleared",
 			got,
@@ -328,69 +350,27 @@ func TestReconcilePublishesRackCapacity(t *testing.T) {
 	}
 }
 
-func TestReconcilePublishesWhatNoSledHasRoomFor(t *testing.T) {
+func TestInventoryLimitsTheGlobalCatalogWithoutCreatingBackoffs(t *testing.T) {
 	inventory := &fakeInventory{snapshot: capacity.NewSnapshot(
-		[]capacity.Sled{sled("sled-a", 8, 16, true)},
-		time.Now(),
-		time.Hour,
-		1,
+		[]capacity.Sled{sled("sled-a", 8, 16, true)}, time.Now(), time.Hour, 1,
 	)}
 	c, kubeClient, _ := newController(t, inventory)
-
 	if _, err := c.Reconcile(t.Context()); err != nil {
-		t.Fatalf("Reconcile returned %v", err)
+		t.Fatal(err)
 	}
-
-	view := published(t, kubeClient)
-	ranges := view.Status.InstanceTypes.UnavailableRanges
-
-	if got := len(ranges); got != 1 {
-		t.Fatalf(
-			"%d ranges published, want one covering both edges of an 8 CPU, 16 GiB sled: %+v",
-			got,
-			ranges,
-		)
+	status := published(t, kubeClient).Status
+	if len(status.LaunchBackoffs) != 0 {
+		t.Fatalf("inventory created launch backoffs: %+v", status.LaunchBackoffs)
 	}
-	if got := view.Status.InstanceTypes.UnavailableRangeCount; got != len(ranges) {
-		t.Errorf("the count says %d and the list holds %d", got, len(ranges))
+	if status.GlobalInstanceTypes.UnavailableCount == 0 {
+		t.Fatal("small inventory did not limit the catalog")
 	}
-
-	if view.Status.InstanceTypes.UnavailableCount == 0 {
-		t.Error("no instance types are unavailable on a rack with one small sled")
-	}
-
-	headroom := ranges[0]
-	if headroom.MaxNcpus != 8 || headroom.MaxMemoryGiB != 16 {
-		t.Errorf("headroom = %d cpus, %d GiB, want the sled's free space",
-			headroom.MaxNcpus, headroom.MaxMemoryGiB)
-	}
-
-	if got := headroom.Range; got != ">8 vCPUs or >16 GiB" {
-		t.Errorf("range = %q, want both dimensions in one sentence joined by or", got)
-	}
-
-	if headroom.FromNcpus != 0 || headroom.FromMemoryGiB != 0 {
-		t.Errorf("an inventory range carries a refusal corner: %+v", headroom)
-	}
-
-	for _, unavailable := range ranges {
-		if unavailable.Reason != v1alpha1.RangeReasonNoSledWithRoom {
-			t.Errorf("reason = %q, want %q for a range no launch was refused from",
-				unavailable.Reason, v1alpha1.RangeReasonNoSledWithRoom)
-		}
-
-		if unavailable.RefusedInstanceType != "" || unavailable.State != "" ||
-			unavailable.ConsecutiveRefusals != 0 || unavailable.RetryAfter != nil {
-			t.Errorf("a range read off inventory carries refusal evidence: %+v", unavailable)
-		}
-
-		if got := unavailable.LargestLaunchable; got != "8-16" {
-			t.Errorf("largest launchable = %q, want the shape the rack does have room for", got)
-		}
+	if status.History != nil {
+		t.Fatal("inventory created failure history")
 	}
 }
 
-func TestStaleInventoryPublishesNoRanges(t *testing.T) {
+func TestStaleInventoryDoesNotBlockTheGlobalCatalog(t *testing.T) {
 	inventory := &fakeInventory{snapshot: capacity.NewSnapshot(
 		[]capacity.Sled{sled("sled-a", 8, 16, true)},
 		time.Now().Add(-time.Hour),
@@ -404,8 +384,9 @@ func TestStaleInventoryPublishesNoRanges(t *testing.T) {
 	}
 
 	view := published(t, kubeClient)
-	if got := view.Status.InstanceTypes.UnavailableRanges; len(got) != 0 {
-		t.Errorf("a stale reading published %d ranges: %+v", len(got), got)
+	if len(view.Status.LaunchBackoffs) != 0 ||
+		view.Status.GlobalInstanceTypes.UnavailableCount != 0 {
+		t.Fatalf("stale inventory blocked launches: %+v", view.Status)
 	}
 }
 
@@ -568,15 +549,19 @@ func TestAMissingCRDDoesNotFailTheReconcile(t *testing.T) {
 	published(t, kubeClient)
 }
 
-func TestQuotaIsOmittedWhenUnknown(t *testing.T) {
+func TestQuotaIsExplicitlyUnknownBeforeAnObservation(t *testing.T) {
 	c, kubeClient, _ := newController(t, nil)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
 
-	if quota := published(t, kubeClient).Status.Quota; quota != nil {
-		t.Errorf("quota = %+v, want it omitted when the quota is unknown", quota)
+	if quota := published(
+		t,
+		kubeClient,
+	).Status.Quota; quota.State != v1alpha1.QuotaUnknown || quota.Remaining != nil ||
+		quota.ObservedAt != nil {
+		t.Errorf("quota = %+v, want Unknown with no observation", quota)
 	}
 }
 
@@ -616,28 +601,21 @@ func TestReconcilePublishesTheSkippedRangeNotJustTheRefusal(t *testing.T) {
 	}
 
 	view := published(t, kubeClient)
-	if got := len(view.Status.InstanceTypes.UnavailableRanges); got != 1 {
+	if got := len(view.Status.LaunchBackoffs); got != 1 {
 		t.Fatalf("published %d ranges, want the walk collapsed into 1", got)
 	}
-	unavailable := view.Status.InstanceTypes.UnavailableRanges[0]
+	unavailable := view.Status.LaunchBackoffs[0]
 
-	if unavailable.RefusedInstanceType != "31-62" {
-		t.Errorf("refused shape is %q, want 31-62", unavailable.RefusedInstanceType)
+	if unavailable.LastRefusedShape != (v1alpha1.CapacityShape{CPUs: 31, MemoryGiB: 62}) {
+		t.Errorf("refused shape is %+v, want 31-62", unavailable.LastRefusedShape)
 	}
 
-	if unavailable.FromNcpus >= 31 {
+	if unavailable.MinimumShape.CPUs >= 31 {
 		t.Errorf("range starts at %d cpus, want it below the refused 31 to reflect the skip",
-			unavailable.FromNcpus)
+			unavailable.MinimumShape.CPUs)
 	}
-	if unavailable.Range != rangeDescription(instancetype.Specs{
-		Ncpus:    unavailable.FromNcpus,
-		MemInGiB: unavailable.FromMemoryGiB,
-	}) {
-		t.Errorf("range text %q does not match its own bounds", unavailable.Range)
-	}
-
-	if unavailable.LargestLaunchable != "" {
-		t.Errorf("largest launchable is %q, want it absent until something launches",
-			unavailable.LargestLaunchable)
+	if unavailable.KnownLaunchableShape != nil {
+		t.Errorf("known launchable shape is %+v, want it absent until something launches",
+			unavailable.KnownLaunchableShape)
 	}
 }

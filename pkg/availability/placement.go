@@ -21,6 +21,17 @@ const (
 // equivalent NodeClasses share availability knowledge.
 type Placement string
 
+func (p Placement) Constraints() []Constraint {
+	var constraints []Constraint
+	for entry := range strings.SplitSeq(string(p), ",") {
+		kind, id, found := strings.Cut(entry, ":")
+		if found && kind != "" && id != "" {
+			constraints = append(constraints, Constraint{Kind: kind, ID: id})
+		}
+	}
+	return constraints
+}
+
 // NewPlacement returns a stable key for a resolved set of placement constraints.
 func NewPlacement(constraints ...Constraint) Placement {
 	parts := make([]string, 0, len(constraints))

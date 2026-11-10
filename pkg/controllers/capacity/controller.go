@@ -22,15 +22,11 @@ import (
 	"github.com/awslabs/operatorpkg/reconciler"
 	"github.com/awslabs/operatorpkg/singleton"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/apis/v1alpha1"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -97,170 +93,10 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 		Complete(singleton.AsReconciler(c))
 }
 
-func (c *Controller) render(view observation) v1alpha1.OxideCapacityStatus {
-	reading := view.Availability
-	rack, inventory := reading.Rack()
-	now := timestamp(reading.ObservedAt())
-
-	status := v1alpha1.OxideCapacityStatus{
-		ObservedAt: now,
-		Inventory:  v1alpha1.InventoryStatus{State: string(inventory)},
-	}
-
-	for _, entry := range reading.Entries() {
-
-		corner := entry.Reach
-		if corner.Ncpus == 0 || corner.MemInGiB == 0 {
-			corner = entry.Shape
-		}
-		unavailable := v1alpha1.UnavailableRange{
-			Range:         rangeDescription(corner),
-			FromNcpus:     corner.Ncpus,
-			FromMemoryGiB: corner.MemInGiB,
-			RefusedInstanceType: instancetype.SpecsToInstanceTypeName(
-				entry.Shape.Ncpus,
-				entry.Shape.MemInGiB,
-			),
-			CPUPlatform:         string(entry.Platform),
-			Reason:              string(entry.Reason),
-			State:               shapeState(entry.State),
-			ConsecutiveRefusals: entry.ConsecutiveICEs,
-		}
-		if entry.Floor.Ncpus > 0 && entry.Floor.MemInGiB > 0 {
-			unavailable.LargestLaunchable = instancetype.SpecsToInstanceTypeName(
-				entry.Floor.Ncpus,
-				entry.Floor.MemInGiB,
-			)
-		}
-		unavailable.LastRefusal = timestamp(entry.LastICE)
-
-		if entry.State == availability.StateBackoff {
-			unavailable.RetryAfter = timestamp(entry.RetryAfter)
-		}
-		status.InstanceTypes.UnavailableRanges = append(
-			status.InstanceTypes.UnavailableRanges,
-			unavailable,
-		)
-	}
-
-	if rack.Known() {
-		renderRack(c.instanceTypes, rack, &status.Inventory)
-
-		if inventory == availability.InventoryFresh {
-			status.InstanceTypes.UnavailableRanges = append(
-				status.InstanceTypes.UnavailableRanges,
-				rackRanges(rack, status.Inventory.LargestFeasibleInstanceType)...,
-			)
-		}
-	}
-
-	sortRanges(status.InstanceTypes.UnavailableRanges)
-	status.InstanceTypes.UnavailableRangeCount = len(status.InstanceTypes.UnavailableRanges)
-
-	status.InstanceTypes.UnavailableCount, status.InstanceTypes.Count =
-		view.Unavailable, view.Total
-	if quota := reading.Quota(); quota.Known {
-		status.Quota = renderQuota(quota.Quota)
-		status.Quota.ObservedAt = timestamp(quota.TakenAt)
-		status.Quota.Stale = quota.Stale
-	}
-	if refusal := view.Storage; view.HasStorage {
-		status.Storage = &v1alpha1.StorageRefusal{
-			Reason:              string(refusal.Reason),
-			Message:             refusal.Message,
-			ConsecutiveRefusals: refusal.Consecutive,
-			LastRefusal:         timestamp(refusal.LastRefusal),
-		}
-	}
-	for _, refusal := range reading.Placements() {
-		status.PlacementRefusals = append(status.PlacementRefusals, v1alpha1.PlacementRefusal{
-			Placement: string(refusal.Placement), FromNcpus: refusal.Shape.Ncpus,
-			FromMemoryGiB: refusal.Shape.MemInGiB, ConsecutiveRefusals: refusal.Consecutive,
-			LastRefusal: timestamp(refusal.LastRefusal), RetryAfter: timestamp(refusal.RetryAfter),
-			Message: refusal.Message, Gated: refusal.Gated,
-		})
-	}
-	sortPlacementRefusals(status.PlacementRefusals)
-	return status
-}
-
-func rackRanges(rack capacity.Snapshot, largestLaunchable string) []v1alpha1.UnavailableRange {
-	headrooms := instancetype.RackHeadroom(rack)
-	ranges := make([]v1alpha1.UnavailableRange, 0, len(headrooms))
-	for _, headroom := range headrooms {
-		ranges = append(ranges, v1alpha1.UnavailableRange{
-			Range:        headroomDescription(headroom),
-			MaxNcpus:     headroom.Ncpus,
-			MaxMemoryGiB: headroom.MemInGiB,
-			Reason:       v1alpha1.RangeReasonNoSledWithRoom,
-
-			LargestLaunchable: largestLaunchable,
-		})
-	}
-	return ranges
-}
-
-func renderRack(
-	instanceTypes *instancetype.Provider,
-	rack capacity.Snapshot,
-	rendered *v1alpha1.InventoryStatus,
-) {
-	rendered.ObservedAt = timestamp(rack.TakenAt())
-
-	for _, sled := range rack.Sleds() {
-		free := sled.Free()
-
-		if !sled.Provisionable {
-			free = capacity.Resources{}
-		}
-		entry := v1alpha1.SledCapacity{
-			ID:            sled.ID,
-			Provisionable: sled.Provisionable,
-			FreeCPUs:      free.CPUs,
-			FreeMemoryGiB: int(free.Memory / GiB),
-		}
-		if shape, ok := instanceTypes.LargestShapeThatFits(free); ok {
-			entry.LargestFeasibleInstanceType = instancetype.SpecsToInstanceTypeName(
-				shape.Ncpus,
-				shape.MemInGiB,
-			)
-		}
-		rendered.Sleds = append(rendered.Sleds, entry)
-	}
-	sortSleds(rendered.Sleds)
-
-	if shape, ok := instanceTypes.LargestShapeOnRack(rack); ok {
-		rendered.LargestFeasibleInstanceType = instancetype.SpecsToInstanceTypeName(
-			shape.Ncpus,
-			shape.MemInGiB,
-		)
-	}
-}
-
-func timestamp(t time.Time) *metav1.Time {
-	if t.IsZero() {
-		return nil
-	}
-	truncated := metav1.NewTime(t.Truncate(time.Second))
-	return &truncated
-}
-
-func renderQuota(quota utilization.Quota) *v1alpha1.QuotaHeadroom {
-	return &v1alpha1.QuotaHeadroom{
-		CPUs:       max(quota.CapacityCPUs-quota.ProvisionedCPUs, 0),
-		MemoryGiB:  int64(headroom(quota.CapacityMemory, quota.ProvisionedMemory) / GiB),
-		StorageGiB: int64(headroom(quota.CapacityStorage, quota.ProvisionedStorage) / GiB),
-	}
-}
-
-func headroom(entitled, provisioned uint64) uint64 {
-	if entitled <= provisioned {
-		return 0
-	}
-	return entitled - provisioned
-}
-
 func (c *Controller) publish(ctx context.Context, status v1alpha1.OxideCapacityStatus) error {
+	if err := limitStatus(&status); err != nil {
+		return err
+	}
 	existing := &v1alpha1.OxideCapacity{}
 	err := c.kubeClient.Get(ctx, client.ObjectKey{Name: v1alpha1.OxideCapacityName}, existing)
 	switch {
