@@ -2,7 +2,6 @@ package cloudprovider
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -23,6 +22,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/bootdisk"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/instance"
+	projectscope "github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/project"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
@@ -140,239 +140,32 @@ func (c *OxideCloudProvider) Create(
 		))
 	}
 
-	nodeTaints := append(
-		append(nodeClaim.Spec.Taints, nodeClaim.Spec.StartupTaints...),
-		corev1.Taint{
-			Key:    karpcorev1.UnregisteredTaintKey,
-			Effect: corev1.TaintEffectNoExecute,
-		},
-	)
-	nodeTaints = lo.UniqBy(nodeTaints, func(t corev1.Taint) string { return t.Key })
-
-	bootstrapper, err := c.bootstrappers.For(ctx, nodeClass)
+	candidate, probe, err := c.selectLaunch(nodeClaim, nodeClass)
 	if err != nil {
 		return nil, err
 	}
-
-	var candidates []string
-
-	for _, req := range nodeClaim.Spec.Requirements {
-		if req.Key != corev1.LabelInstanceTypeStable {
-			continue
-		}
-		candidates = req.Values
-	}
-	placement := placementFor(nodeClass.Status.AffinityGroups)
-	platforms, err := cpuPlatformsFor(nodeClaim)
-	if err != nil {
-		return nil, err
-	}
-
-	blockedBy := availability.Reason("")
-	var available []launchCandidate
-	for _, candidate := range candidates {
-		specs, err := instancetype.InstanceTypeToSpecs(candidate)
-		if err != nil {
-			continue
-		}
-		if c.instanceTypeProvider.IsOverQuota(specs) {
-			blockedBy = availability.ReasonQuota
-			continue
-		}
-		for _, platform := range platforms {
-			decision := c.availability.Check(availability.Request{
-				Shape:     specs,
-				Platform:  platform,
-				Placement: placement,
-			})
-			if !decision.Available {
-				if blockedBy != availability.ReasonQuota {
-					blockedBy = decision.Reason
-				}
-				continue
-			}
-			available = append(available, launchCandidate{specs: specs, platform: platform})
-		}
-	}
-
-	if len(candidates) > 0 && len(available) == 0 {
-		return nil, cloudprovider.NewInsufficientCapacityError(
-			c.noCandidatesError(candidates, blockedBy),
-		)
-	}
-
-	// Stable, so shapes of one price keep the platform order the NodeClaim allowed.
-	slices.SortStableFunc(available, func(a, b launchCandidate) int {
-		return instancetype.ComparePrice(a.specs, b.specs)
-	})
-
-	if len(available) == 0 {
-		return nil, fmt.Errorf("no instance types match NodeClaim requirements")
-	}
-
-	var instanceType instancetype.Specs
-	var platform availability.Platform
-	held := false
-	var probe *availability.Probe
-	for _, candidate := range available {
-		request := availability.Request{
-			Shape:     candidate.specs,
-			Platform:  candidate.platform,
-			Placement: placement,
-		}
-		if acquired, ok := c.availability.Acquire(request); ok {
-			instanceType, platform, held = candidate.specs, candidate.platform, true
-			probe = acquired
-			break
-		}
-	}
-	if !held {
-
-		return nil, fmt.Errorf(
-			"all %d instance types the NodeClaim can use are being probed by another launch",
-			len(available),
-		)
-	}
-
 	defer probe.Release()
-	catalog, err := instancetype.OptionsFor(nodeClass)
+
+	plan, err := c.planLaunch(ctx, nodeClaim, nodeClass, candidate)
 	if err != nil {
 		return nil, err
 	}
-	effectiveInstanceType, err := c.effectiveInstanceType(
-		ctx,
-		nodeClaim,
-		instancetype.SpecsToInstanceTypeName(instanceType.Ncpus, instanceType.MemInGiB),
-		catalog,
-	)
+	boot := c.bootDisk(ctx, nodeClass, nodeClaim, plan.storage)
+	bootConsumed := false
+	defer c.releaseUnstartedBootDisk(ctx, boot.acquired, &bootConsumed)
+
+	result, err := c.executeLaunch(ctx, nodeClass, plan, boot, probe)
 	if err != nil {
 		return nil, err
 	}
-	name := InstanceNamePrefix + nodeClaim.Name
+	bootConsumed = !result.Adopted || boot.acquired == nil ||
+		result.Instance.BootDiskId == boot.acquired.DiskID
 
-	launchToken := uuid.NewString()
-
-	plan, err := storage.Build(name, launchToken, nodeClass)
-	if err != nil {
-		return nil, fmt.Errorf("unable to plan the disks for %s: %w", nodeClaim.Name, err)
+	if !result.Adopted {
+		probe.RecordSuccess(ctx)
+		c.storageRefusals.Clear(ctx)
 	}
-
-	boot := c.bootDisk(ctx, nodeClass, nodeClaim, plan)
-	launchStarted := false
-	defer c.releaseUnstartedBootDisk(ctx, boot.acquired, &launchStarted)
-
-	request := utilization.Request{
-		CPUs:    int64(instanceType.Ncpus),
-		Memory:  uint64(instanceType.MemInGiB) * GiB,
-		Storage: uint64(boot.storageBytes),
-	}
-	if quota, err := c.instanceTypeProvider.Quota(); err == nil {
-		if admits, resource := quota.Admits(request); !admits {
-
-			if resource != utilization.ResourceStorage {
-				probe.RecordRefusal(ctx, availability.Refusal{
-					Scope:  availability.RefusalScopeGlobal,
-					Reason: availability.ReasonQuota,
-				})
-			}
-			return nil, cloudprovider.NewInsufficientCapacityError(
-				fmt.Errorf("%s", quota.Explain(request, resource)),
-			)
-		}
-	}
-
-	subnet, err := selectSubnet(nodeClass.Status.Subnets)
-	if err != nil {
-		return nil, err
-	}
-
-	owner := c.owner(nodeClaim)
-	describe := c.ownership(nodeClaim)
-
-	userData, err := bootstrapper.UserData(ctx, nodeClass, bootstrap.Request{
-		NodeClaim:    nodeClaim,
-		NodeTaints:   nodeTaints,
-		Hostname:     name,
-		Storage:      &plan,
-		InstanceType: instanceType,
-		Kubelet:      catalog.Kubelet.Reserved,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("unable to generate %s user-data: %w", bootstrapper.Name(), err)
-	}
-
-	externalIPSets := externalIPSets(nodeClass.Status.EphemeralIPs)
-	launched, err := c.instanceProvider.Create(ctx, oxide.InstanceCreateParams{
-		Project: oxide.NameOrId(c.project),
-		Body: &oxide.InstanceCreate{
-			Name:        oxide.Name(name),
-			Hostname:    oxide.Hostname(name),
-			Description: describe(ownership.KindInstance, "Karpenter provisioned node by NodePool"),
-			Memory:      oxide.ByteCount(instanceType.MemInGiB * GiB),
-			Ncpus:       oxide.InstanceCpuCount(instanceType.Ncpus),
-			UserData:    base64.StdEncoding.EncodeToString([]byte(userData)),
-
-			EnableJumboFrames: nodeClass.Spec.JumboFrames,
-			CpuPlatform:       oxide.InstanceCpuPlatform(platform),
-
-			AntiAffinityGroups: antiAffinityGroups(nodeClass.Status.AffinityGroups),
-
-			BootDisk: boot.attachment,
-			Disks: plan.DataAttachments(func(disk storage.Disk) string {
-				return describe(
-					ownership.KindDataDisk,
-					fmt.Sprintf("diskSet %s disk %d", disk.Set, disk.Ordinal),
-				)
-			}),
-			NetworkInterfaces: oxide.InstanceNetworkInterfaceAttachment{
-				Value: &oxide.InstanceNetworkInterfaceAttachmentCreate{
-					Params: []oxide.InstanceNetworkInterfaceCreate{
-						{
-							Name:        oxide.Name(name),
-							Description: "Karpenter provisioned network interface for node",
-							SubnetName:  oxide.Name(subnet.Name),
-							VpcName:     oxide.Name(subnet.VPCName),
-						},
-					},
-				},
-			},
-			ExternalIps: externalIPSets[0],
-			SshPublicKeys: lo.Map(
-				nodeClass.Status.SSHKeys,
-				func(sshKey v1alpha1.OxideSSHKey, _ int) oxide.NameOrId {
-					return oxide.NameOrId(sshKey.Name)
-				},
-			),
-		},
-	}, instance.Options{
-		Owner:               owner,
-		AffinityGroups:      affinityGroups(nodeClass.Status.AffinityGroups),
-		ExternalIPFallbacks: externalIPSets[1:],
-	})
-	if err != nil {
-		return nil, c.diagnoseLaunchFailure(ctx, err, nodeClass, request, probe)
-	}
-	launchStarted = true
-
-	probe.RecordSuccess(ctx)
-	c.storageRefusals.Clear(ctx)
-
-	resolvedNodeClaim, err := c.resolveLaunched(
-		ctx,
-		launched,
-		nodeClass,
-		nodeClaim,
-		name,
-		subnet.ID,
-		plan.Prefix,
-		boot.name,
-	)
-	if err != nil {
-		return nil, err
-	}
-	annotateHourlyPrice(resolvedNodeClaim, effectiveInstanceType)
-
-	return resolvedNodeClaim, nil
+	return c.recordLaunch(ctx, nodeClaim, nodeClass, plan, boot, result)
 }
 
 // launchCandidate is one shape under one pin that a NodeClaim allows.
@@ -545,53 +338,6 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 	return err
 }
 
-func (c *OxideCloudProvider) resolveLaunched(
-	ctx context.Context,
-	launched *oxide.Instance,
-	nodeClass *v1alpha1.OxideNodeClass,
-	nodeClaim *karpcorev1.NodeClaim,
-	instanceName string,
-	subnetID string,
-	diskPrefix string,
-	bootDiskName string,
-) (*karpcorev1.NodeClaim, error) {
-	resolved, err := c.InstanceToNodeClaim(launched, nodeClass, nodeClaim.DeepCopy())
-	if err != nil {
-		return nil, err
-	}
-
-	ephemeralIPs, err := c.ephemeralIPRecords(ctx, nodeClass, instanceName)
-	if err != nil {
-		return nil, err
-	}
-
-	resolved.Annotations = lo.Assign(resolved.Annotations, map[string]string{
-		v1alpha1.AnnotationOxideNodeClassHash:        nodeClass.Hash(),
-		v1alpha1.AnnotationOxideNodeClassHashVersion: v1alpha1.OxideNodeClassHashVersion,
-		v1alpha1.AnnotationSubnet:                    subnetID,
-
-		v1alpha1.AnnotationDiskPrefix: diskPrefix,
-		v1alpha1.AnnotationBootDisk:   bootDiskName,
-
-		v1alpha1.AnnotationSSHKeys: v1alpha1.EncodeIDs(
-			v1alpha1.SSHKeyIDs(nodeClass.Status.SSHKeys),
-		),
-
-		v1alpha1.AnnotationEphemeralIPs: v1alpha1.EncodeEphemeralIPs(ephemeralIPs),
-
-		v1alpha1.AnnotationDiskSetSources: v1alpha1.EncodeDiskSetSources(
-			v1alpha1.DiskSetSources(nodeClass.Status.Storage),
-		),
-	})
-
-	if len(nodeClass.Status.AffinityGroups) > 0 {
-		resolved.Annotations[v1alpha1.AnnotationAffinityGroups] = v1alpha1.EncodeAffinityGroups(
-			v1alpha1.AffinityGroupRefsFor(nodeClass.Status.AffinityGroups),
-		)
-	}
-	return resolved, nil
-}
-
 func (c *OxideCloudProvider) ownership(
 	nodeClaim *karpcorev1.NodeClaim,
 ) func(ownership.Kind, string) string {
@@ -658,8 +404,15 @@ func (c *OxideCloudProvider) ephemeralIPRecords(
 	if len(nodeClass.Status.EphemeralIPs) == 0 {
 		return nil, nil
 	}
+	return c.readEphemeralIPRecords(ctx, instanceName)
+}
+
+func (c *OxideCloudProvider) readEphemeralIPRecords(
+	ctx context.Context,
+	instanceName string,
+) ([]v1alpha1.EphemeralIPRecord, error) {
 	listed, err := c.ox.InstanceExternalIpList(ctx, oxide.InstanceExternalIpListParams{
-		Project:  oxide.NameOrId(c.project),
+		Project:  projectscope.Scope(c.project, instanceName),
 		Instance: oxide.NameOrId(instanceName),
 	})
 	if err != nil {
@@ -771,6 +524,12 @@ func teardownFor(
 	instanceName string,
 	owner ownership.Marker,
 ) instance.Teardown {
+	if ids, found := nodeClaim.Annotations[v1alpha1.AnnotationDiskIDs]; found {
+		return instance.Teardown{Owner: owner,
+			BootDiskName: nodeClaim.Annotations[v1alpha1.AnnotationBootDisk],
+			DiskIDs:      v1alpha1.ParseIDs(ids).UnsortedList()}
+	}
+
 	if prefix := nodeClaim.Annotations[v1alpha1.AnnotationDiskPrefix]; prefix != "" {
 		return instance.Teardown{
 			Owner:        owner,
@@ -1010,50 +769,6 @@ func (c *OxideCloudProvider) nodeClassFor(
 	return nodeClass, nil
 }
 
-func (c *OxideCloudProvider) noCandidatesError(
-	candidates []string,
-	reason availability.Reason,
-) error {
-	if reason == availability.ReasonAffinityPolicy {
-		return fmt.Errorf(
-			"all %d instance types the NodeClaim can use are temporarily unavailable for its affinity placement",
-			len(candidates),
-		)
-	}
-	if reason != availability.ReasonQuota {
-		return fmt.Errorf(
-			"all %d instance types the NodeClaim can use were recently refused for insufficient capacity",
-			len(candidates),
-		)
-	}
-
-	quota, err := c.instanceTypeProvider.Quota()
-	if err != nil {
-		return fmt.Errorf(
-			"all %d instance types the NodeClaim can use exceed the silo's quota",
-			len(candidates),
-		)
-	}
-
-	smallest := smallestSpecs(candidates)
-	request := utilization.Request{
-		CPUs:   int64(smallest.Ncpus),
-		Memory: uint64(smallest.MemInGiB) * GiB,
-	}
-	_, resource := quota.Admits(request)
-	if resource == "" {
-		return fmt.Errorf(
-			"all %d instance types the NodeClaim can use exceed the silo's quota",
-			len(candidates),
-		)
-	}
-	return fmt.Errorf(
-		"none of the %d instance types the NodeClaim can use fit in the silo's quota: %s",
-		len(candidates),
-		quota.Explain(request, resource),
-	)
-}
-
 func (c *OxideCloudProvider) diagnoseRefusal(
 	request utilization.Request,
 	cause error,
@@ -1099,22 +814,6 @@ func placementFor(groups []v1alpha1.OxideAffinityGroup) availability.Placement {
 		},
 	)
 	return availability.NewPlacement(constraints...)
-}
-
-func smallestSpecs(candidates []string) instancetype.Specs {
-	smallest := instancetype.Specs{}
-	for _, candidate := range candidates {
-		specs, err := instancetype.InstanceTypeToSpecs(candidate)
-		if err != nil {
-			continue
-		}
-		if smallest.Ncpus == 0 ||
-			specs.Ncpus < smallest.Ncpus ||
-			(specs.Ncpus == smallest.Ncpus && specs.MemInGiB < smallest.MemInGiB) {
-			smallest = specs
-		}
-	}
-	return smallest
 }
 
 // Reboot restarts the instance in place. The operation ID is unused: Oxide has

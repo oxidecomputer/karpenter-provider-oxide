@@ -25,10 +25,8 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/availability"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
-	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -38,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
 const (
@@ -52,7 +49,6 @@ const (
 type Controller struct {
 	kubeClient    client.Client
 	instanceTypes *instancetype.Provider
-	availability  *availability.Manager
 	storage       *storagerefusal.Tracker
 	period        time.Duration
 
@@ -62,14 +58,12 @@ type Controller struct {
 func NewController(
 	kubeClient client.Client,
 	instanceTypes *instancetype.Provider,
-	availabilityManager *availability.Manager,
 	storageRefusals *storagerefusal.Tracker,
 	period time.Duration,
 ) *Controller {
 	return &Controller{
 		kubeClient:    kubeClient,
 		instanceTypes: instanceTypes,
-		availability:  availabilityManager,
 		storage:       storageRefusals,
 		period:        period,
 	}
@@ -83,12 +77,9 @@ func (c *Controller) Name() string {
 func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	ctx = log.IntoContext(ctx, log.FromContext(ctx).WithValues("controller", c.Name()))
 
-	c.seedLaunchableFloor(ctx)
-
-	reading := c.availability.Snapshot()
-	rack, inventory := reading.Rack()
+	reading := c.observe()
 	status := c.render(reading)
-	publishMetrics(status, rack, inventory)
+	c.publishMetrics(reading)
 
 	if err := c.publish(ctx, status); err != nil {
 		c.logPublishFailure(ctx, err)
@@ -99,41 +90,6 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	return reconciler.Result{RequeueAfter: c.period}, nil
 }
 
-func (c *Controller) seedLaunchableFloor(ctx context.Context) {
-	nodeClaims := &karpv1.NodeClaimList{}
-	if err := c.kubeClient.List(ctx, nodeClaims); err != nil {
-		log.FromContext(ctx).V(1).Info(
-			"unable to list nodeclaims to seed the launchable floor",
-			"reason", err.Error(),
-		)
-		return
-	}
-
-	for i := range nodeClaims.Items {
-		nodeClaim := &nodeClaims.Items[i]
-
-		if !nodeClaim.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if !nodeClaim.StatusConditions().Get(karpv1.ConditionTypeLaunched).IsTrue() {
-			continue
-		}
-		name, ok := nodeClaim.Labels[corev1.LabelInstanceTypeStable]
-		if !ok {
-			continue
-		}
-		specs, err := instancetype.InstanceTypeToSpecs(name)
-		if err != nil {
-			continue
-		}
-		c.availability.SeedLaunchable(
-			ctx,
-			specs,
-			availability.Platform(nodeClaim.Labels[v1alpha1.LabelInstanceCPUPlatform]),
-		)
-	}
-}
-
 func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 	return controllerruntime.NewControllerManagedBy(m).
 		Named(c.Name()).
@@ -141,9 +97,10 @@ func (c *Controller) Register(_ context.Context, m manager.Manager) error {
 		Complete(singleton.AsReconciler(c))
 }
 
-func (c *Controller) render(reading availability.Snapshot) v1alpha1.OxideCapacityStatus {
+func (c *Controller) render(view observation) v1alpha1.OxideCapacityStatus {
+	reading := view.Availability
 	rack, inventory := reading.Rack()
-	now := timestamp(time.Now())
+	now := timestamp(reading.ObservedAt())
 
 	status := v1alpha1.OxideCapacityStatus{
 		ObservedAt: now,
@@ -201,11 +158,13 @@ func (c *Controller) render(reading availability.Snapshot) v1alpha1.OxideCapacit
 	status.InstanceTypes.UnavailableRangeCount = len(status.InstanceTypes.UnavailableRanges)
 
 	status.InstanceTypes.UnavailableCount, status.InstanceTypes.Count =
-		c.instanceTypes.UnavailableInstanceTypeCount()
-	if quota, err := c.instanceTypes.Quota(); err == nil {
-		status.Quota = renderQuota(quota)
+		view.Unavailable, view.Total
+	if quota := reading.Quota(); quota.Known {
+		status.Quota = renderQuota(quota.Quota)
+		status.Quota.ObservedAt = timestamp(quota.TakenAt)
+		status.Quota.Stale = quota.Stale
 	}
-	if refusal, ok := c.storage.Last(); ok {
+	if refusal := view.Storage; view.HasStorage {
 		status.Storage = &v1alpha1.StorageRefusal{
 			Reason:              string(refusal.Reason),
 			Message:             refusal.Message,
@@ -213,6 +172,15 @@ func (c *Controller) render(reading availability.Snapshot) v1alpha1.OxideCapacit
 			LastRefusal:         timestamp(refusal.LastRefusal),
 		}
 	}
+	for _, refusal := range reading.Placements() {
+		status.PlacementRefusals = append(status.PlacementRefusals, v1alpha1.PlacementRefusal{
+			Placement: string(refusal.Placement), FromNcpus: refusal.Shape.Ncpus,
+			FromMemoryGiB: refusal.Shape.MemInGiB, ConsecutiveRefusals: refusal.Consecutive,
+			LastRefusal: timestamp(refusal.LastRefusal), RetryAfter: timestamp(refusal.RetryAfter),
+			Message: refusal.Message, Gated: refusal.Gated,
+		})
+	}
+	sortPlacementRefusals(status.PlacementRefusals)
 	return status
 }
 
@@ -356,71 +324,4 @@ func crdMissing(err error) bool {
 	return meta.IsNoMatchError(err) ||
 		runtime.IsNotRegisteredError(err) ||
 		kerrors.IsNotFound(err)
-}
-
-func publishMetrics(
-	status v1alpha1.OxideCapacityStatus,
-	rack capacity.Snapshot,
-	inventory availability.InventoryState,
-) {
-	metrics.ResetShapeGauges()
-	metrics.ResetSledGauges()
-
-	metrics.UnavailableShapes.Set(float64(status.InstanceTypes.UnavailableRangeCount))
-	metrics.UnavailableInstanceTypes.Set(float64(status.InstanceTypes.UnavailableCount))
-	metrics.InstanceTypes.Set(float64(status.InstanceTypes.Count))
-	for _, unavailable := range status.InstanceTypes.UnavailableRanges {
-
-		label := unavailable.RefusedInstanceType
-
-		if label == "" {
-			continue
-		}
-		metrics.ConsecutiveICEs.WithLabelValues(label).
-			Set(float64(unavailable.ConsecutiveRefusals))
-		remaining := time.Duration(0)
-		if unavailable.RetryAfter != nil && status.ObservedAt != nil {
-			remaining = unavailable.RetryAfter.Sub(status.ObservedAt.Time)
-		}
-		metrics.BackoffSeconds.WithLabelValues(label).Set(metrics.Seconds(remaining))
-
-		if inventory != availability.InventoryFresh {
-			continue
-		}
-		specs, err := instancetype.InstanceTypeToSpecs(label)
-		if err != nil {
-			continue
-		}
-		metrics.FeasibleInstances.WithLabelValues(label).Set(float64(
-			rack.FeasibleCount(capacity.Resources{
-				CPUs:   specs.Ncpus,
-				Memory: uint64(specs.MemInGiB) * GiB,
-			}),
-		))
-	}
-
-	metrics.StorageRefusalsConsecutive.Set(0)
-	if status.Storage != nil {
-		metrics.StorageRefusalsConsecutive.Set(float64(status.Storage.ConsecutiveRefusals))
-	}
-
-	metrics.SnapshotFresh.Set(0)
-	if status.Inventory.State == v1alpha1.InventoryFresh {
-		metrics.SnapshotFresh.Set(1)
-	}
-	if status.Inventory.ObservedAt != nil && status.ObservedAt != nil {
-		age := status.ObservedAt.Sub(status.Inventory.ObservedAt.Time)
-		metrics.SnapshotAgeSeconds.Set(metrics.Seconds(age))
-	}
-	for _, sled := range status.Inventory.Sleds {
-		metrics.SledFreeCPUs.WithLabelValues(sled.ID).Set(float64(sled.FreeCPUs))
-		metrics.SledFreeMemoryBytes.WithLabelValues(sled.ID).
-			Set(float64(sled.FreeMemoryGiB) * GiB)
-	}
-	if specs, err := instancetype.InstanceTypeToSpecs(
-		status.Inventory.LargestFeasibleInstanceType,
-	); err == nil {
-		metrics.LargestFeasibleCPUs.Set(float64(specs.Ncpus))
-		metrics.LargestFeasibleMemoryBytes.Set(float64(specs.MemInGiB) * GiB)
-	}
 }

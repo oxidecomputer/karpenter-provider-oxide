@@ -122,6 +122,14 @@ func (q Quota) Explain(request Request, resource Resource) string {
 	)
 }
 
+type Snapshot struct {
+	Quota      Quota
+	Known      bool
+	TakenAt    time.Time
+	Stale      bool
+	Generation uint64
+}
+
 // Provider serves the silo's quota from a periodically refreshed snapshot.
 type Provider struct {
 	ox *oxide.Client
@@ -131,7 +139,8 @@ type Provider struct {
 	mu    sync.RWMutex
 	quota *Quota
 
-	takenAt time.Time
+	takenAt    time.Time
+	lastFailed bool
 
 	lastAttempt time.Time
 
@@ -156,6 +165,16 @@ func (p *Provider) Quota() (Quota, error) {
 		return Quota{}, ErrNoSnapshot
 	}
 	return *p.quota, nil
+}
+
+func (p *Provider) Snapshot() Snapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	reading := Snapshot{TakenAt: p.takenAt, Stale: p.lastFailed, Generation: p.generation.Load()}
+	if p.quota != nil {
+		reading.Known, reading.Quota = true, *p.quota
+	}
+	return reading
 }
 
 // Generation identifies the current quota.
@@ -184,6 +203,9 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 
 	view, err := p.ox.UtilizationView(ctx)
 	if err != nil {
+		p.mu.Lock()
+		p.lastFailed = true
+		p.mu.Unlock()
 		return false, fmt.Errorf("unable to read the silo's utilization: %w", err)
 	}
 	quota := quotaFrom(view)
@@ -192,10 +214,13 @@ func (p *Provider) Refresh(ctx context.Context, force bool) (bool, error) {
 	changed := p.quota == nil || *p.quota != quota
 	p.quota = &quota
 	p.takenAt = time.Now()
+	p.lastFailed = false
+	if changed {
+		p.generation.Add(1)
+	}
 	p.mu.Unlock()
 
 	if changed {
-		p.generation.Add(1)
 
 		log.FromContext(ctx).V(1).Info(
 			"silo quota changed",

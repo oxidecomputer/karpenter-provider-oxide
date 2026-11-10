@@ -88,6 +88,8 @@ type OxideCapacityStatus struct {
 	// Storage is the last launch refused because its boot disk could not be provisioned.
 	// +optional
 	Storage *StorageRefusal `json:"storage,omitempty"`
+	// +optional
+	PlacementRefusals []PlacementRefusal `json:"placementRefusals,omitempty"`
 }
 
 // InstanceTypeAvailability is how much of the catalog the scheduler is being offered.
@@ -191,6 +193,10 @@ type SledCapacity struct {
 
 // QuotaHeadroom is what the silo is still entitled to launch.
 type QuotaHeadroom struct {
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+	// +optional
+	Stale bool `json:"stale,omitempty"`
 	// CPUs, MemoryGiB and StorageGiB are the quota's capacity less what the silo has provisioned.
 	CPUs       int64 `json:"cpus"`
 	MemoryGiB  int64 `json:"memoryGiB"`
@@ -203,4 +209,18 @@ type OxideCapacityList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []OxideCapacity `json:"items"`
+}
+
+type PlacementRefusal struct {
+	Placement           string `json:"placement"`
+	FromNcpus           int    `json:"fromNcpus"`
+	FromMemoryGiB       int    `json:"fromMemoryGiB"`
+	ConsecutiveRefusals int    `json:"consecutiveRefusals"`
+	Gated               bool   `json:"gated"`
+	// +optional
+	LastRefusal *metav1.Time `json:"lastRefusal,omitempty"`
+	// +optional
+	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
+	// +optional
+	Message string `json:"message,omitempty"`
 }

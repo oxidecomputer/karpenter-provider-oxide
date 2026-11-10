@@ -10,6 +10,7 @@ import (
 
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/metrics"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -325,9 +326,13 @@ func (c *Manager) RecordCapacityReleased(ctx context.Context, released Shape, pl
 
 // Snapshot is everything needed to judge shapes, taken as one consistent reading.
 type Snapshot struct {
-	entries   []Entry
-	rack      capacity.Snapshot
-	inventory InventoryState
+	entries    []Entry
+	rack       capacity.Snapshot
+	inventory  InventoryState
+	placements []PlacementRefusal
+	quota      utilization.Snapshot
+	observedAt time.Time
+	generation uint64
 }
 
 // Entries returns the refusals the breaker currently holds.
@@ -342,10 +347,8 @@ func (s Snapshot) Rack() (capacity.Snapshot, InventoryState) {
 
 // Unavailable reports whether a shape is ruled out under this pin in this reading, and why.
 func (s Snapshot) Unavailable(specs Shape, platform Platform) (bool, Reason) {
-	if s.inventory == InventoryFresh && !s.rack.CanFit(resourcesFor(specs)) {
-		return true, ReasonCapacity
-	}
-	return covered(s.entries, specs, platform)
+	decision := s.Evaluate(Request{Shape: specs, Platform: platform})
+	return !decision.Available, decision.Reason
 }
 
 // Snapshot takes one reading of the breaker and the rack together.
@@ -358,7 +361,18 @@ func (c *Manager) Snapshot() Snapshot {
 	for _, entry := range c.entries {
 		entries = append(entries, *entry)
 	}
-	return Snapshot{entries: entries, rack: c.rack, inventory: c.inventoryState()}
+	now := c.now()
+	c.sweepPlacements(now)
+	placements := make([]PlacementRefusal, 0, len(c.placements))
+	for _, entry := range c.placements {
+		placements = append(placements, PlacementRefusal{
+			Placement: entry.Placement, Shape: entry.Shape, Consecutive: entry.Consecutive,
+			LastRefusal: entry.LastRefusal, RetryAfter: entry.RetryAfter, Message: entry.Message,
+			Gated: entry.Consecutive >= placementGateAfter && now.Before(entry.RetryAfter),
+		})
+	}
+	return Snapshot{entries: entries, rack: c.rack, inventory: c.inventoryState(),
+		placements: placements, observedAt: now, generation: c.generation.Load()}
 }
 
 func (c *Manager) inventoryState() InventoryState {
@@ -496,25 +510,6 @@ func stateOrAvailable(state State) string {
 		return "available"
 	}
 	return string(state)
-}
-
-func covered(entries []Entry, specs Shape, platform Platform) (bool, Reason) {
-	found := false
-	reason := Reason("")
-	for _, e := range entries {
-		if e.State != StateBackoff || !covers(e.reachOrSpecs(), specs) {
-			continue
-		}
-		if !e.Platform.Covers(platform) {
-			continue
-		}
-		found = true
-		if e.Reason == ReasonQuota {
-			return true, ReasonQuota
-		}
-		reason = e.Reason
-	}
-	return found, reason
 }
 
 func covers(marked, specs Shape) bool {

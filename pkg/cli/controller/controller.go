@@ -16,6 +16,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cli/config"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/cloudprovider"
 	affinitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/affinity"
+	availabilitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/availability"
 	bootdiskcontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/bootdisk"
 	capacitycontroller "github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/controllers/inventory"
@@ -285,10 +286,11 @@ func Run() error {
 			quotas,
 		),
 
+		availabilitycontroller.NewController(availabilityManager),
+
 		capacitycontroller.NewController(
 			karpcore.GetClient(),
 			instanceTypes,
-			availabilityManager,
 			storageRefusals,
 			capacityPublishPeriod,
 		),

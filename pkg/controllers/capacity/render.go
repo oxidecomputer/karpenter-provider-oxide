@@ -89,3 +89,15 @@ func sortSleds(sleds []v1alpha1.SledCapacity) {
 		return strings.Compare(a.ID, b.ID)
 	})
 }
+
+func sortPlacementRefusals(refusals []v1alpha1.PlacementRefusal) {
+	slices.SortFunc(refusals, func(a, b v1alpha1.PlacementRefusal) int {
+		if order := strings.Compare(a.Placement, b.Placement); order != 0 {
+			return order
+		}
+		if order := a.FromNcpus - b.FromNcpus; order != 0 {
+			return order
+		}
+		return a.FromMemoryGiB - b.FromMemoryGiB
+	})
+}

@@ -1,13 +1,66 @@
 package utilization
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/oxidecomputer/oxide.go/oxide"
 )
+
+func TestSnapshotRetainsQuotaAndMarksFailedRefresh(t *testing.T) {
+	failed := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failed {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(oxide.Utilization{Capacity: oxide.VirtualResourceCounts{
+			Cpus: new(64), Memory: 256 * giB, Storage: 1024 * giB,
+		}}); err != nil {
+			t.Error(err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	ox, err := oxide.NewClient(oxide.WithHost(server.URL), oxide.WithToken("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProvider(ox, time.Minute)
+	if p.Snapshot().Known {
+		t.Fatal("quota is known before the first read")
+	}
+	if _, err := p.Refresh(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	first := p.Snapshot()
+	if !first.Known || first.Stale || first.TakenAt.IsZero() || first.Generation == 0 {
+		t.Fatalf("invalid successful observation: %+v", first)
+	}
+	failed = true
+	if _, err := p.Refresh(t.Context(), true); err == nil {
+		t.Fatal("expected a failed refresh")
+	}
+	stale := p.Snapshot()
+	if !stale.Stale || !stale.Known || stale.Quota != first.Quota ||
+		stale.TakenAt != first.TakenAt ||
+		stale.Generation != first.Generation {
+		t.Fatalf("failed refresh lost the last successful observation: %+v", stale)
+	}
+	failed = false
+	if _, err := p.Refresh(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	current := p.Snapshot()
+	if current.Stale || !current.TakenAt.After(first.TakenAt) ||
+		current.Generation != first.Generation {
+		t.Fatalf("identical quota recovery did not update freshness independently: %+v", current)
+	}
+}
 
 const giB = 1 << 30
 

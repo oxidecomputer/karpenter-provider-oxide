@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 )
 
 const GiB = 1 << 30
@@ -59,13 +61,29 @@ type Request struct {
 	Shape     Shape
 	Platform  Platform
 	Placement Placement
+	Storage   uint64
 }
 
 // Decision is the manager's current judgment about a request.
 type Decision struct {
-	Available bool
-	Reason    Reason
+	Available  bool
+	Reason     Reason
+	Scope      RefusalScope
+	Source     Source
+	Resource   utilization.Resource
+	RetryAfter time.Time
+	ObservedAt time.Time
+	Stale      bool
+	Message    string
 }
+
+type Source string
+
+const (
+	SourceQuota     Source = "quota"
+	SourceInventory Source = "inventory"
+	SourceRefusal   Source = "refusal"
+)
 
 // RefusalScope identifies which part of a request refused a launch.
 type RefusalScope string

@@ -8,29 +8,7 @@ import (
 
 // Check evaluates global rack capacity and the request's optional placement scope.
 func (m *Manager) Check(request Request) Decision {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.sweep(context.Background())
-	now := m.now()
-	m.sweepPlacements(now)
-
-	if m.rackFresh && !m.rack.CanFit(resourcesFor(request.Shape)) {
-		return Decision{Reason: ReasonCapacity}
-	}
-	unavailable, reason := coveredEntries(m.entries, request.Shape, request.Platform)
-	if unavailable {
-		return Decision{Reason: reason}
-	}
-	for _, entry := range m.placements {
-		if entry.Placement == request.Placement &&
-			covers(entry.Shape, request.Shape) &&
-			entry.Consecutive >= placementGateAfter &&
-			now.Before(entry.RetryAfter) {
-			return Decision{Reason: ReasonAffinityPolicy}
-		}
-	}
-	return Decision{Available: true}
+	return m.Snapshot().Evaluate(request)
 }
 
 // Acquire atomically reserves every half-open global and placement breaker
@@ -101,12 +79,4 @@ func (m *Manager) release(request Request) {
 			entry.probeInFlight = false
 		}
 	}
-}
-
-func coveredEntries(entries map[string]*Entry, shape Shape, platform Platform) (bool, Reason) {
-	values := make([]Entry, 0, len(entries))
-	for _, entry := range entries {
-		values = append(values, *entry)
-	}
-	return covered(values, shape, platform)
 }

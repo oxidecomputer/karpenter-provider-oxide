@@ -10,6 +10,7 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/capacity"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/instancetype"
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/storagerefusal"
+	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/utilization"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -19,6 +20,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+func TestRenderIncludesPlacementHistoryAndQuotaFreshness(t *testing.T) {
+	c, _, manager := newController(t, nil)
+	manager.RecordPlacementRefusal(
+		t.Context(),
+		"aa:group",
+		availability.Shape{Ncpus: 8, MemInGiB: 16},
+		"placement denied",
+	)
+	view := c.observe()
+	observed := time.Now().Add(-time.Minute)
+	view.Availability = view.Availability.WithQuota(
+		utilization.Snapshot{Known: true, TakenAt: observed, Stale: true},
+	)
+	status := c.render(view)
+	if len(status.PlacementRefusals) != 1 || status.PlacementRefusals[0].Gated ||
+		status.PlacementRefusals[0].Message != "placement denied" {
+		t.Fatalf("placement history was not rendered: %+v", status.PlacementRefusals)
+	}
+	if status.Quota == nil || !status.Quota.Stale ||
+		!status.Quota.ObservedAt.Equal(timestamp(observed)) {
+		t.Fatalf("quota freshness was not rendered: %+v", status.Quota)
+	}
+}
 
 type fakeInventory struct {
 	snapshot capacity.Snapshot
@@ -31,7 +56,7 @@ func (f *fakeInventory) Capacity() capacity.Snapshot {
 func newController(
 	t *testing.T,
 	inventory availability.InventoryProvider,
-) (*Controller, client.WithWatch) {
+) (*Controller, client.WithWatch, *availability.Manager) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -58,10 +83,9 @@ func newController(
 	return NewController(
 		kubeClient,
 		instanceTypes,
-		manager,
 		storagerefusal.NewTracker(),
 		time.Second,
-	), kubeClient
+	), kubeClient, manager
 }
 
 func published(t *testing.T, kubeClient client.Reader) *v1alpha1.OxideCapacity {
@@ -84,7 +108,7 @@ func sled(id string, freeCPUs, freeMemGiB int, provisionable bool) capacity.Sled
 }
 
 func TestReconcileCreatesTheViewIfItIsMissing(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -105,8 +129,8 @@ func TestReconcileCreatesTheViewIfItIsMissing(t *testing.T) {
 }
 
 func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
-	c, kubeClient := newController(t, nil)
-	c.availability.RecordICE(
+	c, kubeClient, manager := newController(t, nil)
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 2, MemInGiB: 4}, availability.Unpinned,
 
@@ -134,14 +158,14 @@ func TestReconcileCountsInstanceTypesAsWellAsBoundaries(t *testing.T) {
 }
 
 func TestReconcilePublishesRefusedShapes(t *testing.T) {
-	c, kubeClient := newController(t, nil)
-	c.availability.RecordICE(
+	c, kubeClient, manager := newController(t, nil)
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
 
 		availability.ReasonCapacity)
 
-	c.availability.RecordICE(
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 32, MemInGiB: 64}, availability.Unpinned,
 
@@ -203,7 +227,7 @@ func TestReconcilePublishesRefusedShapes(t *testing.T) {
 }
 
 func TestReconcilePublishesAStorageRefusal(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 	c.storage.Record(
 		t.Context(),
 		availability.ReasonCapacity,
@@ -237,7 +261,7 @@ func TestReconcilePublishesAStorageRefusal(t *testing.T) {
 }
 
 func TestAClearedStorageRefusalIsUnpublished(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 	c.storage.Record(t.Context(), availability.ReasonQuota, "no storage quota")
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
@@ -270,7 +294,7 @@ func TestReconcilePublishesRackCapacity(t *testing.T) {
 		time.Hour,
 		1,
 	)}
-	c, kubeClient := newController(t, inventory)
+	c, kubeClient, _ := newController(t, inventory)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -311,7 +335,7 @@ func TestReconcilePublishesWhatNoSledHasRoomFor(t *testing.T) {
 		time.Hour,
 		1,
 	)}
-	c, kubeClient := newController(t, inventory)
+	c, kubeClient, _ := newController(t, inventory)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -373,7 +397,7 @@ func TestStaleInventoryPublishesNoRanges(t *testing.T) {
 		time.Minute,
 		1,
 	)}
-	c, kubeClient := newController(t, inventory)
+	c, kubeClient, _ := newController(t, inventory)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -392,7 +416,7 @@ func TestStaleInventoryIsReportedWithoutAFrontier(t *testing.T) {
 		time.Minute,
 		1,
 	)}
-	c, kubeClient := newController(t, inventory)
+	c, kubeClient, _ := newController(t, inventory)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -412,7 +436,7 @@ func TestStaleInventoryIsReportedWithoutAFrontier(t *testing.T) {
 }
 
 func TestUnreadInventoryIsDistinctFromDisabled(t *testing.T) {
-	c, kubeClient := newController(t, &fakeInventory{})
+	c, kubeClient, _ := newController(t, &fakeInventory{})
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -428,8 +452,8 @@ func TestUnreadInventoryIsDistinctFromDisabled(t *testing.T) {
 }
 
 func TestUnchangedViewIsNotRewritten(t *testing.T) {
-	c, kubeClient := newController(t, nil)
-	c.availability.RecordICE(
+	c, kubeClient, manager := newController(t, nil)
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 8, MemInGiB: 16}, availability.Unpinned,
 
@@ -449,7 +473,7 @@ func TestUnchangedViewIsNotRewritten(t *testing.T) {
 		t.Errorf("the view was rewritten (%s to %s) with nothing changed", first, got)
 	}
 
-	c.availability.RecordICE(
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 4, MemInGiB: 8}, availability.Unpinned,
 
@@ -464,7 +488,7 @@ func TestUnchangedViewIsNotRewritten(t *testing.T) {
 }
 
 func TestObservedAtIsRefreshedOnAHeartbeat(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -486,7 +510,7 @@ func TestObservedAtIsRefreshedOnAHeartbeat(t *testing.T) {
 }
 
 func TestADeletedViewIsRepublished(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -507,7 +531,7 @@ func TestAMissingCRDDoesNotFailTheReconcile(t *testing.T) {
 	uninstalled := &meta.NoKindMatchError{
 		GroupKind: v1alpha1.GroupVersion.WithKind("OxideCapacity").GroupKind(),
 	}
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 	c.kubeClient = interceptor.NewClient(kubeClient, interceptor.Funcs{
 		Get: func(
 			ctx context.Context,
@@ -545,7 +569,7 @@ func TestAMissingCRDDoesNotFailTheReconcile(t *testing.T) {
 }
 
 func TestQuotaIsOmittedWhenUnknown(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
@@ -557,7 +581,7 @@ func TestQuotaIsOmittedWhenUnknown(t *testing.T) {
 }
 
 func TestViewIsAddressableByName(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, _ := newController(t, nil)
 	if _, err := c.Reconcile(t.Context()); err != nil {
 		t.Fatalf("Reconcile returned %v", err)
 	}
@@ -573,15 +597,15 @@ func TestViewIsAddressableByName(t *testing.T) {
 }
 
 func TestReconcilePublishesTheSkippedRangeNotJustTheRefusal(t *testing.T) {
-	c, kubeClient := newController(t, nil)
+	c, kubeClient, manager := newController(t, nil)
 
-	c.availability.RecordICE(
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 32, MemInGiB: 64}, availability.Unpinned,
 
 		availability.ReasonCapacity)
 
-	c.availability.RecordICE(
+	manager.RecordICE(
 		t.Context(),
 		instancetype.Specs{Ncpus: 31, MemInGiB: 62}, availability.Unpinned,
 

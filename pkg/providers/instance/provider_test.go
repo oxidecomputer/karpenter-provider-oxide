@@ -463,8 +463,77 @@ func TestCreateCreatesTheInstanceStoppedAndStartsItSeparately(t *testing.T) {
 	if api.starts != 1 {
 		t.Errorf("the instance was started %d times, want exactly once", api.starts)
 	}
-	if instance.RunState != oxide.InstanceStateStarting {
-		t.Errorf("run state is %q, want starting", instance.RunState)
+	if instance.Instance.RunState != oxide.InstanceStateStarting {
+		t.Errorf("run state is %q, want starting", instance.Instance.RunState)
+	}
+	if instance.Adopted {
+		t.Fatal("a fresh create was reported as an adoption")
+	}
+}
+
+func TestCreateReportsAdoptionAndCleansTheUnusedAttempt(t *testing.T) {
+	api := &launchAPI{instanceCreateError: "ObjectAlreadyExists", instance: runningInstance()}
+	p := NewProvider(api.server(t), "project", nil)
+	result, err := p.Create(t.Context(), launchParams(), testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Adopted || result.Instance.Id != api.instance.Id {
+		t.Fatalf("existing instance was not reported as adopted: %+v", result)
+	}
+	if api.starts != 0 || len(api.diskDeletes) != 1 {
+		t.Fatalf(
+			"adoption restarted the instance or leaked its unused disk: starts=%d, deleted=%v",
+			api.starts,
+			api.diskDeletes,
+		)
+	}
+}
+
+func TestFailedAdoptionRetainsTheInstanceThatWasActuallyAttempted(t *testing.T) {
+	existing := runningInstance()
+	existing.RunState = oxide.InstanceStateStopped
+	existing.Ncpus = 16
+	api := &launchAPI{
+		instanceCreateError: "ObjectAlreadyExists",
+		instance:            existing,
+		startError:          "InsufficientCapacity",
+	}
+	p := NewProvider(api.server(t), "project", nil)
+	result, err := p.Create(t.Context(), launchParams(), testOptions())
+	if !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("Create() = %v, want capacity refusal", err)
+	}
+	if result == nil || !result.Adopted || result.Instance.Ncpus != 16 {
+		t.Fatalf("the caller cannot distinguish an adopted refusal from its new plan: %+v", result)
+	}
+}
+
+func TestDeleteRecoversOwnedDisksByIDAfterTheInstanceIsGone(t *testing.T) {
+	const ownedID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	const foreignID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	api := &fakeAPI{disks: map[string]*oxide.Disk{
+		ownedID: {
+			Id:          ownedID,
+			Name:        "original-data",
+			Description: testDiskMarker(ownership.KindDataDisk).Description(""),
+			State:       oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		},
+		foreignID: {
+			Id:    foreignID,
+			Name:  "foreign",
+			State: oxide.DiskState{Value: &oxide.DiskStateDetached{}},
+		},
+	}}
+	p := NewProvider(api.server(t), "project", nil)
+	err := p.Delete(t.Context(), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Teardown{
+		Owner: testOwner, DiskIDs: []string{ownedID, foreignID},
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete() = %v, want instance not found after disk cleanup", err)
+	}
+	if len(api.diskDeletes) != 1 || api.diskDeletes[0] != ownedID {
+		t.Fatalf("deleted %v, want only verified disk %s", api.diskDeletes, ownedID)
 	}
 }
 
@@ -496,7 +565,7 @@ func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
-	if instance.RunState == oxide.InstanceStateRunning {
+	if instance.Instance.RunState == oxide.InstanceStateRunning {
 		t.Fatal("the fake API never reports running, so this test proves nothing")
 	}
 	if api.instance.RunState != oxide.InstanceStateStarting {

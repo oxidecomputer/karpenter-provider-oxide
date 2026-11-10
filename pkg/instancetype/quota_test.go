@@ -17,7 +17,9 @@ type fakeQuotas struct {
 }
 
 func (f *fakeQuotas) Quota() (utilization.Quota, error) { return f.quota, f.err }
-func (f *fakeQuotas) Generation() uint64                { return f.gen }
+func (f *fakeQuotas) Snapshot() utilization.Snapshot {
+	return utilization.Snapshot{Quota: f.quota, Known: f.err == nil, Generation: f.gen}
+}
 
 func (f *fakeQuotas) Refresh(context.Context, bool) (bool, error) {
 	f.refreshes++
@@ -85,8 +87,12 @@ func TestUnreadableQuotaConstrainsNothing(t *testing.T) {
 			if !it.Offerings[0].Available {
 				t.Error("a shape was ruled out despite the quota being unknown")
 			}
-			if p.IsOverQuota(Specs{Ncpus: 252, MemInGiB: 540}) {
-				t.Error("IsOverQuota ruled out a shape despite the quota being unknown")
+			if !p.Availability().
+				Evaluate(availability.Request{Shape: Specs{Ncpus: 252, MemInGiB: 540}}).
+				Available {
+				t.Error(
+					"the availability decision ruled out a shape despite the quota being unknown",
+				)
 			}
 		})
 	}
@@ -133,11 +139,8 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 		{"under both", Specs{Ncpus: 2, MemInGiB: 4}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decision := manager.Check(availability.Request{Shape: tc.specs})
+			decision := p.Availability().Evaluate(availability.Request{Shape: tc.specs})
 			unavailable, reason := !decision.Available, decision.Reason
-			if p.IsOverQuota(tc.specs) {
-				unavailable, reason = true, availability.ReasonQuota
-			}
 			if unavailable != (tc.reason != "") {
 				t.Errorf("unavailable = %v, want %v", unavailable, tc.reason != "")
 			}
@@ -145,19 +148,5 @@ func TestQuotaAndRefusalsCombine(t *testing.T) {
 				t.Errorf("reason = %q, want %q", reason, tc.reason)
 			}
 		})
-	}
-}
-
-func TestRequestForClaimsNoStorage(t *testing.T) {
-	got := requestFor(Specs{Ncpus: 8, MemInGiB: 16})
-
-	if got.CPUs != 8 {
-		t.Errorf("CPUs = %d, want 8", got.CPUs)
-	}
-	if got.Memory != 16*GiB {
-		t.Errorf("Memory = %d, want %d", got.Memory, uint64(16*GiB))
-	}
-	if got.Storage != 0 {
-		t.Errorf("Storage = %d, want 0", got.Storage)
 	}
 }

@@ -249,7 +249,7 @@ var (
 		Name:      "backoff_seconds",
 		Help: "Seconds remaining before an unavailable instance shape is offered again. " +
 			"Zero means it is being offered now for a trial launch.",
-	}, []string{instanceTypeLabel})
+	}, []string{instanceTypeLabel, "cpu_platform"})
 
 	// ConsecutiveICEs is how many refusals in a row each unavailable shape has accumulated.
 	ConsecutiveICEs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -257,7 +257,7 @@ var (
 		Subsystem: capacitySubsystem,
 		Name:      "consecutive_ices",
 		Help:      "Consecutive refused launches recorded against an unavailable instance shape.",
-	}, []string{instanceTypeLabel})
+	}, []string{instanceTypeLabel, "cpu_platform"})
 
 	// FeasibleInstances is how many instances of a shape the rack could place right now.
 	FeasibleInstances = prometheus.NewGaugeVec(prometheus.GaugeOpts{

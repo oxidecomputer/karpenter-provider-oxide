@@ -211,6 +211,35 @@ spec:
                 description: ObservedAt is when this view was last published.
                 format: date-time
                 type: string
+              placementRefusals:
+                items:
+                  properties:
+                    consecutiveRefusals:
+                      type: integer
+                    fromMemoryGiB:
+                      type: integer
+                    fromNcpus:
+                      type: integer
+                    gated:
+                      type: boolean
+                    lastRefusal:
+                      format: date-time
+                      type: string
+                    message:
+                      type: string
+                    placement:
+                      type: string
+                    retryAfter:
+                      format: date-time
+                      type: string
+                  required:
+                  - consecutiveRefusals
+                  - fromMemoryGiB
+                  - fromNcpus
+                  - gated
+                  - placement
+                  type: object
+                type: array
               quota:
                 description: Quota is the silo's remaining entitlement.
                 properties:
@@ -222,6 +251,11 @@ spec:
                   memoryGiB:
                     format: int64
                     type: integer
+                  observedAt:
+                    format: date-time
+                    type: string
+                  stale:
+                    type: boolean
                   storageGiB:
                     format: int64
                     type: integer

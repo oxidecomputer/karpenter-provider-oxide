@@ -44,6 +44,11 @@ type Options struct {
 	ExternalIPFallbacks [][]oxide.ExternalIpCreate
 }
 
+type LaunchResult struct {
+	Instance *oxide.Instance
+	Adopted  bool
+}
+
 // OwnedDisk is a disk whose immutable ID and description marker have both been verified.
 type OwnedDisk struct {
 	ID     string
@@ -109,7 +114,7 @@ func (p *Provider) Create(
 	ctx context.Context,
 	params oxide.InstanceCreateParams,
 	opts Options,
-) (*oxide.Instance, error) {
+) (*LaunchResult, error) {
 	if params.Body == nil || params.Body.Name == "" {
 		return nil, errors.New("instance create requires a body with a name")
 	}
@@ -193,7 +198,7 @@ func (p *Provider) Create(
 		return nil, err
 	}
 	log.FromContext(ctx).V(1).Info("instance started", "instance", params.Body.Name)
-	return started, nil
+	return &LaunchResult{Instance: started}, nil
 }
 
 // Reboot asks the rack to restart an instance in place. A reboot already in
@@ -380,7 +385,7 @@ func (p *Provider) adopt(
 	name string,
 	plannedDisks []OwnedDisk,
 	opts Options,
-) (*oxide.Instance, error) {
+) (*LaunchResult, error) {
 	log.FromContext(ctx).V(1).Info("instance already exists, adopting it", "instance", name)
 
 	instance, err := p.ox.InstanceView(ctx, oxide.InstanceViewParams{
@@ -407,26 +412,28 @@ func (p *Provider) adoptInstance(
 	plannedDisks []OwnedDisk,
 	opts Options,
 	sameLaunch bool,
-) (*oxide.Instance, error) {
+) (*LaunchResult, error) {
 	name := string(instance.Name)
 	if err := ownership.Verify(instance.Description, opts.Owner); err != nil {
 		p.rejectOwnership(ctx, "adopt", "instance", instance.Id, name, err)
 		p.abandonDisks(ctx, plannedDisks, err)
 		return nil, err
 	}
+	result := &LaunchResult{Instance: instance, Adopted: true}
 
 	if instance.RunState == oxide.InstanceStateCreating {
 		settled, err := p.awaitSettled(ctx, instance)
 		if err != nil {
 			p.abandonUnlessStuck(ctx, instance.Id, opts.Owner, plannedDisks, err)
 			if errors.Is(err, ErrNotFound) {
-				return nil, fmt.Errorf(
+				return result, fmt.Errorf(
 					"instance %s already exists but was deleted before it could be adopted", name,
 				)
 			}
-			return nil, err
+			return result, err
 		}
 		instance = settled
+		result.Instance = settled
 	}
 
 	switch instance.RunState {
@@ -436,22 +443,23 @@ func (p *Provider) adoptInstance(
 		oxide.InstanceStateRebooting,
 		oxide.InstanceStateMigrating:
 		p.abandonUnusedDisks(ctx, plannedDisks, sameLaunch)
-		return instance, nil
+		return result, nil
 
 	case oxide.InstanceStateStopped:
 
 		if err := p.joinAffinityGroups(ctx, instance.Id, opts.AffinityGroups); err != nil {
 			p.abandon(ctx, instance.Id, opts.Owner, plannedDisks, err)
-			return nil, err
+			return result, err
 		}
 		started, err := p.start(ctx, instance.Id)
 		if err != nil {
 
 			p.abandon(ctx, instance.Id, opts.Owner, plannedDisks, err)
-			return nil, err
+			return result, err
 		}
 		p.abandonUnusedDisks(ctx, plannedDisks, sameLaunch)
-		return started, nil
+		result.Instance = started
+		return result, nil
 
 	default:
 		abandonErr := fmt.Errorf(
@@ -463,11 +471,11 @@ func (p *Provider) adoptInstance(
 			deleteErr = p.Delete(cleanupCtx, instance.Id, Teardown{Owner: opts.Owner})
 		})
 		if deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
-			return nil, fmt.Errorf(
+			return result, fmt.Errorf(
 				"%w, and it could not be terminated, %w", abandonErr, deleteErr,
 			)
 		}
-		return nil, fmt.Errorf("%w, so it was terminated", abandonErr)
+		return result, fmt.Errorf("%w, so it was terminated", abandonErr)
 	}
 }
 
@@ -727,6 +735,7 @@ type Teardown struct {
 	BootDiskName string
 	// DiskPrefix is the prefix this launch named its disks with.
 	DiskPrefix string
+	DiskIDs    []string
 }
 
 func (p *Provider) rejectOwnership(

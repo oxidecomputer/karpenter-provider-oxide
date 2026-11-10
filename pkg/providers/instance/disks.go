@@ -299,14 +299,14 @@ func (p *Provider) ownedTeardownDisks(
 	teardown Teardown,
 ) ([]OwnedDisk, error) {
 	var candidates []oxide.Disk
+	refs := append([]string{}, teardown.DiskIDs...)
 	if teardown.BootDiskName != "" {
-		disk, err := p.disks.View(ctx, teardown.BootDiskName)
+		refs = append(refs, teardown.BootDiskName)
+	}
+	for _, ref := range refs {
+		disk, err := p.disks.View(ctx, ref)
 		if err != nil && !errors.Is(err, oxide.ErrObjectNotFound) {
-			return nil, fmt.Errorf(
-				"unable to view boot disk candidate %s, %w",
-				teardown.BootDiskName,
-				err,
-			)
+			return nil, fmt.Errorf("unable to view disk candidate %s, %w", ref, err)
 		}
 		if err == nil {
 			candidates = append(candidates, *disk)

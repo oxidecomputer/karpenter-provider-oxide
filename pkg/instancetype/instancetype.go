@@ -81,8 +81,7 @@ func (c ShapeConfig) Validate() error {
 type QuotaProvider interface {
 	// Quota returns the current quota.
 	Quota() (utilization.Quota, error)
-	// Generation changes whenever the quota does.
-	Generation() uint64
+	Snapshot() utilization.Snapshot
 	// Refresh re-reads the quota.
 	Refresh(ctx context.Context, force bool) (bool, error)
 }
@@ -167,14 +166,7 @@ func (i *Provider) Get(
 
 // UnavailableInstanceTypeCount is how many instance types the scheduler is currently not being offered.
 func (i *Provider) UnavailableInstanceTypeCount() (unavailable, total int) {
-	// Availability does not vary with the nodeclass, so any catalog answers this.
-	instanceTypes := i.InstanceTypes(Options{})
-	for _, it := range instanceTypes {
-		if len(it.Offerings.Available()) == 0 {
-			unavailable++
-		}
-	}
-	return unavailable, len(instanceTypes)
+	return i.AvailabilityCounts(i.Availability())
 }
 
 // LargestShapeThatFits returns the largest shape the provider offers that fits in this much free space.
@@ -334,16 +326,6 @@ func geometricValues(min, max int, incrementPercent float64) []int {
 	return values
 }
 
-// IsOverQuota reports whether the current silo quota rules out this shape.
-func (i *Provider) IsOverQuota(specs Specs) bool {
-	quota, err := i.quota()
-	if err != nil {
-		return false
-	}
-	admits, _ := quota.Admits(requestFor(specs))
-	return !admits
-}
-
 // Quota returns the silo quota.
 func (i *Provider) Quota() (utilization.Quota, error) {
 	return i.quota()
@@ -369,13 +351,6 @@ func (i *Provider) quota() (utilization.Quota, error) {
 	return i.quotas.Quota()
 }
 
-func requestFor(specs Specs) utilization.Request {
-	return utilization.Request{
-		CPUs:   int64(specs.Ncpus),
-		Memory: uint64(specs.MemInGiB) * GiB,
-	}
-}
-
 // InstanceTypes returns the current instance type catalog for the nodeclass
 // these options describe. A non-positive boot size leaves ephemeral storage
 // unadvertised, which only fits callers that never schedule against it.
@@ -383,10 +358,8 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	current := generation{availability: i.availability.Generation()}
-	if i.quotas != nil {
-		current.quota = i.quotas.Generation()
-	}
+	reading := i.Availability()
+	current := generation{availability: reading.Generation(), quota: reading.Quota().Generation}
 	if i.generation != current {
 		i.instanceTypes = nil
 	}
@@ -396,9 +369,6 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 	}
 	ephemeral, hasEphemeral := EphemeralStorageFor(opts.BootSizeBytes, opts.Kubelet.Reserved)
 
-	reading := i.availability.Snapshot()
-
-	quota, quotaErr := i.quota()
 	var instanceTypes []*cloudprovider.InstanceType
 	for _, specs := range i.shapes {
 		cpus, mem := specs.Ncpus, specs.MemInGiB
@@ -416,18 +386,13 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
 
-		overQuota := false
-		if quotaErr == nil {
-			admits, _ := quota.Admits(requestFor(specs))
-			overQuota = !admits
-		}
 		// One offering per pin, so a refusal under a narrow pin leaves the broader
 		// ones on offer. An unpinned launch is as placeable as any of them.
 		offerings := make(cloudprovider.Offerings, 0, len(v1alpha1.CPUPlatforms))
 		for _, platform := range v1alpha1.CPUPlatforms {
 			refused, _ := reading.Unavailable(specs, availability.Platform(platform))
 			offerings = append(offerings, &cloudprovider.Offering{
-				Available: !refused && !overQuota,
+				Available: !refused,
 
 				Price: price(specs),
 				Requirements: scheduling.Requirements{

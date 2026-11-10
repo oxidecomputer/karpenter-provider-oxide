@@ -130,6 +130,7 @@ var (
 	// AnnotationEphemeralIPs is the external addresses the instance was launched with.
 	AnnotationEphemeralIPs = apis.Group + "/ephemeral-ips"
 
+	AnnotationDiskIDs = apis.Group + "/disk-ids"
 	// AnnotationDiskPrefix is the prefix every disk of this launch was named with, boot disk included.
 	AnnotationDiskPrefix = apis.Group + "/disk-prefix"
 	// AnnotationBootDisk is the launch's boot disk name.
