@@ -146,6 +146,8 @@ func (e *Env) cloudInitViaSSH(
 		return
 	}
 	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	c, chans, reqs, err := ssh.NewClientConn(conn, address, config)
 	if err != nil {
 		write("cloud-init-output.log", []byte(fmt.Sprintf("ssh %s: %v\n", address, err)))

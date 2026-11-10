@@ -21,9 +21,9 @@ func TestLaunch(t *testing.T) {
 
 	nc := e.NodeClass("launch")
 	pool := e.NodePool(nc)
-	pod := e.Pod(pool, "cpu=1,memory=256Mi")
+	pod := e.Pod(pool, "cpu=1,memory=256Mi,ephemeral-storage=1Gi")
 	e.Create(t, nc, pool, pod)
-	node := e.EventuallyNodeReady(g, pool)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 
 	g.Expect(node.Labels).To(gomega.HaveKeyWithValue(karpv1.NodePoolLabelKey, pool.Name))
 	g.Expect(node.Labels).To(gomega.HaveKeyWithValue(v1alpha1.LabelNodeClass, nc.Name))
@@ -42,6 +42,11 @@ func TestLaunch(t *testing.T) {
 		node.Status.Allocatable[corev1.ResourceMemory]
 	g.Expect(gotMem.Cmp(wantMem)).To(gomega.BeNumerically(">=", 0),
 		"allocatable memory: node %s, nodeclaim %s", gotMem.String(), wantMem.String())
+	wantStorage, gotStorage := claim.Status.Allocatable[corev1.ResourceEphemeralStorage],
+		node.Status.Allocatable[corev1.ResourceEphemeralStorage]
+	g.Expect(wantStorage.Sign()).To(gomega.BeNumerically(">", 0), "nodeclaim ephemeral storage")
+	g.Expect(gotStorage.Cmp(wantStorage)).To(gomega.BeNumerically(">=", 0),
+		"allocatable ephemeral storage: node %s, nodeclaim %s", gotStorage.String(), wantStorage.String())
 
 	h := e.Host(t, node)
 	disks, err := h.Disks(ctx)

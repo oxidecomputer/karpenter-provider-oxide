@@ -30,16 +30,16 @@ func TestScaleDownWhenEmpty(t *testing.T) {
 	})
 	pod := e.Pod(pool, resources)
 	e.Create(t, nc, pool, pod)
-	node := e.EventuallyNodeReady(g, pool)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 	claim, err := e.NodeClaim(ctx, pool)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	launch := framework.LaunchOf(claim)
 
 	g.Expect(e.Kube.Delete(ctx, pod)).To(gomega.Succeed())
 
-	e.EventuallyNoNodeClaims(g, pool)
-	e.EventuallyNodeGone(g, node.Name)
-	e.EventuallyLaunchGone(g, launch)
+	e.EventuallyNoNodeClaims(ctx, g, pool)
+	e.EventuallyNodeGone(ctx, g, node.Name)
+	e.EventuallyLaunchGone(ctx, g, launch)
 
 	var currentPool karpv1.NodePool
 	g.Expect(e.Kube.Get(ctx, client.ObjectKeyFromObject(pool), &currentPool)).To(gomega.Succeed())
@@ -60,14 +60,14 @@ func TestNodeClaimDeletionReplacesNode(t *testing.T) {
 	pool := e.NodePool(nc)
 	deployment := e.Deployment(pool, 1, resources)
 	e.Create(t, nc, pool, deployment)
-	old := e.EventuallyNodeReady(g, pool)
+	old := e.EventuallyNodeReady(ctx, g, pool)
 	oldClaim, err := e.NodeClaim(ctx, pool)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	launch := framework.LaunchOf(oldClaim)
 
 	g.Expect(e.Kube.Delete(ctx, oldClaim)).To(gomega.Succeed())
 
-	node := e.EventuallyNodeReady(g, pool)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 	g.Expect(node.Name).NotTo(gomega.Equal(old.Name))
 	claim, err := e.NodeClaim(ctx, pool)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -76,8 +76,8 @@ func TestNodeClaimDeletionReplacesNode(t *testing.T) {
 	g.Expect(replacement.InstanceID).NotTo(gomega.Equal(launch.InstanceID))
 	g.Expect(replacement.DiskPrefix).NotTo(gomega.Equal(launch.DiskPrefix))
 
-	e.EventuallyNodeGone(g, old.Name)
-	e.EventuallyLaunchGone(g, launch)
+	e.EventuallyNodeGone(ctx, g, old.Name)
+	e.EventuallyLaunchGone(ctx, g, launch)
 	claims, err := e.NodeClaims(ctx, pool)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(claims).To(gomega.HaveLen(1))
@@ -99,21 +99,25 @@ func TestInstanceDeletedOutOfBand(t *testing.T) {
 	pool := e.NodePool(nc)
 	deployment := e.Deployment(pool, 1, resources)
 	e.Create(t, nc, pool, deployment)
-	old := e.EventuallyNodeReady(g, pool)
+	old := e.EventuallyNodeReady(ctx, g, pool)
 	oldClaim, err := e.NodeClaim(ctx, pool)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	launch := framework.LaunchOf(oldClaim)
 
-	g.Expect(e.DeleteInstance(ctx, launch.InstanceID)).To(gomega.Succeed())
-	// Nexus leaves the disks behind.
-	disks, err := e.DisksWithPrefix(ctx, launch.DiskPrefix)
+	disks, err := e.Host(t, old).Disks(ctx)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(disks).To(gomega.HaveLen(2), "disks left behind by instance %s", launch.InstanceID)
+	g.Expect(disks).To(gomega.HaveLen(2), "disks attached to instance %s", launch.InstanceID)
+	launch.DiskIDs = nil
+	for _, disk := range disks {
+		launch.DiskIDs = append(launch.DiskIDs, disk.Id)
+	}
 
-	e.EventuallyNodeClaimDeleting(g, oldClaim.Name)
-	node := e.EventuallyNodeReady(g, pool)
+	g.Expect(e.DeleteInstance(ctx, launch.InstanceID)).To(gomega.Succeed())
+
+	e.EventuallyNodeClaimDeleting(ctx, g, oldClaim.Name)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 	g.Expect(node.Name).NotTo(gomega.Equal(old.Name))
 
-	e.EventuallyNodeGone(g, old.Name)
-	e.EventuallyLaunchGone(g, launch)
+	e.EventuallyNodeGone(ctx, g, old.Name)
+	e.EventuallyLaunchGone(ctx, g, launch)
 }

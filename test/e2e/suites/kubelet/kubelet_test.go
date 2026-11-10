@@ -29,7 +29,7 @@ func TestKubeletConfiguration(t *testing.T) {
 	// daemons, so ask for enough memory to land on a bigger one.
 	pod := e.Pod(pool, "cpu=1,memory=1Gi")
 	e.Create(t, nc, pool, pod)
-	node := e.EventuallyNodeReady(g, pool)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 
 	config, err := e.Host(t, node).KubeletConfig(ctx)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -38,4 +38,16 @@ func TestKubeletConfiguration(t *testing.T) {
 
 	pods := node.Status.Capacity[corev1.ResourcePods]
 	g.Expect(pods.Value()).To(gomega.BeEquivalentTo(50))
+	claim, err := e.NodeClaim(ctx, pool)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(claim).NotTo(gomega.BeNil())
+	claimPods, nodePods := claim.Status.Allocatable[corev1.ResourcePods],
+		node.Status.Allocatable[corev1.ResourcePods]
+	g.Expect(claimPods.Value()).To(gomega.BeEquivalentTo(50))
+	g.Expect(nodePods.Cmp(claimPods)).To(gomega.BeZero())
+	claimMemory, nodeMemory := claim.Status.Allocatable[corev1.ResourceMemory],
+		node.Status.Allocatable[corev1.ResourceMemory]
+	g.Expect(claimMemory.Sign()).To(gomega.BeNumerically(">", 0), "nodeclaim memory")
+	g.Expect(nodeMemory.Cmp(claimMemory)).To(gomega.BeNumerically(">=", 0),
+		"allocatable memory: node %s, nodeclaim %s", nodeMemory.String(), claimMemory.String())
 }

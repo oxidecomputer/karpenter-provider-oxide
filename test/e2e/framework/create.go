@@ -30,15 +30,21 @@ func (e *Env) Create(t *testing.T, objs ...client.Object) {
 		}
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), e.DeleteTimeout+time.Minute)
-		defer cancel()
-		if t.Failed() {
+		diagnose := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
 			e.diagnose(ctx, t, nc, pool)
+		}
+		failed := t.Failed()
+		if failed {
+			diagnose()
 			if e.Keep {
 				t.Logf("E2E_KEEP=true: leaving %s behind", nc.Name)
 				return
 			}
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), e.DeleteTimeout)
+		defer cancel()
 		var launches []Launch
 		if pool != nil {
 			launches = e.launches(ctx, t, pool)
@@ -49,7 +55,12 @@ func (e *Env) Create(t *testing.T, objs ...client.Object) {
 				t.Errorf("deleting %T %s: %v", obj, obj.GetName(), err)
 			}
 		}
-		e.EventuallyGone(ctx, t, pool, launches)
+		if err := e.waitForCleanup(ctx, pool, launches); err != nil {
+			t.Error(err)
+		}
+		if !failed && t.Failed() {
+			diagnose()
+		}
 	})
 	for _, obj := range objs {
 		if err := e.Kube.Create(ctx, obj); err != nil {
@@ -64,6 +75,7 @@ type Launch struct {
 	NodeClaim  string
 	InstanceID string
 	DiskPrefix string
+	DiskIDs    []string
 }
 
 // LaunchOf reads the launch off a nodeclaim.
@@ -72,6 +84,7 @@ func LaunchOf(claim *karpv1.NodeClaim) Launch {
 		NodeClaim:  claim.Name,
 		InstanceID: instanceID(claim.Status.ProviderID),
 		DiskPrefix: claim.Annotations[v1alpha1.AnnotationDiskPrefix],
+		DiskIDs:    v1alpha1.ParseIDs(claim.Annotations[v1alpha1.AnnotationDiskIDs]).UnsortedList(),
 	}
 }
 

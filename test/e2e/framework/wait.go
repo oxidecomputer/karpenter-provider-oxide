@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"testing"
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/onsi/gomega"
@@ -13,22 +12,28 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 )
 
 // EventuallyNodeReady is EventuallyNodesReady for a pool that should hold one node.
-func (e *Env) EventuallyNodeReady(g gomega.Gomega, pool *karpv1.NodePool) *corev1.Node {
-	return e.EventuallyNodesReady(g, pool, 1)[0]
+func (e *Env) EventuallyNodeReady(
+	ctx context.Context,
+	g gomega.Gomega,
+	pool *karpv1.NodePool,
+) *corev1.Node {
+	return e.EventuallyNodesReady(ctx, g, pool, 1, 1)[0]
 }
 
 // EventuallyNodesReady returns n ready nodes with ready, non-deleting NodeClaims
 // once all non-deleting pool pods are running on them.
 // More than n non-deleting NodeClaims fails immediately.
 func (e *Env) EventuallyNodesReady(
-	g gomega.Gomega, pool *karpv1.NodePool, n int,
+	ctx context.Context, g gomega.Gomega, pool *karpv1.NodePool, n, podCount int,
 ) []*corev1.Node {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, e.ReadyTimeout)
+	defer cancel()
 	var nodes []*corev1.Node
 	g.Eventually(func(g gomega.Gomega) {
 		claims, err := e.liveNodeClaims(ctx, pool)
@@ -57,24 +62,54 @@ func (e *Env) EventuallyNodesReady(
 			byName[node.Name] = true
 		}
 
-		var pods corev1.PodList
-		g.Expect(e.Kube.List(ctx, &pods, client.InNamespace(e.Namespace), client.MatchingLabels{
-			LabelPool: pool.Name,
-		})).To(gomega.Succeed())
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-			g.Expect(pod.Status.Phase).To(gomega.Equal(corev1.PodRunning),
-				"pod %s is %s on %q: %s %s", pod.Name, pod.Status.Phase, pod.Spec.NodeName,
-				pod.Status.Reason, pod.Status.Message)
-			g.Expect(byName).To(gomega.HaveKey(pod.Spec.NodeName),
-				"pod %s runs on %s, not on a node of the pool", pod.Name, pod.Spec.NodeName)
-		}
+		g.Expect(e.poolPodsReady(ctx, pool, podCount, byName)).To(gomega.Succeed())
 		nodes = found
-	}).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+	}).WithContext(ctx).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
 	return nodes
+}
+
+func (e *Env) poolPodsReady(
+	ctx context.Context, pool *karpv1.NodePool, want int, nodes map[string]bool,
+) error {
+	var pods corev1.PodList
+	if err := e.Kube.List(ctx, &pods, client.InNamespace(e.Namespace), client.MatchingLabels{
+		LabelPool: pool.Name,
+	}); err != nil {
+		return err
+	}
+	count := 0
+	var errs []error
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		count++
+		ready := false
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+				ready = true
+			}
+		}
+		if pod.Status.Phase != corev1.PodRunning || !ready {
+			errs = append(errs, fmt.Errorf(
+				"pod %s is not ready: phase=%s node=%q: %s %s",
+				pod.Name,
+				pod.Status.Phase,
+				pod.Spec.NodeName,
+				pod.Status.Reason,
+				pod.Status.Message,
+			))
+		}
+		if !nodes[pod.Spec.NodeName] {
+			errs = append(errs, fmt.Errorf("pod %s runs on %q, not on an expected node",
+				pod.Name, pod.Spec.NodeName))
+		}
+	}
+	if count != want {
+		errs = append(errs, fmt.Errorf("nodepool %s has %d non-terminating pods, want %d",
+			pool.Name, count, want))
+	}
+	return errors.Join(errs...)
 }
 
 // NodeClaims lists every nodeclaim of the pool, deleting ones included.
@@ -126,8 +161,9 @@ func (e *Env) NodeClaim(ctx context.Context, pool *karpv1.NodePool) (*karpv1.Nod
 }
 
 // EventuallyNodeClaimDeleting waits until the nodeclaim is being deleted, or is gone.
-func (e *Env) EventuallyNodeClaimDeleting(g gomega.Gomega, name string) {
-	ctx := context.Background()
+func (e *Env) EventuallyNodeClaimDeleting(ctx context.Context, g gomega.Gomega, name string) {
+	ctx, cancel := context.WithTimeout(ctx, e.DeleteTimeout)
+	defer cancel()
 	g.Eventually(func(g gomega.Gomega) {
 		var claim karpv1.NodeClaim
 		err := e.Kube.Get(ctx, types.NamespacedName{Name: name}, &claim)
@@ -137,80 +173,105 @@ func (e *Env) EventuallyNodeClaimDeleting(g gomega.Gomega, name string) {
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		g.Expect(claim.DeletionTimestamp).NotTo(gomega.BeNil(),
 			"nodeclaim %s is not deleting: %s", name, describe(claim.StatusConditions()))
-	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+	}).WithContext(ctx).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
 }
 
 // EventuallyNoNodeClaims waits until the pool has no nodeclaims at all.
-func (e *Env) EventuallyNoNodeClaims(g gomega.Gomega, pool *karpv1.NodePool) {
-	ctx := context.Background()
+func (e *Env) EventuallyNoNodeClaims(ctx context.Context, g gomega.Gomega, pool *karpv1.NodePool) {
+	ctx, cancel := context.WithTimeout(ctx, e.DeleteTimeout)
+	defer cancel()
 	g.Eventually(func(g gomega.Gomega) {
 		claims, err := e.NodeClaims(ctx, pool)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		g.Expect(claims).To(gomega.BeEmpty(), "nodeclaims of %s still exist: %s",
 			pool.Name, describeClaims(claims))
-	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+	}).WithContext(ctx).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
 }
 
 // EventuallyNodeGone waits until the node object is deleted.
-func (e *Env) EventuallyNodeGone(g gomega.Gomega, name string) {
-	ctx := context.Background()
+func (e *Env) EventuallyNodeGone(ctx context.Context, g gomega.Gomega, name string) {
+	ctx, cancel := context.WithTimeout(ctx, e.DeleteTimeout)
+	defer cancel()
 	g.Eventually(func() error {
 		return e.Kube.Get(ctx, types.NamespacedName{Name: name}, &corev1.Node{})
-	}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).
+	}).WithContext(ctx).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).
 		Should(gomega.MatchError(apierrors.IsNotFound, "node not found"), "node %s", name)
 }
 
 // EventuallyLaunchGone waits until the launch's instance and disks are gone from Oxide.
-func (e *Env) EventuallyLaunchGone(g gomega.Gomega, l Launch) {
-	ctx := context.Background()
-	if l.InstanceID != "" {
-		g.Eventually(func(g gomega.Gomega) {
-			_, err := e.Oxide.InstanceView(ctx, oxide.InstanceViewParams{
-				Instance: oxide.NameOrId(l.InstanceID),
-			})
-			g.Expect(errors.Is(err, oxide.ErrObjectNotFound)).To(gomega.BeTrue(),
-				"instance %s of nodeclaim %s still exists (%v)", l.InstanceID, l.NodeClaim, err)
-		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
-	}
-	if l.DiskPrefix != "" {
-		g.Eventually(func(g gomega.Gomega) {
-			disks, err := e.DisksWithPrefix(ctx, l.DiskPrefix)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			g.Expect(disks).To(gomega.BeEmpty(),
-				"disks of nodeclaim %s still exist: %s", l.NodeClaim, disks)
-		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
-	}
+func (e *Env) EventuallyLaunchGone(ctx context.Context, g gomega.Gomega, l Launch) {
+	g.Expect(e.waitForCleanup(ctx, nil, []Launch{l})).To(gomega.Succeed())
 }
 
-// EventuallyGone is the cleanup's wait: the pool's nodeclaims, then each launch's Oxide
-// instance and disks, must disappear. Failures are reported but do not stop the
-// remaining checks.
-func (e *Env) EventuallyGone(
-	ctx context.Context,
-	t *testing.T,
-	pool *karpv1.NodePool,
-	launches []Launch,
-) {
-	t.Helper()
-	g := gomega.NewGomega(func(message string, _ ...int) {
-		t.Helper()
-		t.Errorf("%s", message)
-	})
-	if pool != nil {
-		g.Eventually(func(g gomega.Gomega) {
-			claims, err := e.NodeClaims(ctx, pool)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			for _, c := range claims {
-				g.Expect(c.DeletionTimestamp).NotTo(gomega.BeNil(),
-					"nodeclaim %s of deleted nodepool %s is not deleting", c.Name, pool.Name)
+func (e *Env) launchGone(ctx context.Context, l Launch) error {
+	var errs []error
+	if l.InstanceID != "" {
+		_, err := e.Oxide.InstanceView(ctx, oxide.InstanceViewParams{
+			Instance: oxide.NameOrId(l.InstanceID),
+		})
+		if !errors.Is(err, oxide.ErrObjectNotFound) {
+			errs = append(
+				errs,
+				fmt.Errorf("instance %s of nodeclaim %s still exists or cannot be read: %v",
+					l.InstanceID, l.NodeClaim, err),
+			)
+		}
+	}
+	for _, id := range l.DiskIDs {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		_, err := e.Oxide.DiskView(ctx, oxide.DiskViewParams{Disk: oxide.NameOrId(id)})
+		if !errors.Is(err, oxide.ErrObjectNotFound) {
+			errs = append(
+				errs,
+				fmt.Errorf("disk %s of nodeclaim %s still exists or cannot be read: %v",
+					id, l.NodeClaim, err),
+			)
+		}
+	}
+	if len(l.DiskIDs) == 0 && l.DiskPrefix != "" {
+		disks, err := e.DisksWithPrefix(ctx, l.DiskPrefix)
+		if err != nil {
+			errs = append(errs, err)
+		} else if len(disks) != 0 {
+			errs = append(
+				errs,
+				fmt.Errorf("disks of nodeclaim %s still exist: %s", l.NodeClaim, disks),
+			)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (e *Env) waitForCleanup(ctx context.Context, pool *karpv1.NodePool, launches []Launch) error {
+	var lastErr error
+	err := wait.PollUntilContextTimeout(ctx, e.Poll, e.DeleteTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			var errs []error
+			if pool != nil {
+				claims, err := e.NodeClaims(ctx, pool)
+				if err != nil {
+					errs = append(errs, err)
+				} else if len(claims) != 0 {
+					errs = append(errs, fmt.Errorf("nodeclaims of %s still exist: %s",
+						pool.Name, describeClaims(claims)))
+				}
 			}
-			g.Expect(claims).To(gomega.BeEmpty(), "nodeclaims of %s still exist: %s",
-				pool.Name, describeClaims(claims))
-		}).WithTimeout(e.DeleteTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
+			for _, l := range launches {
+				if err := ctx.Err(); err != nil {
+					errs = append(errs, err)
+					break
+				}
+				errs = append(errs, e.launchGone(ctx, l))
+			}
+			lastErr = errors.Join(errs...)
+			return lastErr == nil, nil
+		})
+	if err != nil {
+		return fmt.Errorf("waiting for cleanup: %w", errors.Join(err, lastErr))
 	}
-	for _, l := range launches {
-		e.EventuallyLaunchGone(g, l)
-	}
+	return nil
 }
 
 // DisksWithPrefix names the project's disks whose name starts with prefix.

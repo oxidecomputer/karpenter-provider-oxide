@@ -3,6 +3,7 @@
 package disks
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -39,7 +40,7 @@ func TestDiskSets(t *testing.T) {
 	pool := e.NodePool(nc)
 	pod := e.Pod(pool, "cpu=1,memory=256Mi")
 	e.Create(t, nc, pool, pod)
-	node := e.EventuallyNodeReady(g, pool)
+	node := e.EventuallyNodeReady(ctx, g, pool)
 	h := e.Host(t, node)
 
 	// Data disks are named <prefix><index>-<set>-<ordinal>, index counting from 1 after the boot disk.
@@ -122,8 +123,18 @@ func TestDiskSets(t *testing.T) {
 		}
 	}
 
-	status, err := h.CloudInit(ctx)
-	g.Expect(err).NotTo(gomega.HaveOccurred())
+	cloudCtx, cancel := context.WithTimeout(ctx, e.ReadyTimeout)
+	defer cancel()
+	var status *host.CloudInitStatus
+	g.Eventually(func(g gomega.Gomega) {
+		var err error
+		status, err = h.CloudInit(cloudCtx)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(status.Status).
+			NotTo(gomega.Or(gomega.Equal("running"), gomega.Equal("not started")),
+				"cloud-init: %+v", status)
+
+	}).WithContext(cloudCtx).WithTimeout(e.ReadyTimeout).WithPolling(e.Poll).Should(gomega.Succeed())
 	g.Expect(status.Status).To(gomega.Equal("done"), "cloud-init: %+v", status)
 	g.Expect(status.Errors).To(gomega.BeEmpty(), "cloud-init errors")
 	g.Expect(status.RecoverableErrors).NotTo(gomega.HaveKey("ERROR"), "cloud-init: %+v", status)

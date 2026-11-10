@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/oxidecomputer/oxide.go/oxide"
 	corev1 "k8s.io/api/core/v1"
@@ -52,7 +53,9 @@ func Node(t *testing.T, env Env, node *corev1.Node, instanceID, diskPrefix strin
 		if h.probe == nil {
 			return
 		}
-		if err := h.probe.Delete(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := h.probe.Delete(ctx); err != nil {
 			t.Logf("deleting probe pod: %v", err)
 		}
 	})
