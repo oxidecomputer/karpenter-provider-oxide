@@ -172,7 +172,11 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("unable to read the token's silo: %w", err)
 	}
-	instanceTypes.SetTopology(instancetype.SiloTopology(string(me.SiloName)))
+	topology, err := instancetype.SiloTopology(host, string(me.SiloName), me.SiloId)
+	if err != nil {
+		return fmt.Errorf("configuring silo topology: %w", err)
+	}
+	instanceTypes.SetTopology(topology)
 
 	projects := projectprovider.NewResolver(ox, project, providers.CoalesceWindow)
 	images := image.NewProvider(ox, projects, providers.CoalesceWindow)

@@ -39,23 +39,6 @@ const (
 	memCostWeight = 0.125
 )
 
-// Topology is the region and zone every offering is placed in.
-type Topology struct {
-	Region string
-	Zone   string
-}
-
-// SiloTopology names the silo as both region and zone. A silo is one control plane
-// that will span availability zones, which is what a region is. Until an AZ can be
-// targeted at launch there is no finer failure domain to offer, so the zone is the
-// silo too; it becomes the AZ name once there is one to pick.
-func SiloTopology(silo string) Topology {
-	return Topology{Region: silo, Zone: silo}
-}
-
-// DefaultTopology stands in until the silo is known.
-var DefaultTopology = SiloTopology("silo")
-
 type Provider struct {
 	mu sync.Mutex
 	// instanceTypes is the built catalog, keyed by the options it was built for.

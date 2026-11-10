@@ -135,6 +135,12 @@ var (
 	// AnnotationBootDisk is the launch's boot disk name.
 	AnnotationBootDisk = apis.Group + "/boot-disk"
 
+	// Silo identity annotations preserve the full endpoint hostname and API identity
+	// independently of the label-safe region and zone values.
+	AnnotationSiloHostname = apis.Group + "/silo-hostname"
+	AnnotationSiloName     = apis.Group + "/silo-name"
+	AnnotationSiloID       = apis.Group + "/silo-id"
+
 	// AnnotationHourlyPrice records the effective hourly launch price.
 	AnnotationHourlyPrice = apis.Group + "/hourly-price"
 

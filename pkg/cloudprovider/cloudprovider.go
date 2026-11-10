@@ -876,6 +876,10 @@ func (c *OxideCloudProvider) InstanceToNodeClaim(
 	}
 	labels = lo.Assign(labels, nodeClaim.Labels)
 	nodeClaim.Labels = labels
+	nodeClaim.Annotations = lo.Assign(
+		nodeClaim.Annotations,
+		c.instanceTypeProvider.TopologyAnnotations(),
+	)
 	if nodeClass != nil {
 		nodeClaim.Status.ImageID = lo.FirstOrEmpty(nodeClass.Status.Images).ID
 	}

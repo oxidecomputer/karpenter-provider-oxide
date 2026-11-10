@@ -43,21 +43,30 @@ func TestSetTopologyRebuildsCatalog(t *testing.T) {
 		t.Fatal("instance type 8-16 is missing from the catalog")
 	}
 
-	provider.SetTopology(SiloTopology("prod"))
+	topology, err := SiloTopology("https://prod.sys.rack-a.example.com", "prod", "silo-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.SetTopology(topology)
 
 	it, ok := provider.Get("8-16", Options{})
 	if !ok {
 		t.Fatal("instance type 8-16 is missing from the catalog")
 	}
 	for label, want := range map[string]string{
-		corev1.LabelTopologyZone:   "prod",
-		corev1.LabelTopologyRegion: "prod",
+		corev1.LabelTopologyZone:   "prod.sys.rack-a.example.com",
+		corev1.LabelTopologyRegion: "prod.sys.rack-a.example.com",
 	} {
 		if got := it.Requirements.Get(label); !got.Has(want) || got.Len() != 1 {
 			t.Errorf("%s requirement is %v, want only %q", label, got.Values(), want)
 		}
 	}
-	if zone := it.Offerings[0].Requirements.Get(corev1.LabelTopologyZone); !zone.Has("prod") {
-		t.Errorf("offering zone is %v, want %q", zone.Values(), "prod")
+	for _, offering := range it.Offerings {
+		if zone := offering.Requirements.Get(
+			corev1.LabelTopologyZone,
+		); !zone.Has(topology.Zone) ||
+			zone.Len() != 1 {
+			t.Errorf("offering zone is %v, want %q", zone.Values(), topology.Zone)
+		}
 	}
 }
