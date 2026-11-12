@@ -175,7 +175,7 @@ type PlacementFailure struct {
 	MessageTruncated bool `json:"messageTruncated,omitempty"`
 }
 
-// StorageRefusal is the most recent launch refused for want of boot disk storage.
+// StorageRefusal is the most recent launch refused due to insufficient boot disk storage.
 type StorageRefusal struct {
 	// Reason is which limit was diagnosed as binding: QuotaExceeded for the silo's storage entitlement.
 	Reason string `json:"reason"`

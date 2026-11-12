@@ -771,7 +771,7 @@ func TestSeededFloorKeepsARunningShapeOffered(t *testing.T) {
 	}
 	if got, _ := unavailableFor(unseeded, running); !got {
 		t.Fatalf(
-			"without a floor the descent was expected to rule out %d-%d, so this test proves nothing",
+			"expected unseeded descent to rule out %d-%d",
 			running.Ncpus,
 			running.MemInGiB,
 		)

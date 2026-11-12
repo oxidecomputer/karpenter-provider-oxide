@@ -55,7 +55,7 @@ func (t *Tracker) Record(ctx context.Context, reason availability.Reason, messag
 	metrics.StorageRefusals.WithLabelValues(string(reason)).Inc()
 
 	log.FromContext(ctx).V(1).Info(
-		"launch refused for want of boot disk storage",
+		"launch refused due to insufficient boot disk storage",
 		"reason", reason,
 		"consecutive-refusals", t.current.Consecutive,
 		"diagnosis", message,

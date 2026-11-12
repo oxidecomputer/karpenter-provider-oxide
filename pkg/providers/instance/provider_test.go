@@ -566,7 +566,7 @@ func TestCreateDoesNotWaitForTheInstanceToRun(t *testing.T) {
 		t.Fatalf("create failed: %v", err)
 	}
 	if instance.Instance.RunState == oxide.InstanceStateRunning {
-		t.Fatal("the fake API never reports running, so this test proves nothing")
+		t.Fatal("fake API returned a running instance; expected a starting instance")
 	}
 	if api.instance.RunState != oxide.InstanceStateStarting {
 		t.Errorf("the instance is in %q, want the launch to have left it starting",

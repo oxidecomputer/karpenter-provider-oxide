@@ -15,7 +15,7 @@ func New() *cobra.Command {
 		Short: "Karpenter for the Oxide cloud computer",
 		Long: `Karpenter for the Oxide cloud computer.
 
-With no sub-command the controller runs, which is what the Helm chart does.
+With no subcommand, the controller runs.
 Controller settings are read from the environment and from the flags Karpenter
 itself defines; pass them after the command and they are forwarded unchanged.`,
 		Args:          cobra.ArbitraryArgs,

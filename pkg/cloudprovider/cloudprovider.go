@@ -284,8 +284,8 @@ func (c *OxideCloudProvider) diagnoseLaunchFailure(
 		metrics.StuckLaunchResources.WithLabelValues(stuck.Kind, stuck.State).Inc()
 		log.FromContext(ctx).Error(
 			err,
-			"abandoning a launch whose Oxide resource is stuck in a transitional state; "+
-				"it is left in place for the orphan reaper to remove once this NodeClaim is gone",
+			"abandoning launch with a stuck Oxide resource; "+
+				"the orphan reaper will remove it after the NodeClaim is deleted",
 			"kind", stuck.Kind,
 			"resource", stuck.Name,
 			"resource-id", stuck.ID,

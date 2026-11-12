@@ -117,7 +117,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 	if err != nil {
 		log.FromContext(ctx).Error(
 			err,
-			"unable to list this cluster's Oxide resources, so nothing is collected this period",
+			"unable to list this cluster's Oxide resources; skipping orphan collection",
 		)
 		return reconciler.Result{RequeueAfter: c.period}, nil
 	}
@@ -127,7 +127,7 @@ func (c *Controller) Reconcile(ctx context.Context) (reconciler.Result, error) {
 
 		log.FromContext(ctx).Error(
 			err,
-			"unable to list NodeClaims, so nothing is collected this period",
+			"unable to list NodeClaims; skipping orphan collection",
 		)
 		return reconciler.Result{RequeueAfter: c.period}, nil
 	}

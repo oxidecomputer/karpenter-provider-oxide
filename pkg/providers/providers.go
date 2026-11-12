@@ -11,7 +11,7 @@ import (
 
 // Drift reasons, one per way a node can stop matching the nodeclass it came from.
 const (
-	// DriftReasonNodeClass is a change to what a launch fixes into an instance and cannot revisit afterwards.
+	// DriftReasonNodeClass indicates a change to launch-time instance configuration.
 	DriftReasonNodeClass cloudprovider.DriftReason = "NodeClassDrift"
 	// DriftReasonImage is a node running an image the nodeclass would no longer launch.
 	DriftReasonImage cloudprovider.DriftReason = "ImageDrift"

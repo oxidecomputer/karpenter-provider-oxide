@@ -151,7 +151,7 @@ func TestReconcileCreatesTheViewIfItIsMissing(t *testing.T) {
 
 	view := published(t, kubeClient)
 	if view.Status.ObservedAt == nil {
-		t.Error("the view has no observation time, so nothing can tell whether it is live")
+		t.Error("observation time is missing")
 	}
 	if view.Status.Inventory.State != v1alpha1.InventoryDisabled {
 		t.Errorf("inventory = %q, want %q with no inventory provider",
@@ -290,7 +290,7 @@ func TestAClearedStorageRefusalIsUnpublished(t *testing.T) {
 		t.Fatalf("Reconcile returned %v", err)
 	}
 	if published(t, kubeClient).Status.History == nil {
-		t.Fatal("the refusal was never published, so the test proves nothing")
+		t.Fatal("expected refusal to be published")
 	}
 
 	c.storage.Clear(t.Context())

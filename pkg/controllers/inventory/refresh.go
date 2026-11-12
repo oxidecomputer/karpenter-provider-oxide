@@ -59,11 +59,9 @@ func (c *RefreshController) Reconcile(ctx context.Context) (reconciler.Result, e
 
 			log.FromContext(ctx).Error(
 				err,
-				"unable to refresh the sled inventory, sled placement labels will not be applied "+
-					"and instance types will not be narrowed to what the rack has room for. "+
-					"This requires an Oxide token with fleet-level read access to the system API. "+
-					"Set settings.inventory.enabled=false to turn this off. Nodes still launch: "+
-					"shapes the rack cannot place are learned from refused launches instead",
+				"unable to refresh sled inventory; placement labels and capacity-based instance type filtering are unavailable. "+
+					"Grant the Oxide token fleet-level read access to the system API, or set settings.inventory.enabled=false. "+
+					"Launches will continue, and refused shapes will be learned from launch failures",
 			)
 			c.permissionErrorLogged = true
 		}

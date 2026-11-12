@@ -69,7 +69,7 @@ func NewSnapshot(
 	}
 }
 
-// Known reports whether this is a reading of anything at all.
+// Known reports whether the snapshot has been observed.
 func (s Snapshot) Known() bool {
 	return !s.takenAt.IsZero()
 }

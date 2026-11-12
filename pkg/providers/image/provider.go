@@ -30,8 +30,7 @@ type Provider struct {
 	cache    *resolver.Cache[reading]
 }
 
-// reading is one resolution as cached: the images matched, and the selectors that found their image
-// in a project other than the one they meant.
+// reading contains matched images and selectors whose images belong to a different project than requested.
 type reading struct {
 	images    []v1alpha1.OxideImage
 	misplaced []string

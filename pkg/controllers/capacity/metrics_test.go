@@ -95,7 +95,7 @@ func TestPublishMetricsReportsInventoryFreshness(t *testing.T) {
 	c.publishMetrics(c.observe())
 
 	if got := testutil.ToFloat64(metrics.SnapshotFresh); got != 0 {
-		t.Errorf("snapshot fresh = %v, want 0 for a reading nobody is believing", got)
+		t.Errorf("snapshot fresh = %v, want 0 for a stale snapshot", got)
 	}
 }
 

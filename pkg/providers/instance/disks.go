@@ -141,7 +141,7 @@ func (p *Provider) adoptDisk(
 	if attached, ok := existing.State.AsAttached(); ok && attached.Instance != "" {
 		if !p.instanceIs(ctx, attached.Instance, instanceName) {
 			return false, fmt.Errorf(
-				"disk %s already exists and is attached to instance %s rather than to %s, so it is not this launch's to adopt",
+				"disk %s is attached to instance %s, not %s; cannot adopt it",
 				name,
 				attached.Instance,
 				instanceName,

@@ -340,7 +340,7 @@ func (s Snapshot) Entries() []Entry {
 	return s.entries
 }
 
-// Rack returns the rack reading the snapshot judged against, and what that reading is worth.
+// Rack returns the rack capacity snapshot and its inventory state.
 func (s Snapshot) Rack() (capacity.Snapshot, InventoryState) {
 	return s.rack, s.inventory
 }

@@ -390,7 +390,7 @@ func logStale(ctx context.Context, resource string, stale bool, age time.Duratio
 		return
 	}
 	log.FromContext(ctx).V(1).Info(
-		"serving a resource resolution from a reading that could not be refreshed",
+		"serving stale resource resolution after refresh failure",
 		"resource", resource,
 		"age", age.Round(time.Second).String(),
 	)
