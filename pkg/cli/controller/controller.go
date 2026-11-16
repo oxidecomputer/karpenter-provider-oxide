@@ -45,7 +45,9 @@ import (
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	karpcloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
@@ -92,6 +94,13 @@ func NewCommand() *cobra.Command {
 
 // Run starts the controller-manager and blocks until it stops.
 func Run() error {
+	crds, err := discovery.NewDiscoveryClientForConfig(ctrl.GetConfigOrDie())
+	if err != nil {
+		return err
+	}
+	if err := waitForCRDs(context.Background(), crds, crdPollInterval); err != nil {
+		return err
+	}
 	ctx, karpcore := karpentercore.NewOperator()
 
 	host, token, project := os.Getenv(
