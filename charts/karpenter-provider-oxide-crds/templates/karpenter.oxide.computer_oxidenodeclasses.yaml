@@ -810,6 +810,35 @@ spec:
                 items:
                   type: string
                 type: array
+              observedCapacity:
+                description: |-
+                  ObservedCapacity is what registered nodes of this class reported, which the catalog
+                  uses in place of its estimate for launches of the same shape and image.
+                items:
+                  description: ObservedCapacity is the smallest capacity a node of
+                    one shape and image has registered with.
+                  properties:
+                    imageID:
+                      type: string
+                    instanceType:
+                      type: string
+                    memory:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: Memory is the node's status.capacity.memory.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                  required:
+                  - imageID
+                  - instanceType
+                  - memory
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - instanceType
+                - imageID
+                x-kubernetes-list-type: map
               server:
                 description: Server is the user-defined or system discovered endpoint
                   that nodes will use to join the cluster.

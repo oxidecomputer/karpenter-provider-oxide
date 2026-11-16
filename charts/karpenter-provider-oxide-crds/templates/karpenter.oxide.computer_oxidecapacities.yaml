@@ -136,7 +136,7 @@ spec:
                     x-kubernetes-list-type: atomic
                   storage:
                     description: StorageRefusal is the most recent launch refused
-                      for want of boot disk storage.
+                      due to insufficient boot disk storage.
                     properties:
                       consecutiveRefusals:
                         description: ConsecutiveRefusals is how many launches in a

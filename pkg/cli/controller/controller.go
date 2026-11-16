@@ -279,6 +279,8 @@ func Run() error {
 
 		nodeclass.NewHashController(karpcore.GetClient()),
 
+		nodeclass.NewCapacityController(karpcore.GetClient()),
+
 		bootdiskcontroller.NewController(
 			karpcore.GetClient(),
 			karpcore.GetAPIReader(),

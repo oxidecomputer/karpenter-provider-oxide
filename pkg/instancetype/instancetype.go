@@ -372,10 +372,15 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 	var instanceTypes []*cloudprovider.InstanceType
 	for _, specs := range i.shapes {
 		cpus, mem := specs.Ncpus, specs.MemInGiB
+		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
+		guest, observed := opts.GuestMemory[instanceTypeName]
+		if !observed {
+			guest = guestMemory(mem)
+		}
 		reserved := ReservedFor(specs, opts.Kubelet.Reserved)
 		resources := corev1.ResourceList{
 			corev1.ResourceCPU:    *resource.NewQuantity(int64(cpus), resource.DecimalSI),
-			corev1.ResourceMemory: *resource.NewQuantity(guestMemory(mem), resource.BinarySI),
+			corev1.ResourceMemory: *resource.NewQuantity(guest, resource.BinarySI),
 			corev1.ResourcePods:   *resource.NewQuantity(opts.Kubelet.Pods(cpus), resource.DecimalSI),
 		}
 		if hasEphemeral {
@@ -383,7 +388,6 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 				ephemeral.Capacity, resource.BinarySI,
 			)
 		}
-		instanceTypeName := fmt.Sprintf("%d-%d", cpus, mem)
 		cpuMemoryRatio := reducedCPUMemoryRatio(cpus, mem)
 
 		// One offering per pin, so a refusal under a narrow pin leaves the broader
@@ -415,7 +419,7 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 			})
 		}
 		instanceTypes = append(instanceTypes, &cloudprovider.InstanceType{
-			Name:     fmt.Sprintf("%d-%d", cpus, mem),
+			Name:     instanceTypeName,
 			Capacity: resources,
 			Requirements: scheduling.Requirements{
 				corev1.LabelInstanceTypeStable: scheduling.NewRequirement(
@@ -479,7 +483,7 @@ func (i *Provider) InstanceTypes(opts Options) []*cloudprovider.InstanceType {
 				KubeReserved:   withEphemeral(reserved.KubeReserved, hasEphemeral),
 				SystemReserved: withEphemeral(reserved.SystemReserved, hasEphemeral),
 				EvictionThreshold: reserved.evictionThreshold(
-					guestMemory(mem), ephemeral, hasEphemeral,
+					guest, ephemeral, hasEphemeral,
 				),
 			},
 			Offerings: offerings,

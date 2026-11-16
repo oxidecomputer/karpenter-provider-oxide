@@ -303,11 +303,13 @@ func orderedKeys[K ~string, V any](m map[K]V, first ...K) []K {
 }
 
 // Options select the catalog for a nodeclass: the boot disk fixes the ephemeral
-// storage shapes advertise, and the kubelet configuration fixes their overhead
-// and pod capacity.
+// storage shapes advertise, the kubelet configuration fixes their overhead
+// and pod capacity, and GuestMemory, by instance type, replaces the estimate
+// for shapes a node of the current image has already registered as.
 type Options struct {
 	BootSizeBytes int64
 	Kubelet       Kubelet
+	GuestMemory   map[string]int64
 }
 
 // OptionsFor returns the catalog options a nodeclass selects. A nil nodeclass
@@ -320,14 +322,43 @@ func OptionsFor(nodeClass *v1alpha1.OxideNodeClass) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
-	return Options{BootSizeBytes: nodeClass.BootSizeBytes(), Kubelet: kubelet}, nil
+	return Options{
+		BootSizeBytes: nodeClass.BootSizeBytes(),
+		Kubelet:       kubelet,
+		GuestMemory:   observedGuestMemory(nodeClass),
+	}, nil
+}
+
+// observedGuestMemory keeps only the image launches use now, since another
+// image can boot with different kernel reservations.
+func observedGuestMemory(nodeClass *v1alpha1.OxideNodeClass) map[string]int64 {
+	var image string
+	if len(nodeClass.Status.Images) > 0 {
+		image = nodeClass.Status.Images[0].ID
+	}
+	observed := map[string]int64{}
+	for _, entry := range nodeClass.Status.ObservedCapacity {
+		if image == "" || entry.ImageID != image || entry.Memory.Value() <= 0 {
+			continue
+		}
+		observed[entry.InstanceType] = entry.Memory.Value()
+	}
+	if len(observed) == 0 {
+		return nil
+	}
+	return observed
 }
 
 func (o Options) key() string {
+	observed := make([]string, 0, len(o.GuestMemory))
+	for _, name := range orderedKeys(o.GuestMemory) {
+		observed = append(observed, name+"="+strconv.FormatInt(o.GuestMemory[name], 10))
+	}
 	return fmt.Sprintf(
-		"%d|%s|%s",
+		"%d|%s|%s|%s",
 		o.BootSizeBytes,
 		strings.Join(o.Kubelet.Reserved.KubeletArgs(), " "),
 		strings.Join(o.Kubelet.Args, " "),
+		strings.Join(observed, ","),
 	)
 }

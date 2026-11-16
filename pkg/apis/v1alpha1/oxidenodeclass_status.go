@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"github.com/awslabs/operatorpkg/status"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -109,9 +110,24 @@ type OxideNodeClassStatus struct {
 	// Bootstrap contains resolved state that only applies to a single bootstrap provider.
 	// +optional
 	Bootstrap *BootstrapStatus `json:"bootstrap,omitempty"`
+	// ObservedCapacity is what registered nodes of this class reported, which the catalog
+	// uses in place of its estimate for launches of the same shape and image.
+	// +optional
+	// +listType=map
+	// +listMapKey=instanceType
+	// +listMapKey=imageID
+	ObservedCapacity []ObservedCapacity `json:"observedCapacity,omitempty"`
 	// Conditions contains health and readiness signals.
 	// +optional
 	Conditions []status.Condition `json:"conditions,omitempty"`
+}
+
+// ObservedCapacity is the smallest capacity a node of one shape and image has registered with.
+type ObservedCapacity struct {
+	InstanceType string `json:"instanceType"`
+	ImageID      string `json:"imageID"`
+	// Memory is the node's status.capacity.memory.
+	Memory resource.Quantity `json:"memory"`
 }
 
 // BootstrapStatus holds resolved state that is meaningful to exactly one bootstrap provider.
