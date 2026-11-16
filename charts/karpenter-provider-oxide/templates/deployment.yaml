@@ -36,6 +36,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "karpenter.serviceAccountName" . }}
+      {{- if .Values.kubeconfig.secretName }}
+      automountServiceAccountToken: false
+      {{- end }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -123,6 +126,13 @@ spec:
                 secretKeyRef:
                   name: {{ required "settings.oxide.tokenSecret.name is required" .Values.settings.oxide.tokenSecret.name | quote }}
                   key: {{ .Values.settings.oxide.tokenSecret.key | quote }}
+          {{- if .Values.kubeconfig.secretName }}
+            - name: KUBECONFIG
+              value: /etc/karpenter/kubeconfig/value
+            # The lease lives in the cluster Karpenter manages, not where it runs.
+            - name: LEADER_ELECTION_NAMESPACE
+              value: kube-system
+          {{- end }}
             - name: OXIDE_INSTANCE_TYPE_INCREMENT_PERCENT
               value: {{ .Values.settings.instanceTypes.incrementPercent | quote }}
           {{- with .Values.settings.oxide.clusterID }}
@@ -171,9 +181,16 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- with .Values.controller.extraVolumeMounts }}
+        {{- if or .Values.kubeconfig.secretName .Values.controller.extraVolumeMounts }}
           volumeMounts:
+          {{- if .Values.kubeconfig.secretName }}
+            - name: kubeconfig
+              mountPath: /etc/karpenter/kubeconfig
+              readOnly: true
+          {{- end }}
+          {{- with .Values.controller.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+          {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -193,7 +210,14 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.extraVolumes }}
+      {{- if or .Values.kubeconfig.secretName .Values.extraVolumes }}
       volumes:
+      {{- if .Values.kubeconfig.secretName }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ .Values.kubeconfig.secretName }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}

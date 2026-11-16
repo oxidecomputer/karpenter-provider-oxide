@@ -57,6 +57,7 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | hostNetwork | bool | `false` | Bind the pod to the host network. |
 | imagePullPolicy | string | `"IfNotPresent"` | Image pull policy for Docker images. |
 | imagePullSecrets | list | `[]` | Image pull secrets for Docker images. |
+| kubeconfig.secretName | string | `""` | Secret holding a kubeconfig (key `value`) for the cluster to manage, when the controller runs outside it. |
 | logLevel | string | `"info"` | Global log level, defaults to 'info'. |
 | nameOverride | string | `""` | Overrides the chart's name. |
 | nodeSelector | object | `{"kubernetes.io/os":"linux"}` | Node selectors to schedule the pod to nodes with labels. |
@@ -66,6 +67,7 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | podLabels | object | `{}` | Additional labels for the pod. |
 | podSecurityContext | object | `{"fsGroup":65536}` | SecurityContext for the pod. |
 | priorityClassName | string | `"system-cluster-critical"` | PriorityClass name for the pod. |
+| rbac.create | bool | `true` | Specifies if the ServiceAccount's roles and bindings should be created. |
 | replicas | int | `1` | Number of replicas. |
 | revisionHistoryLimit | int | `10` | The number of old ReplicaSets to retain to allow rollback. |
 | serviceAccount.annotations | object | `{}` | Additional annotations for the ServiceAccount. |

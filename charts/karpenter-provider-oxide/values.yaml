@@ -17,6 +17,13 @@ serviceAccount:
   name: ""
   # -- Additional annotations for the ServiceAccount.
   annotations: {}
+rbac:
+  # -- Specifies if the ServiceAccount's roles and bindings should be created.
+  create: true
+kubeconfig:
+  # -- Secret holding a kubeconfig (key `value`) for the cluster to manage, when the
+  # controller runs outside it.
+  secretName: ""
 # -- Specifies additional rules for the core ClusterRole.
 additionalClusterRoleRules: []
 # -- Bootstrap provider configuration.
