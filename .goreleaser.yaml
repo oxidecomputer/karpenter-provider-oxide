@@ -50,7 +50,7 @@ kos:
       - linux/arm64
     tags:
       - "{{ .Version }}"
-      - latest
+      - "{{ if not .Prerelease }}latest{{ end }}"
     bare: true
     preserve_import_paths: false
     creation_time: "{{ .CommitTimestamp }}"
@@ -77,6 +77,9 @@ checksum:
     - glob: ./_artifacts/oxide-kwok-*.tar.gz
 
 release:
+  # Snapshot tags (vX.Y.Z-<suffix>) publish as prereleases; see `make snapshot-tag`.
+  prerelease: auto
+  make_latest: "{{ not .Prerelease }}"
   extra_files:
     - glob: ./_artifacts/helm/*.tgz
     - glob: ./_artifacts/oxide-kwok-*.tar.gz

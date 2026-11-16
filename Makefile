@@ -1,4 +1,5 @@
-VERSION ?= $(shell git describe --tags --always | sed -e 's/^v//')
+# Snapshot tags are skipped.
+VERSION ?= $(shell git describe --tags --always --exclude '*-*' | sed -e 's/^v//')
 
 MY_IMAGE_REPO ?= ghcr.io/$(GITHUB_USER)/karpenter-provider-oxide
 IMAGE_REPO ?= ghcr.io/oxidecomputer/karpenter-provider-oxide
@@ -116,7 +117,7 @@ licenses: ## Verifies dependency licenses
 	! $(GO_LICENSES) csv ./... | grep -v -e 'MIT' -e 'Apache-2.0' -e 'BSD-3-Clause' -e 'BSD-2-Clause' -e 'ISC' -e 'MPL-2.0'
 
 .PHONY: precommit
-precommit: fix verify test release-snapshot ## Run all precommit checks (lint, fix, fmt, tests, local snapshot release).
+precommit: fix verify test release-dry-run ## Run all precommit checks (lint, fix, fmt, tests, release dry run).
 
 .PHONY: update-karpenter
 update-karpenter: ## Update kubernetes-sigs/karpenter to latest, then re-vendor its CRDs
@@ -289,17 +290,24 @@ ci-verify: precommit ## Verify fmt, linters, mod/sum files, generated CRDs, char
 release-check: tools
 	$(GORELEASER) check
 
-.PHONY: release-snapshot
-release-snapshot: tools ## Build the release artifacts locally without publishing.
+.PHONY: release-dry-run
+release-dry-run: tools ## Build the release artifacts locally without publishing.
 	$(GORELEASER) release --snapshot --clean
 
+.PHONY: snapshot-tag
+snapshot-tag: ## Tag HEAD as a snapshot prerelease and print the push command (see hack/snapshot-tag.sh). PR= and REMOTE= override detection.
+	@hack/snapshot-tag.sh $(if $(PR),--pr $(PR)) $(if $(REMOTE),--remote $(REMOTE))
+
+# GORELEASER_CURRENT_TAG disambiguates a commit carrying both a snapshot and a
+# stable tag. The previous tag skips snapshots so changelogs diff against the
+# last stable release.
 .PHONY: release
 release: tools ## Build and push the multi-arch (linux/amd64,linux/arm64) images to ghcr, push the helm charts, and cut a GitHub release.
-	@git describe --tags --exact-match >/dev/null 2>&1 || { \
-		echo "ERROR: 'make release' must run from an exact vX.Y.Z tag."; \
-		exit 1; \
-	}
-	$(GORELEASER) release --clean
+	set -e; \
+	tag="$${GORELEASER_CURRENT_TAG:-}"; \
+	[[ -n "$$tag" ]] || tag="$$(git describe --tags --exact-match)"; \
+	prev="$$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' "$$tag^" 2>/dev/null || true)"; \
+	GORELEASER_CURRENT_TAG="$$tag" GORELEASER_PREVIOUS_TAG="$$prev" $(GORELEASER) release --clean
 	for chart in $(ARTIFACTS)/helm/*.tgz; do \
 		$(HELM) push "$$chart" "oci://$(HELM_OCI_REPO)" --debug; \
 	done
