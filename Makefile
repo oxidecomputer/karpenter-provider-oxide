@@ -17,6 +17,7 @@ TOOLS_MOD := $(MAKEFILE_PATH)/tools/go.mod
 GO_TOOL := go tool -modfile=$(TOOLS_MOD)
 KARPENTER_NAMESPACE ?= kube-system
 HELM_VERSION ?= v4.3.1
+SHELLCHECK_VERSION ?= v0.11.0
 
 LDFLAGS ?= -ldflags=-X=sigs.k8s.io/karpenter/pkg/operator.Version=$(VERSION)
 GOFLAGS += $(LDFLAGS)
@@ -72,12 +73,8 @@ verify: release-check lint-shell ## Run linters and vetting on codebase with no 
 	go vet ./...
 
 .PHONY: lint-shell
-lint-shell: ## Run shellcheck over the checked-in shell scripts.
-	@command -v shellcheck >/dev/null 2>&1 || { \
-		echo "WARNING: shellcheck is not installed, skipping shell lint"; \
-		exit 0; \
-	}; \
-	shellcheck --severity=style $(SHELL_SOURCES)
+lint-shell: shellcheck ## Run shellcheck over the checked-in shell scripts.
+	$(SHELLCHECK) --severity=style $(SHELL_SOURCES)
 
 .PHONY: fix
 fix: golangci-lint ## Perform lint, fmt, and mod/sum file fixes
@@ -137,6 +134,7 @@ CONTROLLER_GEN ?= $(GO_TOOL) controller-gen
 KUBECTL ?= $(LOCALBIN)/kubectl
 KO ?= KOCACHE=$(KOCACHE) $(GO_TOOL) ko
 GORELEASER ?= $(GO_TOOL) goreleaser
+SHELLCHECK ?= $(LOCALBIN)/shellcheck
 GOVULNCHECK ?= $(GO_TOOL) govulncheck
 GO_LICENSES ?= $(GO_TOOL) go-licenses
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint-custom
@@ -144,7 +142,7 @@ HELM ?= $(LOCALBIN)/helm
 HELM_DOCS ?= $(GO_TOOL) helm-docs
 
 .PHONY: tools
-tools: kubectl helm $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
+tools: kubectl helm shellcheck $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
 	GOBIN="$(LOCALBIN)" go install -modfile=$(TOOLS_MOD) tool
 
 K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
@@ -163,6 +161,12 @@ helm: $(LOCALBIN)
 	curl -fsSL -o $(LOCALBIN)/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
 	chmod 700 $(LOCALBIN)/get_helm.sh
 	HELM_INSTALL_DIR=$(LOCALBIN) USE_SUDO=false $(LOCALBIN)/get_helm.sh --version $(HELM_VERSION)
+
+.PHONY: shellcheck
+shellcheck: $(LOCALBIN)
+	@command -v $(SHELLCHECK) >/dev/null 2>&1 && exit 0; \
+		curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$(SHELLCHECK_VERSION)/shellcheck-$(SHELLCHECK_VERSION).$$(uname -s | tr '[:upper:]' '[:lower:]').$$(uname -m | sed 's/arm64/aarch64/').tar.gz" \
+		| tar -xzf - -C "$(LOCALBIN)" --strip-components=1 "shellcheck-$(SHELLCHECK_VERSION)/shellcheck"
 
 .PHONY: golangci-lint
 golangci-lint:
