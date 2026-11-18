@@ -63,6 +63,7 @@ type KubeletValue string
 // +kubebuilder:validation:XValidation:rule="!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent) || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent",message="imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent"
 // +kubebuilder:validation:XValidation:rule="!has(self.evictionSoft) || self.evictionSoft.all(e, has(self.evictionSoftGracePeriod) && e in self.evictionSoftGracePeriod)",message="every evictionSoft signal needs a matching evictionSoftGracePeriod, or kubelet refuses to start"
 // +kubebuilder:validation:XValidation:rule="!has(self.evictionSoftGracePeriod) || self.evictionSoftGracePeriod.all(e, has(self.evictionSoft) && e in self.evictionSoft)",message="every evictionSoftGracePeriod signal needs a matching evictionSoft"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxParallelImagePulls) || self.maxParallelImagePulls <= 1 || (has(self.serializeImagePulls) && !self.serializeImagePulls)",message="maxParallelImagePulls above 1 needs serializeImagePulls set to false, or kubelet refuses to start"
 type KubeletConfiguration struct {
 	// ClusterDNS is the list of cluster DNS server addresses.
 	// +optional
@@ -128,6 +129,14 @@ type KubeletConfiguration struct {
 	// CPUCFSQuota enables CPU CFS quota enforcement for containers that specify CPU limits.
 	// +optional
 	CPUCFSQuota *bool `json:"cpuCFSQuota,omitempty"`
+	// SerializeImagePulls pulls one image at a time. Kubelet defaults it to true.
+	// +optional
+	SerializeImagePulls *bool `json:"serializeImagePulls,omitempty"`
+	// MaxParallelImagePulls caps concurrent image pulls when serializeImagePulls is
+	// false. Unset, kubelet does not cap them.
+	// +kubebuilder:validation:Minimum:=1
+	// +optional
+	MaxParallelImagePulls *int32 `json:"maxParallelImagePulls,omitempty"`
 }
 
 const (

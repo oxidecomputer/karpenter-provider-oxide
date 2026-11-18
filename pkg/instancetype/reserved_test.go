@@ -175,6 +175,7 @@ func TestCatalogAdvertisesTheNodeClassPodCap(t *testing.T) {
 func TestParseKubeletRendersTheFlagsKubeletActsOn(t *testing.T) {
 	int32p := func(v int32) *int32 { return &v }
 	quota := false
+	serialize := false
 	kubelet, err := ParseKubelet(&v1alpha1.KubeletConfiguration{
 		ClusterDNS:  []string{"10.96.0.10", "fd00::10"},
 		MaxPods:     int32p(60),
@@ -190,6 +191,8 @@ func TestParseKubeletRendersTheFlagsKubeletActsOn(t *testing.T) {
 		ImageGCHighThresholdPercent: int32p(85),
 		ImageGCLowThresholdPercent:  int32p(80),
 		CPUCFSQuota:                 &quota,
+		SerializeImagePulls:         &serialize,
+		MaxParallelImagePulls:       int32p(5),
 		SystemReserved:              map[string]v1alpha1.KubeletValue{"memory": "1Gi"},
 	})
 	if err != nil {
@@ -205,6 +208,8 @@ func TestParseKubeletRendersTheFlagsKubeletActsOn(t *testing.T) {
 		"image-gc-high-threshold=85",
 		"image-gc-low-threshold=80",
 		"cpu-cfs-quota=false",
+		"serialize-image-pulls=false",
+		"max-parallel-image-pulls=5",
 	}
 	if strings.Join(kubelet.Args, "|") != strings.Join(want, "|") {
 		t.Errorf("args = %v, want %v", kubelet.Args, want)

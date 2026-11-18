@@ -266,7 +266,18 @@ func TestKubeletValidation(t *testing.T) {
 				"imageGCHighThresholdPercent": 85,
 				"imageGCLowThresholdPercent":  80,
 				"cpuCFSQuota":                 false,
+				"serializeImagePulls":         false,
+				"maxParallelImagePulls":       5,
 			},
+			wantValid: true,
+		},
+		{
+			name:    "parallel image pulls while serialized is refused",
+			kubelet: map[string]any{"maxParallelImagePulls": 5},
+		},
+		{
+			name:      "one parallel image pull while serialized is accepted",
+			kubelet:   map[string]any{"maxParallelImagePulls": 1},
 			wantValid: true,
 		},
 		{

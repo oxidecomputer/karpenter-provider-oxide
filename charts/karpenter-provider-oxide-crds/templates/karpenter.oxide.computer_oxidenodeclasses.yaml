@@ -327,6 +327,13 @@ spec:
                     - message: kubeReserved values must be non-negative resource quantities
                       rule: self.all(x, isQuantity(self[x]) && sign(quantity(self[x]))
                         >= 0)
+                  maxParallelImagePulls:
+                    description: |-
+                      MaxParallelImagePulls caps concurrent image pulls when serializeImagePulls is
+                      false. Unset, kubelet does not cap them.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   maxPods:
                     description: MaxPods caps the pods a node runs. The provider advertises
                       110 by default.
@@ -340,6 +347,10 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  serializeImagePulls:
+                    description: SerializeImagePulls pulls one image at a time. Kubelet
+                      defaults it to true.
+                    type: boolean
                   systemReserved:
                     additionalProperties:
                       description: |-
@@ -371,6 +382,10 @@ spec:
                 - message: every evictionSoftGracePeriod signal needs a matching evictionSoft
                   rule: '!has(self.evictionSoftGracePeriod) || self.evictionSoftGracePeriod.all(e,
                     has(self.evictionSoft) && e in self.evictionSoft)'
+                - message: maxParallelImagePulls above 1 needs serializeImagePulls
+                    set to false, or kubelet refuses to start
+                  rule: '!has(self.maxParallelImagePulls) || self.maxParallelImagePulls
+                    <= 1 || (has(self.serializeImagePulls) && !self.serializeImagePulls)'
               server:
                 description: Server is the endpoint nodes use to join the cluster.
                 type: string

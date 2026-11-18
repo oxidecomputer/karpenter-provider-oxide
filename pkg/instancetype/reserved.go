@@ -169,6 +169,12 @@ func renderArgs(kc *v1alpha1.KubeletConfiguration) []string {
 	if kc.CPUCFSQuota != nil {
 		args = append(args, fmt.Sprintf("cpu-cfs-quota=%t", *kc.CPUCFSQuota))
 	}
+	if kc.SerializeImagePulls != nil {
+		args = append(args, fmt.Sprintf("serialize-image-pulls=%t", *kc.SerializeImagePulls))
+	}
+	if kc.MaxParallelImagePulls != nil {
+		args = append(args, fmt.Sprintf("max-parallel-image-pulls=%d", *kc.MaxParallelImagePulls))
+	}
 	return args
 }
 
