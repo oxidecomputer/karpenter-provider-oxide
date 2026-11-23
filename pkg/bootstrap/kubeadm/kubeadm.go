@@ -39,6 +39,10 @@ const (
 	configPath = "/etc/kubernetes/karpenter-join.yaml"
 	// discoveryPath is the kubeconfig the join discovers the cluster from.
 	discoveryPath = "/etc/kubernetes/karpenter-discovery.conf"
+	// clusterCAPath is the cluster CA an attesting node verifies with.
+	clusterCAPath = "/etc/kubernetes/karpenter-cluster-ca.crt"
+	// attestCommand is the node image's oxide-node-attestor client.
+	attestCommand = "oxide-node-join"
 
 	consumerUnit = "kubelet.service"
 
@@ -51,6 +55,15 @@ type Bootstrapper struct {
 	reader   client.Reader
 	writer   client.Writer
 	renderer bootstrap.Renderer
+	attestor string
+}
+
+// WithAttestor has nodes attest to the node attestor at that URL for
+// the credential they join with, in place of a bootstrap token in user-data.
+// Experimental.
+func (b *Bootstrapper) WithAttestor(attestor string) *Bootstrapper {
+	b.attestor = attestor
+	return b
 }
 
 func NewBootstrapper(
@@ -141,37 +154,63 @@ func (b *Bootstrapper) UserData(
 		)
 	}
 
-	token, err := bootstrap.MintToken(ctx, b.writer, nodeClass, req.NodeClaim, nodeBootstrapGroup)
-	if err != nil {
-		return "", err
-	}
-
-	// Token discovery reads cluster-info anonymously, which a cluster may
-	// not allow; a kubeconfig carrying the CA and the token needs no such read.
 	clusterInfo, err := b.clusterInfo(ctx)
 	if err != nil {
 		return "", err
 	}
+	config, err := b.joinConfiguration(nodeClass, req)
+	if err != nil {
+		return "", err
+	}
+	spec := bootstrap.Spec{
+		Storage:      req.Storage,
+		ConsumerUnit: consumerUnit,
+		ConfigPath:   configPath,
+		Config:       config,
+		StartCmd:     "kubeadm join --config " + configPath,
+	}
+
+	if b.attestor != "" {
+		// The node writes the discovery kubeconfig itself, around a
+		// certificate issued to the instance it proves to be.
+		spec.Files = []bootstrap.File{{Path: clusterCAPath, Content: string(clusterInfo.caCert)}}
+		spec.StartCmd = b.attest(nodeClass.Status.Server, req.Hostname) + "\n" + spec.StartCmd
+		return b.renderer.Render(ctx, nodeClass, spec)
+	}
+
+	token, err := bootstrap.MintToken(ctx, b.writer, nodeClass, req.NodeClaim, nodeBootstrapGroup)
+	if err != nil {
+		return "", err
+	}
+	// Token discovery reads cluster-info anonymously, which a cluster may
+	// not allow; a kubeconfig carrying the CA and the token needs no such read.
 	discovery, err := discoveryKubeconfig(
 		nodeClass.Status.Server, clusterInfo.clusterName, clusterInfo.caCert, token,
 	)
 	if err != nil {
 		return "", err
 	}
+	spec.Files = []bootstrap.File{{Path: discoveryPath, Content: discovery}}
+	return b.renderer.Render(ctx, nodeClass, spec)
+}
 
-	config, err := b.joinConfiguration(nodeClass, req)
-	if err != nil {
-		return "", err
+// attest is the command a node runs to be issued its join credential.
+func (b *Bootstrapper) attest(server, hostname string) string {
+	args := []string{
+		attestCommand,
+		"--attestor", shellQuote(b.attestor),
+		"--cluster-server", shellQuote("https://" + server),
+		"--cluster-ca-file", clusterCAPath,
+		"--kubeconfig", discoveryPath,
 	}
+	if hostname != "" {
+		args = append(args, "--node-name", shellQuote(hostname))
+	}
+	return strings.Join(args, " ")
+}
 
-	return b.renderer.Render(ctx, nodeClass, bootstrap.Spec{
-		Storage:      req.Storage,
-		ConsumerUnit: consumerUnit,
-		ConfigPath:   configPath,
-		Config:       config,
-		Files:        []bootstrap.File{{Path: discoveryPath, Content: discovery}},
-		StartCmd:     "kubeadm join --config " + configPath,
-	})
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 type clusterInfoData struct {

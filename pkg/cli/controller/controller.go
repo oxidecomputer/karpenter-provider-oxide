@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -65,6 +66,10 @@ const (
 	envClusterID = "OXIDE_CLUSTER_ID"
 
 	envInventoryEnabled = "OXIDE_INVENTORY_ENABLED"
+
+	// envNodeAttestorURL is the cluster's oxide-node-attestor, when its nodes
+	// join by attestation. Experimental.
+	envNodeAttestorURL = "OXIDE_NODE_ATTESTOR_URL"
 )
 
 const (
@@ -139,9 +144,17 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	attestor := os.Getenv(envNodeAttestorURL)
+	if parsed, err := url.Parse(
+		attestor,
+	); attestor != "" &&
+		(err != nil || parsed.Scheme != "https" || parsed.Host == "") {
+		return fmt.Errorf("%s %q is not an https URL", envNodeAttestorURL, attestor)
+	}
 	bootstrappers := bootstrap.New(
 		rke2Bootstrapper,
-		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient(), renderer),
+		kubeadm.NewBootstrapper(karpcore.GetAPIReader(), karpcore.GetClient(), renderer).
+			WithAttestor(attestor),
 	)
 
 	inventoryCfg := inventoryConfigFromEnv()

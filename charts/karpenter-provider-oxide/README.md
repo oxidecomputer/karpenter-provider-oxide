@@ -76,7 +76,7 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","nodeRepair":{"tolerationDuration":""},"oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","reaper":{"quarantine":""}}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","nodeAttestor":{"url":""},"nodeRepair":{"tolerationDuration":""},"oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","reaper":{"quarantine":""}}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
 | settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false}` | Feature gate configuration values. |
@@ -90,6 +90,8 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | settings.inventory | object | `{"enabled":false}` | Sled inventory configuration. |
 | settings.inventory.enabled | bool | `false` | Enable the sled inventory controllers. |
 | settings.minValuesPolicy | string | `"Strict"` | How the Karpenter scheduler treats min values. |
+| settings.nodeAttestor | object | `{"url":""}` | Node attestation configuration. EXPERIMENTAL and disabled by default. |
+| settings.nodeAttestor.url | string | `""` | EXPERIMENTAL: URL of the cluster's oxide-node-attestor. Set, kubeadm nodes attest to it for the credential they join with rather than carry a bootstrap token, and their image must provide `oxide-node-join`. |
 | settings.nodeRepair | object | `{"tolerationDuration":""}` | Node repair configuration. |
 | settings.nodeRepair.tolerationDuration | string | `""` | How long a node may stay NotReady before it is rebooted. Defaults to 30m. |
 | settings.oxide | object | `{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |

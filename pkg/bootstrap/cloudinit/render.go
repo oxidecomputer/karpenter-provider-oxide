@@ -32,7 +32,8 @@ func (r *Renderer) Render(
 	nodeClass *v1alpha1.OxideNodeClass,
 	spec bootstrap.Spec,
 ) (string, error) {
-	paths := []string{spec.ConfigPath}
+	paths := make([]string, 0, 1+len(spec.Files))
+	paths = append(paths, spec.ConfigPath)
 	for _, file := range spec.Files {
 		paths = append(paths, file.Path)
 	}

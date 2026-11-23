@@ -141,6 +141,12 @@ settings:
   inventory:
     # -- Enable the sled inventory controllers.
     enabled: false
+  # -- Node attestation configuration. EXPERIMENTAL and disabled by default.
+  nodeAttestor:
+    # -- EXPERIMENTAL: URL of the cluster's oxide-node-attestor. Set, kubeadm nodes attest
+    # to it for the credential they join with rather than carry a bootstrap token, and
+    # their image must provide `oxide-node-join`.
+    url: ""
   # -- Node repair configuration.
   nodeRepair:
     # -- How long a node may stay NotReady before it is rebooted. Defaults to 30m.

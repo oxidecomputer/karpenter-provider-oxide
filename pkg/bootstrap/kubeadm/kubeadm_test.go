@@ -18,7 +18,6 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -76,8 +75,8 @@ func clusterInfo(t *testing.T) *corev1.ConfigMap {
 		t.Fatal(err)
 	}
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: clusterInfoNamespace, Name: clusterInfoName},
-		Data:       map[string]string{clusterInfoKubeconfigKey: string(kubeconfig)},
+		Namespace: clusterInfoNamespace, Name: clusterInfoName,
+		Data: map[string]string{clusterInfoKubeconfigKey: string(kubeconfig)},
 	}
 }
 
@@ -85,7 +84,10 @@ func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 	t.Helper()
 	nc := nodeClass(t, sets...)
 
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(clusterInfo(t)).
+		Build()
 
 	req := bootstrap.Request{
 		NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
@@ -138,7 +140,10 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
 	nc := nodeClass(t)
 	nc.Spec.UserData = "echo custom-$NODE_ROLE\n"
 	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(clusterInfo(t)).
+		Build()
 
 	out, err := NewBootstrapper(kubeClient, kubeClient, cloudinit.New(kubeClient)).UserData(
 		context.Background(),
@@ -238,10 +243,57 @@ func TestJoinDiscoversFromAKubeconfigCarryingTheToken(t *testing.T) {
 	}
 	cluster := config.Clusters[config.Contexts[config.CurrentContext].Cluster]
 	if cluster.Server != "https://10.0.0.1:6443" || len(cluster.CertificateAuthorityData) == 0 {
-		t.Errorf("cluster %q with %d bytes of CA", cluster.Server, len(cluster.CertificateAuthorityData))
+		t.Errorf(
+			"cluster %q with %d bytes of CA",
+			cluster.Server,
+			len(cluster.CertificateAuthorityData),
+		)
 	}
 	if user := config.AuthInfos[config.Contexts[config.CurrentContext].AuthInfo]; user.Token == "" {
 		t.Error("the discovery kubeconfig carries no bootstrap token")
+	}
+}
+
+// With an attestor the user-data holds nothing worth stealing: the node is
+// issued its credential for proving which instance it is.
+func TestUserDataAttestsRatherThanCarryAToken(t *testing.T) {
+	nc := nodeClass(t)
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(clusterInfo(t)).
+		Build()
+	out, err := NewBootstrapper(kubeClient, kubeClient, cloudinit.New(kubeClient)).
+		WithAttestor("https://team-dev.join.example:443").
+		UserData(context.Background(), nc, bootstrap.Request{
+			NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
+			Hostname:  "karpenter-default-x7k2p",
+		})
+	if err != nil {
+		t.Fatalf("UserData() returned an unexpected error: %v", err)
+	}
+
+	var tokens corev1.SecretList
+	if err := kubeClient.List(context.Background(), &tokens); err != nil || len(tokens.Items) != 0 {
+		t.Errorf("%d secrets minted (%v), want none", len(tokens.Items), err)
+	}
+	if strings.Contains(out, "token:") || strings.Contains(out, "'"+discoveryPath+"'") {
+		t.Errorf("the user-data carries a join credential:\n%s", out)
+	}
+	if !strings.Contains(
+		out,
+		"cat <<'KARPENTER_INSTALL_EOF' > '"+clusterCAPath+"'\n-----BEGIN CERTIFICATE-----",
+	) {
+		t.Errorf("the cluster CA is not installed:\n%s", out)
+	}
+	want := "oxide-node-join --attestor 'https://team-dev.join.example:443'" +
+		" --cluster-server 'https://10.0.0.1:6443' --cluster-ca-file " + clusterCAPath +
+		" --kubeconfig " + discoveryPath + " --node-name 'karpenter-default-x7k2p'\n" +
+		"kubeadm join --config " + configPath + "\n"
+	if !strings.HasSuffix(out, want) {
+		t.Errorf("the user-data does not end by attesting and then joining:\n%s", out)
+	}
+	if !strings.Contains(out, "kubeConfigPath: "+discoveryPath) {
+		t.Errorf("the join does not discover from the kubeconfig the node writes:\n%s", out)
 	}
 }
 
@@ -249,7 +301,10 @@ func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
 	nc := nodeClass(t)
 	nc.Status.KubeletArgs = []string{"cloud-provider=external"}
 
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(clusterInfo(t)).
+		Build()
 	out, err := NewBootstrapper(
 		kubeClient,
 		kubeClient,

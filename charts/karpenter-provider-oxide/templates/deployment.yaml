@@ -143,6 +143,10 @@ spec:
             - name: OXIDE_INVENTORY_ENABLED
               value: "true"
           {{- end }}
+          {{- with .Values.settings.nodeAttestor.url }}
+            - name: OXIDE_NODE_ATTESTOR_URL
+              value: {{ . | quote }}
+          {{- end }}
           {{- with .Values.settings.nodeRepair.tolerationDuration }}
             - name: OXIDE_REPAIR_TOLERATION
               value: {{ . | quote }}
