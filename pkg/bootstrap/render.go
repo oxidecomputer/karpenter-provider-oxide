@@ -22,8 +22,16 @@ type Spec struct {
 	ConfigPath string
 	// Config is the flavor's config document.
 	Config string
+	// Files are installed beside Config, for what it names by path.
+	Files []File
 	// StartCmd joins the node using the installed config.
 	StartCmd string
+}
+
+// File is a file a flavor's config refers to.
+type File struct {
+	Path    string
+	Content string
 }
 
 // Renderer turns a Spec into the user-data an image's init system consumes.

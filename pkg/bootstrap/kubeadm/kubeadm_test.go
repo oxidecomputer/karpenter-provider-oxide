@@ -2,6 +2,12 @@ package kubeadm
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -12,7 +18,10 @@ import (
 	"github.com/oxidecomputer/karpenter-provider-oxide/pkg/providers/storage"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -44,11 +53,39 @@ func nodeClass(t *testing.T, sets ...v1alpha1.DiskSet) *v1alpha1.OxideNodeClass 
 	}
 }
 
+// clusterInfo is kube-public/cluster-info as kubeadm writes it, around a
+// throwaway CA.
+func clusterInfo(t *testing.T) *corev1.ConfigMap {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), IsCA: true}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := clientcmdapi.NewConfig()
+	config.Clusters["test"] = &clientcmdapi.Cluster{
+		Server:                   "https://10.0.0.1:6443",
+		CertificateAuthorityData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+	}
+	kubeconfig, err := clientcmd.Write(*config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: clusterInfoNamespace, Name: clusterInfoName},
+		Data:       map[string]string{clusterInfoKubeconfigKey: string(kubeconfig)},
+	}
+}
+
 func userDataFor(t *testing.T, sets ...v1alpha1.DiskSet) string {
 	t.Helper()
 	nc := nodeClass(t, sets...)
 
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
 
 	req := bootstrap.Request{
 		NodeClaim: &karpv1.NodeClaim{Name: "node-1"},
@@ -101,7 +138,7 @@ func TestUserDataMergesCustomUserDataAndEnvironmentBeforeJoin(t *testing.T) {
 	nc := nodeClass(t)
 	nc.Spec.UserData = "echo custom-$NODE_ROLE\n"
 	nc.Spec.Env = []v1alpha1.EnvVar{{Name: "NODE_ROLE", Value: "worker"}}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
 
 	out, err := NewBootstrapper(kubeClient, kubeClient, cloudinit.New(kubeClient)).UserData(
 		context.Background(),
@@ -178,11 +215,41 @@ func TestUserDataWritesTheConfigThroughTheGuardedHeredoc(t *testing.T) {
 	}
 }
 
+// Token discovery reads cluster-info anonymously, which a hosted control plane refuses.
+func TestJoinDiscoversFromAKubeconfigCarryingTheToken(t *testing.T) {
+	out := userDataFor(t)
+	if strings.Contains(out, "bootstrapToken") || strings.Contains(out, "caCertHashes") {
+		t.Errorf("the join uses token discovery:\n%s", out)
+	}
+	if !strings.Contains(out, "kubeConfigPath: "+discoveryPath) {
+		t.Errorf("the join does not discover from %s:\n%s", discoveryPath, out)
+	}
+	_, rest, ok := strings.Cut(out, "cat <<'KARPENTER_INSTALL_EOF' > '"+discoveryPath+"'\n")
+	if !ok {
+		t.Fatalf("the discovery kubeconfig is not installed:\n%s", out)
+	}
+	body, rest, _ := strings.Cut(rest, "KARPENTER_INSTALL_EOF\n")
+	if !strings.HasPrefix(rest, "chmod 0600 '"+discoveryPath+"'\n") {
+		t.Errorf("the discovery kubeconfig, which holds the token, is not 0600:\n%s", out)
+	}
+	config, err := clientcmd.Load([]byte(body))
+	if err != nil {
+		t.Fatalf("the discovery kubeconfig does not parse: %v", err)
+	}
+	cluster := config.Clusters[config.Contexts[config.CurrentContext].Cluster]
+	if cluster.Server != "https://10.0.0.1:6443" || len(cluster.CertificateAuthorityData) == 0 {
+		t.Errorf("cluster %q with %d bytes of CA", cluster.Server, len(cluster.CertificateAuthorityData))
+	}
+	if user := config.AuthInfos[config.Contexts[config.CurrentContext].AuthInfo]; user.Token == "" {
+		t.Error("the discovery kubeconfig carries no bootstrap token")
+	}
+}
+
 func TestJoinConfigurationCarriesKubeletReservations(t *testing.T) {
 	nc := nodeClass(t)
 	nc.Status.KubeletArgs = []string{"cloud-provider=external"}
 
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(clusterInfo(t)).Build()
 	out, err := NewBootstrapper(
 		kubeClient,
 		kubeClient,

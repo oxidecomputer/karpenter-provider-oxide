@@ -32,8 +32,14 @@ func (r *Renderer) Render(
 	nodeClass *v1alpha1.OxideNodeClass,
 	spec bootstrap.Spec,
 ) (string, error) {
-	if !path.IsAbs(spec.ConfigPath) || strings.ContainsAny(spec.ConfigPath, "'\\\n\r") {
-		return "", fmt.Errorf("config path %q is not a plain absolute path", spec.ConfigPath)
+	paths := []string{spec.ConfigPath}
+	for _, file := range spec.Files {
+		paths = append(paths, file.Path)
+	}
+	for _, p := range paths {
+		if !path.IsAbs(p) || strings.ContainsAny(p, "'\\\n\r") {
+			return "", fmt.Errorf("config path %q is not a plain absolute path", p)
+		}
 	}
 	env, err := bootstrap.ResolveEnv(ctx, r.reader, nodeClass)
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -36,6 +37,8 @@ const (
 	configVersion = "kubeadm.k8s.io/v1beta4"
 
 	configPath = "/etc/kubernetes/karpenter-join.yaml"
+	// discoveryPath is the kubeconfig the join discovers the cluster from.
+	discoveryPath = "/etc/kubernetes/karpenter-discovery.conf"
 
 	consumerUnit = "kubelet.service"
 
@@ -143,7 +146,20 @@ func (b *Bootstrapper) UserData(
 		return "", err
 	}
 
-	config, err := b.joinConfiguration(nodeClass, req, token)
+	// Token discovery reads cluster-info anonymously, which a cluster may
+	// not allow; a kubeconfig carrying the CA and the token needs no such read.
+	clusterInfo, err := b.clusterInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	discovery, err := discoveryKubeconfig(
+		nodeClass.Status.Server, clusterInfo.clusterName, clusterInfo.caCert, token,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	config, err := b.joinConfiguration(nodeClass, req)
 	if err != nil {
 		return "", err
 	}
@@ -153,6 +169,7 @@ func (b *Bootstrapper) UserData(
 		ConsumerUnit: consumerUnit,
 		ConfigPath:   configPath,
 		Config:       config,
+		Files:        []bootstrap.File{{Path: discoveryPath, Content: discovery}},
 		StartCmd:     "kubeadm join --config " + configPath,
 	})
 }
@@ -160,6 +177,7 @@ func (b *Bootstrapper) UserData(
 type clusterInfoData struct {
 	endpoint     string
 	clusterName  string
+	caCert       []byte
 	caCertHashes []string
 }
 
@@ -201,6 +219,7 @@ func (b *Bootstrapper) clusterInfo(ctx context.Context) (*clusterInfoData, error
 		return &clusterInfoData{
 			endpoint:     apiServerEndpoint(cluster.Server),
 			clusterName:  name,
+			caCert:       cluster.CertificateAuthorityData,
 			caCertHashes: hashes,
 		}, nil
 	}
@@ -240,10 +259,28 @@ func caCertHashes(caCertData []byte) ([]string, error) {
 	return hashes, nil
 }
 
+// discoveryKubeconfig is the cluster and the bootstrap token as a kubeconfig,
+// which kubeadm both discovers the cluster from and joins with.
+func discoveryKubeconfig(server, clusterName string, caCert []byte, token string) (string, error) {
+	const user = "tls-bootstrap-token-user"
+	config := clientcmdapi.NewConfig()
+	config.Clusters[clusterName] = &clientcmdapi.Cluster{
+		Server:                   "https://" + server,
+		CertificateAuthorityData: caCert,
+	}
+	config.AuthInfos[user] = &clientcmdapi.AuthInfo{Token: token}
+	config.Contexts[clusterName] = &clientcmdapi.Context{Cluster: clusterName, AuthInfo: user}
+	config.CurrentContext = clusterName
+	out, err := clientcmd.Write(*config)
+	if err != nil {
+		return "", fmt.Errorf("unable to write the discovery kubeconfig: %w", err)
+	}
+	return string(out), nil
+}
+
 func (b *Bootstrapper) joinConfiguration(
 	nodeClass *v1alpha1.OxideNodeClass,
 	req bootstrap.Request,
-	token string,
 ) (string, error) {
 	nodeRegistration := map[string]any{
 		"taints": nodeTaints(req.NodeTaints),
@@ -261,11 +298,7 @@ func (b *Bootstrapper) joinConfiguration(
 		"apiVersion": configVersion,
 		"kind":       "JoinConfiguration",
 		"discovery": map[string]any{
-			"bootstrapToken": map[string]any{
-				"token":             token,
-				"apiServerEndpoint": nodeClass.Status.Server,
-				"caCertHashes":      nodeClass.Status.Bootstrap.Kubeadm.CACertHashes,
-			},
+			"file": map[string]any{"kubeConfigPath": discoveryPath},
 		},
 		"nodeRegistration": nodeRegistration,
 	}

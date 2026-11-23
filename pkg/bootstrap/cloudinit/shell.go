@@ -44,6 +44,14 @@ func shellScript(
 	if err := installFile(&out, spec.ConfigPath, "0600", spec.Config); err != nil {
 		return "", err
 	}
+	for _, file := range spec.Files {
+		if dir := path.Dir(file.Path); dir != path.Dir(spec.ConfigPath) {
+			fmt.Fprintf(&out, "install -d -m 0755 %s\n", shellQuote(dir))
+		}
+		if err := installFile(&out, file.Path, "0600", file.Content); err != nil {
+			return "", err
+		}
+	}
 	out.WriteString(spec.StartCmd)
 	if !strings.HasSuffix(spec.StartCmd, "\n") {
 		out.WriteString("\n")
