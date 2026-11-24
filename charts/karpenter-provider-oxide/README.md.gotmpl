@@ -13,16 +13,17 @@ To install the chart with the release name `karpenter`:
 
 ```console
 helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter-provider-oxide \
-  --namespace kube-system \
-  --set settings.oxide.host=${OXIDE_HOST} \
-  --set settings.oxide.project=${OXIDE_PROJECT}
+  --namespace kube-system
 ```
 
-The controller reads its Oxide API token from a Secret in the release namespace
-(`settings.oxide.tokenSecret`), which is not created by this chart:
+The controller reads its Oxide credentials from a Secret in the release namespace, named
+for the release (`settings.oxide.secretName`), which is not created by this chart:
 
 ```console
-kubectl create secret --namespace kube-system generic oxide-api-token --from-literal=token=${OXIDE_TOKEN}
+kubectl create secret --namespace kube-system generic karpenter \
+  --from-literal=oxide-host=${OXIDE_HOST} \
+  --from-literal=oxide-token=${OXIDE_TOKEN} \
+  --from-literal=oxide-project=${OXIDE_PROJECT}
 ```
 
 The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be installed first.

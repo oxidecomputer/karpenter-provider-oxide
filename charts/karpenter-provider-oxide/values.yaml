@@ -85,11 +85,8 @@ affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       - topologyKey: "kubernetes.io/hostname"
-# -- Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones.
-topologySpreadConstraints:
-  - maxSkew: 1
-    topologyKey: topology.kubernetes.io/zone
-    whenUnsatisfiable: ScheduleAnyway
+# -- Topology spread constraints for the pod.
+topologySpreadConstraints: []
 # -- Tolerations to allow the pod to be scheduled to nodes with taints.
 tolerations:
   - key: CriticalAddonsOnly
@@ -123,14 +120,9 @@ logLevel: info
 settings:
   # -- Oxide API configuration.
   oxide:
-    # -- URL of the Oxide API, for example https://oxide.sys.example.com.
-    host: ""
-    # -- Oxide project that Karpenter provisions instances into.
-    project: ""
-    # -- Secret in the release namespace holding the Oxide API token.
-    tokenSecret:
-      name: oxide-api-token
-      key: token
+    # -- Secret in the release namespace holding `oxide-host`, `oxide-token` and
+    # `oxide-project`. Defaults to the release's full name.
+    secretName: ""
     # -- Identity this cluster records on every Oxide resource it creates.
     clusterID: ""
   # -- Instance type catalog generation.
@@ -165,11 +157,9 @@ settings:
   minValuesPolicy: Strict
   # -- Feature gate configuration values.
   featureGates:
-    # -- spotToSpotConsolidation is ALPHA and is disabled by default.
-    spotToSpotConsolidation: false
     # -- nodeRepair is ALPHA and is disabled by default.
     nodeRepair: false
-    # -- terminateFirstRepair launches the replacement before the broken node is deleted. Requires nodeRepair.
+    # -- terminateFirstRepair terminates an unhealthy node before its replacement is ready when the replacement can't launch first. Requires nodeRepair.
     terminateFirstRepair: false
     # -- staticCapacity is ALPHA and is disabled by default.
     staticCapacity: false

@@ -49,10 +49,7 @@ Production Oxide Karpenter with a synthetic kubelet bridge and pinned KWOK.
 | provider.replicas | int | `1` |  |
 | provider.settings.inventory.enabled | bool | `true` |  |
 | provider.settings.oxide.clusterID | string | `""` |  |
-| provider.settings.oxide.host | string | `""` |  |
-| provider.settings.oxide.project | string | `""` |  |
-| provider.settings.oxide.tokenSecret.key | string | `"token"` |  |
-| provider.settings.oxide.tokenSecret.name | string | `"oxide-api-token"` |  |
+| provider.settings.oxide.secretName | string | `"oxide-credentials"` |  |
 | provider.tolerations[0].effect | string | `"NoSchedule"` |  |
 | provider.tolerations[0].key | string | `"node-role.kubernetes.io/control-plane"` |  |
 | provider.tolerations[0].operator | string | `"Exists"` |  |

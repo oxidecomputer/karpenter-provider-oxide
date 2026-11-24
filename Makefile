@@ -222,9 +222,7 @@ manifests: generate
 
 ## Extra helm options for the dev deployment targets
 CLUSTER_ENDPOINT ?= $(shell $(KUBECTL) config view --minify -o jsonpath='{.clusters[].cluster.server}')
-HELM_OPTS ?= --set settings.oxide.host=${OXIDE_HOST} \
-			--set settings.oxide.project=${OXIDE_PROJECT} \
-			--set controller.resources.requests.cpu=1 \
+HELM_OPTS ?= --set controller.resources.requests.cpu=1 \
 			--set controller.resources.requests.memory=1Gi \
 			--set controller.resources.limits.cpu=1 \
 			--set controller.resources.limits.memory=1Gi \

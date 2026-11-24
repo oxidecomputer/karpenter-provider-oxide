@@ -12,16 +12,17 @@ To install the chart with the release name `karpenter`:
 
 ```console
 helm upgrade --install karpenter oci://ghcr.io/oxidecomputer/helm-charts/karpenter-provider-oxide \
-  --namespace kube-system \
-  --set settings.oxide.host=${OXIDE_HOST} \
-  --set settings.oxide.project=${OXIDE_PROJECT}
+  --namespace kube-system
 ```
 
-The controller reads its Oxide API token from a Secret in the release namespace
-(`settings.oxide.tokenSecret`), which is not created by this chart:
+The controller reads its Oxide credentials from a Secret in the release namespace, named
+for the release (`settings.oxide.secretName`), which is not created by this chart:
 
 ```console
-kubectl create secret --namespace kube-system generic oxide-api-token --from-literal=token=${OXIDE_TOKEN}
+kubectl create secret --namespace kube-system generic karpenter \
+  --from-literal=oxide-host=${OXIDE_HOST} \
+  --from-literal=oxide-token=${OXIDE_TOKEN} \
+  --from-literal=oxide-project=${OXIDE_PROJECT}
 ```
 
 The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be installed first.
@@ -76,15 +77,14 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | serviceMonitor.additionalLabels | object | `{}` | Additional labels for the ServiceMonitor. |
 | serviceMonitor.enabled | bool | `false` | Specifies whether a ServiceMonitor should be created. |
 | serviceMonitor.endpointConfig | object | `{}` | Endpoint configuration for the ServiceMonitor. |
-| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","nodeAttestor":{"url":""},"nodeRepair":{"tolerationDuration":""},"oxide":{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}},"preferencePolicy":"Respect","reaper":{"quarantine":""}}` | Global settings to configure Karpenter. |
+| settings | object | `{"batchIdleDuration":"1s","batchMaxDuration":"10s","featureGates":{"nodeOverlay":false,"nodeRepair":false,"staticCapacity":false,"terminateFirstRepair":false},"instanceTypes":{"incrementPercent":10},"inventory":{"enabled":false},"minValuesPolicy":"Strict","nodeAttestor":{"url":""},"nodeRepair":{"tolerationDuration":""},"oxide":{"clusterID":"","secretName":""},"preferencePolicy":"Respect","reaper":{"quarantine":""}}` | Global settings to configure Karpenter. |
 | settings.batchIdleDuration | string | `"1s"` | The maximum amount of time with no new pending pods that if exceeded ends the current batching window. |
 | settings.batchMaxDuration | string | `"10s"` | The maximum length of a batch window. |
-| settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"spotToSpotConsolidation":false,"staticCapacity":false,"terminateFirstRepair":false}` | Feature gate configuration values. |
+| settings.featureGates | object | `{"nodeOverlay":false,"nodeRepair":false,"staticCapacity":false,"terminateFirstRepair":false}` | Feature gate configuration values. |
 | settings.featureGates.nodeOverlay | bool | `false` | nodeOverlay is ALPHA and is disabled by default. |
 | settings.featureGates.nodeRepair | bool | `false` | nodeRepair is ALPHA and is disabled by default. |
-| settings.featureGates.spotToSpotConsolidation | bool | `false` | spotToSpotConsolidation is ALPHA and is disabled by default. |
 | settings.featureGates.staticCapacity | bool | `false` | staticCapacity is ALPHA and is disabled by default. |
-| settings.featureGates.terminateFirstRepair | bool | `false` | terminateFirstRepair launches the replacement before the broken node is deleted. Requires nodeRepair. |
+| settings.featureGates.terminateFirstRepair | bool | `false` | terminateFirstRepair terminates an unhealthy node before its replacement is ready when the replacement can't launch first. Requires nodeRepair. |
 | settings.instanceTypes | object | `{"incrementPercent":10}` | Instance type catalog generation. |
 | settings.instanceTypes.incrementPercent | int | `10` | Percentage increase between successive CPU and memory values in the generated catalog. |
 | settings.inventory | object | `{"enabled":false}` | Sled inventory configuration. |
@@ -94,18 +94,16 @@ The CRDs live in the separate `karpenter-provider-oxide-crds` chart and must be 
 | settings.nodeAttestor.url | string | `""` | EXPERIMENTAL: URL of the cluster's oxide-node-attestor. Set, kubeadm nodes attest to it for the credential they join with rather than carry a bootstrap token, and their image must provide `oxide-node-join`. |
 | settings.nodeRepair | object | `{"tolerationDuration":""}` | Node repair configuration. |
 | settings.nodeRepair.tolerationDuration | string | `""` | How long a node may stay NotReady before it is rebooted. Defaults to 30m. |
-| settings.oxide | object | `{"clusterID":"","host":"","project":"","tokenSecret":{"key":"token","name":"oxide-api-token"}}` | Oxide API configuration. |
+| settings.oxide | object | `{"clusterID":"","secretName":""}` | Oxide API configuration. |
 | settings.oxide.clusterID | string | `""` | Identity this cluster records on every Oxide resource it creates. |
-| settings.oxide.host | string | `""` | URL of the Oxide API, for example https://oxide.sys.example.com. |
-| settings.oxide.project | string | `""` | Oxide project that Karpenter provisions instances into. |
-| settings.oxide.tokenSecret | object | `{"key":"token","name":"oxide-api-token"}` | Secret in the release namespace holding the Oxide API token. |
+| settings.oxide.secretName | string | `""` | Secret in the release namespace holding `oxide-host`, `oxide-token` and `oxide-project`. Defaults to the release's full name. |
 | settings.preferencePolicy | string | `"Respect"` | How the Karpenter scheduler should treat preferences. |
 | settings.reaper | object | `{"quarantine":""}` | Reaper configuration. |
 | settings.reaper.quarantine | string | `""` | How long an unowned Oxide resource is left alone before it is deleted. Defaults to 5m. |
 | strategy | object | `{"rollingUpdate":{"maxUnavailable":1}}` | Strategy for updating the pod. |
 | terminationGracePeriodSeconds | string | `nil` | Override the default termination grace period for the pod. |
 | tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"}]` | Tolerations to allow the pod to be scheduled to nodes with taints. |
-| topologySpreadConstraints | list | `[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]` | Topology spread constraints to increase the controller resilience by distributing pods across the cluster zones. |
+| topologySpreadConstraints | list | `[]` | Topology spread constraints for the pod. |
 
 ----------------------------------------------
 

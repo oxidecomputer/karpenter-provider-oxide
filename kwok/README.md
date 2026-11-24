@@ -23,15 +23,16 @@ export KUBE_CONTEXT=kind-oxide-kwok
 export NAMESPACE=oxide-kwok
 
 # Set the token without putting it in values.yaml or a shell command argument.
+# OXIDE_HOST must be reachable from controller Pods; localhost in a Pod is NOT
+# the host's Omicron. Configure routing yourself.
 read -rs OXIDE_TOKEN; export OXIDE_TOKEN; echo
 kubectl --context "$KUBE_CONTEXT" create namespace "$NAMESPACE"
 printf '%s' "$OXIDE_TOKEN" | kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" \
-  create secret generic oxide-api-token --from-file=token=/dev/stdin
+  create secret generic oxide-credentials --from-file=oxide-token=/dev/stdin \
+  --from-literal=oxide-host="$OXIDE_HOST" --from-literal=oxide-project="$OXIDE_PROJECT"
 unset OXIDE_TOKEN
 
 cp kwok/examples/values.yaml /tmp/oxide-kwok-values.yaml
-# Edit host/project. The URL must be reachable from controller Pods;
-# localhost in a Pod is NOT the host's Omicron. Configure routing yourself.
 export VALUES=/tmp/oxide-kwok-values.yaml
 make -C kwok apply                     # build/load BOTH images; install the chart
 
@@ -42,10 +43,11 @@ make -C kwok smoke                     # opt-in: exercises the configured Nexus
 ```
 
 `OXIDE_HOST`, `OXIDE_PROJECT`, and optional `OXIDE_CLUSTER_ID` use their ordinary
-production meanings. For Helm, configure them once under
-`provider.settings.oxide.{host,project,clusterID}`; both processes receive the same
-settings and existing Secret reference. The standalone bridge and audit binary
-also accept the ordinary environment variables directly.
+production meanings. For Helm, host and project come from the Secret named by
+`provider.settings.oxide.secretName` and the cluster ID from
+`provider.settings.oxide.clusterID`; both processes receive the same settings.
+The standalone bridge and audit binary also accept the ordinary environment
+variables directly.
 
 The example disables the boot-disk pool so a small test has no prewarmed disks to
 account for. It sets `spec.server` explicitly and exercises kubeadm discovery and

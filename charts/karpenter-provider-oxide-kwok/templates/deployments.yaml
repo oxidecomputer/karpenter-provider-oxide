@@ -63,17 +63,18 @@ spec:
             - --concurrency={{ $root.Values.bridge.concurrency }}
             - --remove-startup-taints={{ join "," $root.Values.bridge.removeStartupTaints }}
           env:
+            {{- $secret := required "provider.settings.oxide.secretName is required" $root.Values.provider.settings.oxide.secretName }}
             - name: OXIDE_HOST
-              value: {{ required "provider.settings.oxide.host is required" $root.Values.provider.settings.oxide.host | quote }}
-            - name: OXIDE_PROJECT
-              value: {{ required "provider.settings.oxide.project is required" $root.Values.provider.settings.oxide.project | quote }}
-            - name: OXIDE_CLUSTER_ID
-              value: {{ $root.Values.provider.settings.oxide.clusterID | quote }}
+              valueFrom:
+                secretKeyRef: {name: {{ $secret | quote }}, key: oxide-host}
             - name: OXIDE_TOKEN
               valueFrom:
-                secretKeyRef:
-                  name: {{ $root.Values.provider.settings.oxide.tokenSecret.name | quote }}
-                  key: {{ $root.Values.provider.settings.oxide.tokenSecret.key | quote }}
+                secretKeyRef: {name: {{ $secret | quote }}, key: oxide-token}
+            - name: OXIDE_PROJECT
+              valueFrom:
+                secretKeyRef: {name: {{ $secret | quote }}, key: oxide-project}
+            - name: OXIDE_CLUSTER_ID
+              value: {{ $root.Values.provider.settings.oxide.clusterID | quote }}
             - name: SYSTEM_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}

@@ -300,8 +300,6 @@ func renderedKWOKConfig(t *testing.T, ctx context.Context, k client.Client) stri
 	rendered, err := exec.Command(helm,
 		"template", "test", "../../../charts/karpenter-provider-oxide-kwok",
 		"--namespace", "default",
-		"--set", "provider.settings.oxide.host=http://nexus.invalid",
-		"--set", "provider.settings.oxide.project=test",
 	).
 		CombinedOutput()
 	if err != nil {

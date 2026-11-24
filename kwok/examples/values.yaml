@@ -2,11 +2,7 @@
 provider:
   settings:
     oxide:
-      host: http://host.docker.internal:12220
-      project: kwok-test
-      tokenSecret:
-        name: oxide-api-token
-        key: token
+      secretName: oxide-credentials
   # When using unpublished local builds, make -C kwok apply supplies these overrides.
   # controller:
   #   image: {repository: karpenter-oxide, tag: dev}

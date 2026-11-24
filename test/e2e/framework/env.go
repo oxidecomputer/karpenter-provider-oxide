@@ -18,6 +18,7 @@ import (
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"golang.org/x/crypto/ssh"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -200,11 +201,17 @@ func (e *Env) controllerEnv(ctx context.Context) (string, string, error) {
 		for _, c := range d.Spec.Template.Spec.Containers {
 			var host, project string
 			for _, v := range c.Env {
-				switch v.Name {
-				case "OXIDE_HOST":
-					host = v.Value
-				case "OXIDE_PROJECT":
-					project = v.Value
+				if v.Name != "OXIDE_HOST" && v.Name != "OXIDE_PROJECT" {
+					continue
+				}
+				value, err := e.envValue(ctx, d.Namespace, v)
+				if err != nil {
+					return "", "", err
+				}
+				if v.Name == "OXIDE_HOST" {
+					host = value
+				} else {
+					project = value
 				}
 			}
 			if host != "" {
@@ -214,6 +221,19 @@ func (e *Env) controllerEnv(ctx context.Context) (string, string, error) {
 		}
 	}
 	return "", "", errors.New("no karpenter Deployment with an OXIDE_HOST env found in the cluster")
+}
+
+func (e *Env) envValue(ctx context.Context, namespace string, v corev1.EnvVar) (string, error) {
+	if v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+		return v.Value, nil
+	}
+	ref := v.ValueFrom.SecretKeyRef
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
+	if err := e.Kube.Get(ctx, key, &secret); err != nil {
+		return "", fmt.Errorf("reading %s from secret %s/%s: %w", v.Name, namespace, ref.Name, err)
+	}
+	return string(secret.Data[ref.Key]), nil
 }
 
 // resolveSubnets copies the cluster's default nodeclass selector, or falls back to the

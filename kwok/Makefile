@@ -55,7 +55,7 @@ test-api:
 	cd '$(ROOT)' && go test ./kwok/controllers/node -run TestAPIServerRegistration -count=1
 verify: test
 	$(HELM) dependency build --skip-refresh '$(ROOT)/charts/karpenter-provider-oxide-kwok'
-	$(HELM) lint '$(ROOT)/charts/karpenter-provider-oxide-kwok' --set provider.settings.oxide.host=http://nexus.invalid --set provider.settings.oxide.project=test
+	$(HELM) lint '$(ROOT)/charts/karpenter-provider-oxide-kwok'
 	shellcheck hack/*.sh
 smoke:
 	./hack/smoke.sh

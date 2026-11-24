@@ -44,6 +44,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "karpenter.oxideSecretName" -}}
+{{- default (include "karpenter.fullname" .) .Values.settings.oxide.secretName }}
+{{- end }}
+
 {{- define "karpenter.controller.image" -}}
 {{- if .Values.controller.image.digest }}
 {{- printf "%s:%s@%s" .Values.controller.image.repository (default .Chart.AppVersion .Values.controller.image.tag) .Values.controller.image.digest }}
@@ -95,23 +99,3 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- include "karpenter.patchLabelSelector" (merge (dict "_target" $constraint) $) }}
 {{- end }}
 {{- end }}
-
-{{- define "karpenter.outputPathsList" -}}
-{{ $paths := list -}}
-{{- range .Values.logConfig.outputPaths -}}
-    {{- if not (has (printf "%s" . | quote) $paths) -}}
-        {{- $paths = printf "%s" . | quote  | append $paths -}}
-    {{- end -}}
-{{- end -}}
-{{ $paths | join ", " }}
-{{- end -}}
-
-{{- define "karpenter.errorOutputPathsList" -}}
-{{ $paths := list -}}
-{{- range .Values.logConfig.errorOutputPaths -}}
-    {{- if not (has (printf "%s" . | quote) $paths) -}}
-        {{- $paths = printf "%s" . | quote  | append $paths -}}
-    {{- end -}}
-{{- end -}}
-{{ $paths | join ", " }}
-{{- end -}}

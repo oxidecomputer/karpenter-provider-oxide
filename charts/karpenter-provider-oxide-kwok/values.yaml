@@ -1,5 +1,5 @@
 # A single release installs the existing provider and CRD charts, bridge and KWOK.
-# Oxide settings are shared with the bridge; tokens only come from an existing Secret.
+# Oxide settings are shared with the bridge; credentials only come from an existing Secret.
 provider:
   replicas: 1
   bootstrap:
@@ -9,12 +9,8 @@ provider:
       enabled: false
   settings:
     oxide:
-      host: ""
-      project: ""
+      secretName: oxide-credentials
       clusterID: ""
-      tokenSecret:
-        name: oxide-api-token
-        key: token
     inventory:
       enabled: true
   controller:

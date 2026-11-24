@@ -7,6 +7,16 @@ Karpenter scales up your nodes when needed and then back down when they're not.
 
 ## Installation
 
+Karpenter requires Oxide API credentials:
+
+```console
+kubectl create secret generic karpenter \
+  --namespace kube-system \
+  --from-literal=oxide-host=${OXIDE_HOST} \
+  --from-literal=oxide-token=${OXIDE_TOKEN} \
+  --from-literal=oxide-project=${OXIDE_PROJECT}
+```
+
 Install the CRDs and the Karpenter provider for Oxide from their GHCR OCI charts:
 
 ```console
@@ -17,17 +27,7 @@ helm upgrade --install karpenter-crds \
 ```console
 helm upgrade --install karpenter \
   --namespace kube-system \
-  --set settings.oxide.host=${OXIDE_HOST} \
-  --set settings.oxide.project=${OXIDE_PROJECT} \
   oci://ghcr.io/oxidecomputer/helm-charts/karpenter-provider-oxide
-```
-
-Karpenter uses an Oxide token secret to manage instances via the Oxide API:
-
-```console
-kubectl create secret generic oxide-api-token \
-  --namespace kube-system \
-  --from-literal=token=${OXIDE_TOKEN}
 ```
 
 ## Local simulation with KWOK
