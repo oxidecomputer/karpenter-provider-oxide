@@ -74,7 +74,7 @@ checksum:
   name_template: "checksums.txt"
   extra_files:
     - glob: ./_artifacts/helm/*.tgz
-    - glob: ./_artifacts/oxide-kwok-*.tar.gz
+    - glob: ./_artifacts/oxide-kwok-{{ .Version }}.tar.gz
 
 release:
   # Snapshot tags (vX.Y.Z-<suffix>) publish as prereleases; see `make snapshot-tag`.
@@ -82,4 +82,4 @@ release:
   make_latest: "{{ not .Prerelease }}"
   extra_files:
     - glob: ./_artifacts/helm/*.tgz
-    - glob: ./_artifacts/oxide-kwok-*.tar.gz
+    - glob: ./_artifacts/oxide-kwok-{{ .Version }}.tar.gz

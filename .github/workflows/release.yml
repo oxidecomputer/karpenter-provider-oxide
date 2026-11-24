@@ -29,13 +29,10 @@ jobs:
             go.sum
             tools/go.sum
 
-      - name: Cache local tool binaries
-        uses: actions/cache@v6
-        with:
-          path: bin
-          key: tools-release-${{ runner.os }}-${{ hashFiles('Makefile', 'tools/go.sum') }}
-          restore-keys: |
-            tools-release-${{ runner.os }}-
+      # Go trims build cache entries older than 5 days by mtime, which empties
+      # a restored cache of that age. A fresh trim.txt skips the trim.
+      - name: Keep restored Go build cache
+        run: mkdir -p "$(go env GOCACHE)" && date +%s > "$(go env GOCACHE)/trim.txt"
 
       - name: Test
         run: make ci-verify
