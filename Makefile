@@ -16,7 +16,6 @@ MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 TOOLS_MOD := $(MAKEFILE_PATH)/tools/go.mod
 GO_TOOL := go tool -modfile=$(TOOLS_MOD)
 KARPENTER_NAMESPACE ?= kube-system
-HELM_VERSION ?= v4.3.1
 SHELLCHECK_VERSION ?= v0.11.0
 
 LDFLAGS ?= -ldflags=-X=sigs.k8s.io/karpenter/pkg/operator.Version=$(VERSION)
@@ -138,11 +137,11 @@ SHELLCHECK ?= $(LOCALBIN)/shellcheck
 GOVULNCHECK ?= $(GO_TOOL) govulncheck
 GO_LICENSES ?= $(GO_TOOL) go-licenses
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint-custom
-HELM ?= $(LOCALBIN)/helm
+HELM ?= $(GO_TOOL) helm
 HELM_DOCS ?= $(GO_TOOL) helm-docs
 
 .PHONY: tools
-tools: kubectl helm shellcheck $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
+tools: kubectl shellcheck $(LOCALBIN) golangci-lint ## Install all required dev tools to the repo's local bin/
 	GOBIN="$(LOCALBIN)" go install -modfile=$(TOOLS_MOD) tool
 
 K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
@@ -155,12 +154,6 @@ kubectl: $(LOCALBIN)
 		v=$$(curl -fsSL "https://dl.k8s.io/release/stable-$(K8S_VERSION).txt"); \
 		curl -fsSL -o "$(LOCALBIN)/kubectl" "https://dl.k8s.io/release/$$v/bin/$$(go env GOOS)/$$(go env GOARCH)/kubectl"; \
 		chmod +x "$(LOCALBIN)/kubectl"
-
-.PHONY: helm
-helm: $(LOCALBIN)
-	curl -fsSL -o $(LOCALBIN)/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
-	chmod 700 $(LOCALBIN)/get_helm.sh
-	HELM_INSTALL_DIR=$(LOCALBIN) USE_SUDO=false $(LOCALBIN)/get_helm.sh --version $(HELM_VERSION)
 
 .PHONY: shellcheck
 shellcheck: $(LOCALBIN)
@@ -216,7 +209,7 @@ manifests: generate
 		--destination $(ARTIFACTS)/helm
 	test -f $(ARTIFACTS)/helm/$(CONTROLLER_CHART_NAME)-$(VERSION).tgz
 	test -f $(ARTIFACTS)/helm/$(CRD_CHART_NAME)-$(VERSION).tgz
-	$(MAKE) -C kwok bundle VERSION=$(VERSION) ARTIFACTS=$(ARTIFACTS) HELM=$(HELM)
+	$(MAKE) -C kwok bundle VERSION=$(VERSION) ARTIFACTS=$(ARTIFACTS) HELM='$(HELM)'
 
 ##@ Dev Deployment
 
