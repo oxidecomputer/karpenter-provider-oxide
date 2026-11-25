@@ -66,7 +66,8 @@ func clusterInfo(t *testing.T) *corev1.ConfigMap {
 		t.Fatal(err)
 	}
 	config := clientcmdapi.NewConfig()
-	config.Clusters["test"] = &clientcmdapi.Cluster{
+	// kubeadm publishes the cluster under the empty name.
+	config.Clusters[""] = &clientcmdapi.Cluster{
 		Server:                   "https://10.0.0.1:6443",
 		CertificateAuthorityData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 	}
@@ -240,6 +241,10 @@ func TestJoinDiscoversFromAKubeconfigCarryingTheToken(t *testing.T) {
 	config, err := clientcmd.Load([]byte(body))
 	if err != nil {
 		t.Fatalf("the discovery kubeconfig does not parse: %v", err)
+	}
+	// kubeadm validates the file before it discovers anything from it.
+	if err := clientcmd.Validate(*config); err != nil {
+		t.Fatalf("kubeadm would reject the discovery kubeconfig: %v", err)
 	}
 	cluster := config.Clusters[config.Contexts[config.CurrentContext].Cluster]
 	if cluster.Server != "https://10.0.0.1:6443" || len(cluster.CertificateAuthorityData) == 0 {

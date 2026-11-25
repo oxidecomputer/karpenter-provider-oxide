@@ -184,9 +184,7 @@ func (b *Bootstrapper) UserData(
 	}
 	// Token discovery reads cluster-info anonymously, which a cluster may
 	// not allow; a kubeconfig carrying the CA and the token needs no such read.
-	discovery, err := discoveryKubeconfig(
-		nodeClass.Status.Server, clusterInfo.clusterName, clusterInfo.caCert, token,
-	)
+	discovery, err := discoveryKubeconfig(nodeClass.Status.Server, clusterInfo.caCert, token)
 	if err != nil {
 		return "", err
 	}
@@ -300,16 +298,18 @@ func caCertHashes(caCertData []byte) ([]string, error) {
 
 // discoveryKubeconfig is the cluster and the bootstrap token as a kubeconfig,
 // which kubeadm both discovers the cluster from and joins with.
-func discoveryKubeconfig(server, clusterName string, caCert []byte, token string) (string, error) {
-	const user = "tls-bootstrap-token-user"
+func discoveryKubeconfig(server string, caCert []byte, token string) (string, error) {
+	// Not cluster-info's own cluster name: kubeadm publishes it empty, and
+	// rejects a context named that.
+	const cluster, user = "kubernetes", "tls-bootstrap-token-user"
 	config := clientcmdapi.NewConfig()
-	config.Clusters[clusterName] = &clientcmdapi.Cluster{
+	config.Clusters[cluster] = &clientcmdapi.Cluster{
 		Server:                   "https://" + server,
 		CertificateAuthorityData: caCert,
 	}
 	config.AuthInfos[user] = &clientcmdapi.AuthInfo{Token: token}
-	config.Contexts[clusterName] = &clientcmdapi.Context{Cluster: clusterName, AuthInfo: user}
-	config.CurrentContext = clusterName
+	config.Contexts[cluster] = &clientcmdapi.Context{Cluster: cluster, AuthInfo: user}
+	config.CurrentContext = cluster
 	out, err := clientcmd.Write(*config)
 	if err != nil {
 		return "", fmt.Errorf("unable to write the discovery kubeconfig: %w", err)
